@@ -17,15 +17,26 @@ CARD_TESTING_METADATA_KEY = "p1.4.card_testing.v1"
 
 @dataclass(frozen=True)
 class FraudSummary:
-    pattern_count: int
+    campaign_count: int
     small_attempt_count: int
     approved_small_attempt_count: int
     declined_small_attempt_count: int
     larger_followup_count: int
     approved_larger_followup_count: int
     benign_control_transaction_count: int
+    approved_benign_control_count: int
+    declined_benign_control_count: int
     transaction_count: int
     lifecycle_event_count: int
+
+
+def _campaign_dates(start_date: date, t0_date: date, interval_days: int) -> list[date]:
+    dates: list[date] = []
+    current = start_date
+    while current < t0_date:
+        dates.append(current)
+        current += timedelta(days=interval_days)
+    return dates
 
 
 def _next_transaction_id(
@@ -158,9 +169,8 @@ def generate_card_testing(
             "SELECT merchant_id FROM merchants WHERE episode_id = 'base' ORDER BY merchant_id"
         )
     ]
-    pattern_count = mechanism.patterns_per_run.value
-    if len(customer_ids) < pattern_count * 2:
-        raise ValueError("card-testing generation requires distinct base customers for fraud and controls")
+    if not customer_ids:
+        raise ValueError("generate_world must create base customers before fraud generation")
     if not merchant_ids:
         raise ValueError("generate_world must create base merchants before fraud generation")
 
@@ -173,13 +183,22 @@ def generate_card_testing(
     txn_ids = set(existing_txn_ids)
     event_ids = set(existing_event_ids)
 
-    selection_rng = keyed_rng(run_seed, "p1.fraud.card_testing.entity_selection")
-    selected_customers = selection_rng.sample(customer_ids, pattern_count * 2)
-    selected_merchants = [selection_rng.choice(merchant_ids) for _ in range(pattern_count * 2)]
-
     business_timezone = ZoneInfo(config.timeline.business_timezone.value)
+    start_date = config.timeline.start_business_date.value
     t0 = config.timeline.t0_business_date.value
-    pattern_date = t0 - timedelta(days=1)
+    campaign_dates = _campaign_dates(
+        start_date, t0, mechanism.campaign_interval_days.value
+    )
+    if not campaign_dates:
+        raise ValueError("card-testing generation requires at least one pre-T0 campaign date")
+    campaign_count = len(campaign_dates)
+    control_date = t0 - timedelta(days=1)
+    control_customer = keyed_rng(
+        run_seed, "p1.fraud.benign_control.customer"
+    ).choice(customer_ids)
+    control_merchant = keyed_rng(
+        run_seed, "p1.fraud.benign_control.merchant"
+    ).choice(merchant_ids)
     window = timedelta(minutes=mechanism.window_minutes.value)
     followup_delay = timedelta(seconds=mechanism.followup_delay_seconds.value)
     authorization_delay = timedelta(seconds=config.transactions.authorization_delay_seconds.value)
@@ -194,24 +213,44 @@ def generate_card_testing(
     larger_followup_count = 0
     approved_larger_followup_count = 0
     benign_control_transaction_count = 0
+    approved_benign_control_count = 0
+    declined_benign_control_count = 0
     transaction_count = 0
     lifecycle_event_count = 0
 
     operational.execute("SAVEPOINT p1_4_card_testing")
     private.execute("SAVEPOINT p1_4_card_testing_metadata")
     try:
-        for pattern_index in range(pattern_count):
+        for pattern_index, campaign_date in enumerate(campaign_dates):
+            victim_rng = keyed_rng(
+                run_seed,
+                "p1.fraud.card_testing.victim",
+                campaign_date.isoformat(),
+            )
+            campaign_customer = victim_rng.choice(customer_ids)
+            campaign_merchant = keyed_rng(
+                run_seed,
+                "p1.fraud.card_testing.merchant",
+                campaign_date.isoformat(),
+            ).choice(merchant_ids)
             for role in ("fraud", "benign_control"):
-                entity_slot = pattern_index * 2 + int(role == "benign_control")
-                customer_id = selected_customers[entity_slot]
-                merchant_id = selected_merchants[entity_slot]
+                if role == "benign_control" and pattern_index != 0:
+                    continue
+                if role == "fraud":
+                    group_date = campaign_date
+                    customer_id = campaign_customer
+                    merchant_id = campaign_merchant
+                else:
+                    group_date = control_date
+                    customer_id = control_customer
+                    merchant_id = control_merchant
                 component = (
                     "p1.fraud.card_testing"
                     if role == "fraud"
                     else "p1.fraud.benign_control"
                 )
                 group_start = datetime.combine(
-                    pattern_date,
+                    group_date,
                     time(mechanism.start_hour_local.value, 0),
                     tzinfo=business_timezone,
                 )
@@ -235,7 +274,7 @@ def generate_card_testing(
                         mechanism.minimum_attempt_amount.value,
                         mechanism.maximum_attempt_amount.value,
                     )
-                    txn_id = _next_transaction_id(pattern_date, customer_id, txn_ids)
+                    txn_id = _next_transaction_id(group_date, customer_id, txn_ids)
                     if role == "fraud":
                         outcome_rng = keyed_rng(
                             run_seed,
@@ -263,20 +302,27 @@ def generate_card_testing(
                     )
                     small_ids.append(txn_id)
                     transaction_count += 1
+                    if approved:
+                        group_approved_small += 1
+                    else:
+                        group_declined_small += 1
                     if role == "fraud":
                         small_attempt_count += 1
                         if approved:
                             approved_small_attempt_count += 1
-                            group_approved_small += 1
                         else:
                             declined_small_attempt_count += 1
-                            group_declined_small += 1
                     else:
                         benign_control_transaction_count += 1
+                        if approved:
+                            approved_benign_control_count += 1
+                        else:
+                            declined_benign_control_count += 1
 
                 metadata: dict[str, object] = {
                     "role": role,
                     "pattern_id": f"card-testing-{pattern_index:04d}-{role}",
+                    "business_date": group_date.isoformat(),
                     "customer_id": customer_id,
                     "merchant_id": merchant_id,
                     "small_transaction_ids": small_ids,
@@ -297,7 +343,7 @@ def generate_card_testing(
                         mechanism.maximum_followup_amount.value,
                     )
                     followup_txn_id = _next_transaction_id(
-                        pattern_date, customer_id, txn_ids
+                        group_date, customer_id, txn_ids
                     )
                     followup_outcome_rng = keyed_rng(
                         run_seed, "p1.fraud.card_testing.approval", pattern_index, "followup"
@@ -345,13 +391,15 @@ def generate_card_testing(
                 lifecycle_event_count += group_event_count
 
         summary = FraudSummary(
-            pattern_count=pattern_count,
+            campaign_count=campaign_count,
             small_attempt_count=small_attempt_count,
             approved_small_attempt_count=approved_small_attempt_count,
             declined_small_attempt_count=declined_small_attempt_count,
             larger_followup_count=larger_followup_count,
             approved_larger_followup_count=approved_larger_followup_count,
             benign_control_transaction_count=benign_control_transaction_count,
+            approved_benign_control_count=approved_benign_control_count,
+            declined_benign_control_count=declined_benign_control_count,
             transaction_count=transaction_count,
             lifecycle_event_count=lifecycle_event_count,
         )
@@ -361,10 +409,11 @@ def generate_card_testing(
             {
                 "key": CARD_TESTING_METADATA_KEY,
                 "value_json": {
-                    "algorithm": "p1.4-card-testing-v1",
+                    "algorithm": "p1.4-card-testing-v2",
                     "seed": run_seed,
                     "mechanism": "card_testing",
                     "channel": mechanism.channel.value,
+                    "campaign_interval_days": mechanism.campaign_interval_days.value,
                     "summary": asdict(summary),
                     "groups": group_metadata,
                 },

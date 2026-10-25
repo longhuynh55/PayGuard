@@ -215,7 +215,7 @@ class TransactionConfig(StrictModel):
 
 class CardTestingConfig(StrictModel):
     channel: ConfigValue[str]
-    patterns_per_run: ConfigValue[PositiveInt]
+    campaign_interval_days: ConfigValue[PositiveInt]
     start_hour_local: ConfigValue[Annotated[int, Field(ge=0, le=23)]]
     benign_control_delay_minutes: ConfigValue[PositiveInt]
     approval_probability: ConfigValue[Probability]
@@ -319,8 +319,10 @@ class SimulatorConfig(StrictModel):
             raise ValueError("fraud.card_testing attempt amounts must be within the transaction amount range")
         if card_testing.maximum_followup_amount.value > self.transactions.maximum_amount.value:
             raise ValueError("fraud.card_testing follow-up amounts must be within the transaction amount range")
-        if card_testing.patterns_per_run.value * 2 > self.profiles["smoke"].customer_count.value:
-            raise ValueError("fraud.card_testing requires distinct smoke customers for fraud and benign controls")
+        if card_testing.campaign_interval_days.value > (
+            self.timeline.t0_business_date.value - self.timeline.start_business_date.value
+        ).days:
+            raise ValueError("fraud.card_testing campaign interval must allow a pre-T0 campaign")
         attempt_window_seconds = card_testing.window_minutes.value * 60
         lifecycle_delay_seconds = (
             self.transactions.authorization_delay_seconds.value

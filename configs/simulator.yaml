@@ -193,13 +193,13 @@ fraud:
       provenance:
         kind: assumption
         reference: P1.4 round 1 scope; channel code selected for this simulator mechanism.
-    patterns_per_run:
-      value: 1
-      unit: card-testing patterns per generator run
-      rationale: One pattern keeps the P1.4 smoke diagnostic small; this is not a benchmark prevalence estimate.
+    campaign_interval_days:
+      value: 7
+      unit: base business days between card-testing campaigns
+      rationale: One campaign every seven base business days distributes smoke fraud examples across the pre-T0 history; this is not a benchmark prevalence estimate.
       provenance:
         kind: assumption
-        reference: P1.4 round 1 smoke diagnostic; no population rate is claimed.
+        reference: P1.4 round 1 support assumption; no population rate is claimed.
     start_hour_local:
       value: 9
       unit: local wall-clock hour in Asia/Ho_Chi_Minh
