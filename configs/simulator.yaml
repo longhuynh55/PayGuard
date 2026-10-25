@@ -186,6 +186,34 @@ transactions:
 
 fraud:
   card_testing:
+    channel:
+      value: card
+      unit: channel code
+      rationale: Card-testing attempts use the existing transaction channel field with the card code.
+      provenance:
+        kind: assumption
+        reference: P1.4 round 1 scope; channel code selected for this simulator mechanism.
+    campaign_interval_days:
+      value: 7
+      unit: base business days between card-testing campaigns
+      rationale: One campaign every seven base business days distributes smoke fraud examples across the pre-T0 history; this is not a benchmark prevalence estimate.
+      provenance:
+        kind: assumption
+        reference: P1.4 round 1 support assumption; no population rate is claimed.
+    start_hour_local:
+      value: 9
+      unit: local wall-clock hour in Asia/Ho_Chi_Minh
+      rationale: Fixed synthetic start time for the card-testing attempt window.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no time-of-day estimate is claimed.
+    benign_control_delay_minutes:
+      value: 120
+      unit: minutes after card-testing start
+      rationale: Places the benign small-transaction control later on the same business date.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no time-of-day estimate is claimed.
     approval_probability:
       value: 0.05
       unit: probability in [0, 1]
@@ -193,6 +221,13 @@ fraud:
       provenance:
         kind: assumption
         reference: Simulator mechanism assumption; not an empirical estimate.
+    followup_approval_probability:
+      value: 0.8
+      unit: probability in [0, 1]
+      rationale: Assumed approval chance for the larger transaction after small card checks.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; not an empirical estimate.
     attempts_per_card:
       value: 8
       unit: attempts per tested card
@@ -207,6 +242,41 @@ fraud:
       provenance:
         kind: assumption
         reference: Simulator mechanism assumption; not an empirical estimate.
+    minimum_attempt_amount:
+      value: 1000
+      unit: integer VND
+      rationale: Inclusive lower bound for small card-testing attempts.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no transaction amount distribution is claimed.
+    maximum_attempt_amount:
+      value: 10000
+      unit: integer VND
+      rationale: Inclusive upper bound for small card-testing attempts.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no transaction amount distribution is claimed.
+    minimum_followup_amount:
+      value: 100000
+      unit: integer VND
+      rationale: Inclusive lower bound for the larger transaction following the small attempts.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no transaction amount distribution is claimed.
+    maximum_followup_amount:
+      value: 5000000
+      unit: integer VND
+      rationale: Inclusive upper bound for the larger transaction following the small attempts.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no transaction amount distribution is claimed.
+    followup_delay_seconds:
+      value: 60
+      unit: seconds after the attempt window
+      rationale: Leaves a short observable gap between the dense small attempts and the larger follow-up.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no behavioral estimate is claimed.
 
 label_reporting:
   maturity_horizon_days:

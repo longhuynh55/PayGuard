@@ -214,9 +214,48 @@ class TransactionConfig(StrictModel):
 
 
 class CardTestingConfig(StrictModel):
+    channel: ConfigValue[str]
+    campaign_interval_days: ConfigValue[PositiveInt]
+    start_hour_local: ConfigValue[Annotated[int, Field(ge=0, le=23)]]
+    benign_control_delay_minutes: ConfigValue[PositiveInt]
     approval_probability: ConfigValue[Probability]
+    followup_approval_probability: ConfigValue[Probability]
     attempts_per_card: ConfigValue[PositiveInt]
     window_minutes: ConfigValue[PositiveInt]
+    minimum_attempt_amount: ConfigValue[PositiveInt]
+    maximum_attempt_amount: ConfigValue[PositiveInt]
+    minimum_followup_amount: ConfigValue[PositiveInt]
+    maximum_followup_amount: ConfigValue[PositiveInt]
+    followup_delay_seconds: ConfigValue[PositiveInt]
+
+    @model_validator(mode="after")
+    def card_testing_parameters_are_ordered(self) -> CardTestingConfig:
+        if self.channel.value != "card":
+            raise ValueError("fraud.card_testing channel is fixed to 'card' for P1.4")
+        if self.minimum_attempt_amount.unit != MVP_MONEY_UNIT:
+            raise ValueError(f"fraud.card_testing amount unit must be exactly '{MVP_MONEY_UNIT}'")
+        if self.maximum_attempt_amount.unit != MVP_MONEY_UNIT:
+            raise ValueError(f"fraud.card_testing amount unit must be exactly '{MVP_MONEY_UNIT}'")
+        if self.minimum_followup_amount.unit != MVP_MONEY_UNIT:
+            raise ValueError(f"fraud.card_testing amount unit must be exactly '{MVP_MONEY_UNIT}'")
+        if self.maximum_followup_amount.unit != MVP_MONEY_UNIT:
+            raise ValueError(f"fraud.card_testing amount unit must be exactly '{MVP_MONEY_UNIT}'")
+        if self.minimum_attempt_amount.value > self.maximum_attempt_amount.value:
+            raise ValueError("fraud.card_testing attempt amount range must be ordered")
+        if self.minimum_followup_amount.value > self.maximum_followup_amount.value:
+            raise ValueError("fraud.card_testing follow-up amount range must be ordered")
+        if self.minimum_followup_amount.value <= self.maximum_attempt_amount.value:
+            raise ValueError("fraud.card_testing follow-up amount must exceed every small attempt")
+        if self.window_minutes.value * 60 < self.attempts_per_card.value:
+            raise ValueError("fraud.card_testing window must allow distinct second-level attempt times")
+        if self.start_hour_local.unit != "local wall-clock hour in Asia/Ho_Chi_Minh":
+            raise ValueError("fraud.card_testing start_hour_local must use Vietnam local wall-clock hours")
+        if (
+            self.start_hour_local.value * 60 + self.benign_control_delay_minutes.value
+            >= 24 * 60
+        ):
+            raise ValueError("fraud.card_testing benign control must start on the same business date")
+        return self
 
 
 class FraudConfig(StrictModel):
@@ -275,6 +314,34 @@ class SimulatorConfig(StrictModel):
                 raise ValueError(f"{profile_name} customer_count is below the configured minimum")
             if profile.merchant_count.value < self.world.minimum_merchant_count.value:
                 raise ValueError(f"{profile_name} merchant_count is below the configured minimum")
+        card_testing = self.fraud.card_testing
+        if card_testing.minimum_attempt_amount.value < self.transactions.minimum_amount.value:
+            raise ValueError("fraud.card_testing attempt amounts must be within the transaction amount range")
+        if card_testing.maximum_followup_amount.value > self.transactions.maximum_amount.value:
+            raise ValueError("fraud.card_testing follow-up amounts must be within the transaction amount range")
+        if card_testing.campaign_interval_days.value > (
+            self.timeline.t0_business_date.value - self.timeline.start_business_date.value
+        ).days:
+            raise ValueError("fraud.card_testing campaign interval must allow a pre-T0 campaign")
+        attempt_window_seconds = card_testing.window_minutes.value * 60
+        lifecycle_delay_seconds = (
+            self.transactions.authorization_delay_seconds.value
+            + self.transactions.settlement_delay_minutes.value * 60
+        )
+        fraud_end_seconds = (
+            card_testing.start_hour_local.value * 60 * 60
+            + attempt_window_seconds
+            + card_testing.followup_delay_seconds.value
+            + lifecycle_delay_seconds
+        )
+        control_end_seconds = (
+            card_testing.start_hour_local.value * 60 * 60
+            + card_testing.benign_control_delay_minutes.value * 60
+            + attempt_window_seconds
+            + lifecycle_delay_seconds
+        )
+        if max(fraud_end_seconds, control_end_seconds) >= 24 * 60 * 60:
+            raise ValueError("fraud.card_testing lifecycle must finish before the next business date")
         return self
 
     def scale_for(self, profile: ProfileName) -> ScaleProfile:
