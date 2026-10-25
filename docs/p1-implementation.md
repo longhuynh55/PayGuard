@@ -131,7 +131,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Hoàn tất vòng 2:** từng cơ chế sinh được ví dụ có thể kiểm tra bằng dữ liệu; báo diagnostic artefact và giới hạn simulator. Một feature phân biệt mạnh phải được giải thích từ hành vi/dữ liệu khả dụng, không tự coi AUC cao hay thấp là bằng chứng duy nhất về leakage.
 - **Vòng 1 đã bàn giao:** `simulator/fraud.py` rải chuỗi card testing trước T0 theo `campaign_interval_days`, trên channel `card`, cùng ca benign nhiều giao dịch nhỏ qua `transactions` và `transaction_events`; victim được chọn bằng RNG fraud riêng và kết quả authorization lấy mẫu theo config. Metadata vai trò, cơ chế, ID nhóm/giao dịch và seed chỉ nằm trong private `run_metadata`. Test xác nhận schema operational không đổi, chữ ký và support theo split P2 từ dữ liệu quan sát, integrity fraud/control, tái lập và lịch sử nền không đổi khi bỏ qua generator fraud. Giới hạn hiện có: `customer_id` đại diện cho cùng một thẻ vì schema chưa có card token. Config provenance và hợp đồng hành vi nằm tại [`configs/simulator.yaml`](../configs/simulator.yaml) và [`data.md`](data.md).
 
-### P1.5 — Label events, snapshot và label tail (`todo`)
+### P1.5 — Label events, snapshot và label tail (`round1-done`)
 
 - **Mục tiêu:** nhãn quan sát được xuất hiện đúng nguồn và đúng thời điểm; pending không bị chuyển thành âm trước policy.
 - **Phụ thuộc:** P1.4; fixture snapshot của P1.2.
@@ -139,6 +139,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Triển khai:** sinh reporting và độ trễ từ config; snapshot theo trạng thái MVP trong `data.md`. Giữ khả năng fraud chưa bao giờ được báo trong truth riêng. Label tail không tạo thêm giao dịch cho feature. Chỉ mô phỏng feedback điều tra viên theo cơ chế được khai báo; nếu phụ thuộc alert model thực tế thì chờ P2/P3, không giả gọi model chưa có.
 - **Kiểm tra:** ngay trước/đúng mốc trưởng thành; nhãn reported nhưng chưa available; fraud về sau H; fraud không được báo; nguồn nhãn phù hợp kênh; mỗi giao dịch tối đa một kết luận MVP. Quan sát nhãn dài hơn không làm thay đổi feature của thời điểm quá khứ.
 - **Hoàn tất:** bảng snapshot và báo cáo độ trễ đúng trên fixture và smoke; tách số quan sát được khỏi số do oracle evaluator biết. Không triển khai sửa nhãn/disputed thuộc phần mở rộng.
+- **Vòng 1 đã bàn giao:** `simulator/labels.py` sinh kết luận cho giao dịch nền P1.3/P1.4 bằng RNG riêng; delay đều rời rạc theo cấu hình; truth và trạng thái không báo chỉ nằm trong private `run_metadata`. Snapshot dùng `read_as_of`, trả bốn trạng thái H = 90; `label_delay_report` tách snapshot quan sát, oracle private và censoring. Label tail kết thúc sau giao dịch cuối ít nhất H (và đủ cận độ trễ cấu hình), không thêm giao dịch. Không mô phỏng feedback điều tra viên vì cần alert model P2/P3.
 
 ### P1.6 — Injector, calendar và truth sự cố (`todo`)
 
@@ -199,4 +200,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.5 — nhãn.** P1.4 vòng 1 đã bàn giao card testing và ca benign đối chứng; vòng 2 của P1.3 và P1.4 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
+**P1.6 — injector, calendar và truth sự cố.** P1.5 vòng 1 đã bàn giao nhãn, snapshot và label tail; vòng 2 của P1.3 và P1.4 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.

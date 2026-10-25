@@ -266,6 +266,7 @@ class LabelReportingConfig(StrictModel):
     maturity_horizon_days: ConfigValue[PositiveInt]
     minimum_delay_days: ConfigValue[NonNegativeInt]
     maximum_delay_days: ConfigValue[NonNegativeInt]
+    delay_distribution: ConfigValue[Literal["uniform_integer"]]
     probability_reported: ConfigValue[Probability]
 
     @field_validator("maturity_horizon_days")
