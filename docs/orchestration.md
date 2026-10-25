@@ -56,3 +56,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 00:10 | P1.1 | Review vòng 1 CHANGES_REQUIRED (3 finding chặn: H, timezone, VND) → coder sửa, 17 test → review vòng 2 PASS → merge. Conflict ở bảng trạng thái MASTER (status P1 vs link sub-plan P2/P3) → gộp tay giữ cả hai; luật conflict được làm rõ |
 | 26/10 00:12 | P1.2 | Codex khởi động lỗi `workspace routing discovery timed out` (log daemon: request tới OpenAI timeout lặp lại) → thử lại, lần 1 OK. Coder xong: 30 test; commit `49ed6ae`; review vòng 1 đang chạy |
 | 26/10 00:25 | P1.2 | Review vòng 1 CHANGES_REQUIRED: 4 finding chặn (lộ trạng thái tương lai, PK nhận NULL, UPDATE xuyên episode, amount NOT NULL chặn kịch bản NULL) → coder đang sửa |
+| 26/10 00:32 | P1.2 | Coder sửa 4 finding (36 test, commit `55451a7`). Review vòng 2 CHANGES_REQUIRED: 1 finding chặn mới — event vòng đời của giao dịch base qua ranh giới T0 bị ẩn vĩnh viễn. **DỪNG: hết 2 vòng, chờ người dùng.** |
