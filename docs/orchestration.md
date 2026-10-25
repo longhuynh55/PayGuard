@@ -40,6 +40,7 @@ Quyết định Claude tự chọn khi chạy không người (người dùng đ
 
 | Thời điểm | Task | Câu hỏi | Đã chọn | Lý do |
 |---|---|---|---|---|
+| 26/10 00:25 | P1.2 | Trạng thái vòng đời giao dịch (authorized/settled…) lộ tương lai nếu nằm trên cùng một hàng | Bảng append-only `transaction_events`, mỗi sự kiện có `available_at` riêng | Khớp mẫu label events append-only; hoãn cả hàng tới settlement sẽ ẩn giao dịch đang xử lý khỏi monitoring |
 | 26/10 00:17 | P1.2 | Engine lưu trữ: SQLite hay DuckDB (`docs/overview.md` ghi DuckDB) | Coder chọn **SQLite** (thư viện chuẩn) cho storage P1 | Không cần dependency; DuckDB đọc trực tiếp được file SQLite nên P2 vẫn có thể tính feature bằng DuckDB. Nếu muốn thống nhất DuckDB ngay → đổi ở vòng 2 P1.2 |
 
 ## Môi trường của coder
@@ -54,3 +55,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 00:01 | P1.1 r1 | Coder bị chặn ở `git add` (.git ngoài sandbox) → đổi quy trình: orchestrator commit. 10 test pass; commit `1fd078b`; review vòng 1 đang chạy |
 | 26/10 00:10 | P1.1 | Review vòng 1 CHANGES_REQUIRED (3 finding chặn: H, timezone, VND) → coder sửa, 17 test → review vòng 2 PASS → merge. Conflict ở bảng trạng thái MASTER (status P1 vs link sub-plan P2/P3) → gộp tay giữ cả hai; luật conflict được làm rõ |
 | 26/10 00:12 | P1.2 | Codex khởi động lỗi `workspace routing discovery timed out` (log daemon: request tới OpenAI timeout lặp lại) → thử lại, lần 1 OK. Coder xong: 30 test; commit `49ed6ae`; review vòng 1 đang chạy |
+| 26/10 00:25 | P1.2 | Review vòng 1 CHANGES_REQUIRED: 4 finding chặn (lộ trạng thái tương lai, PK nhận NULL, UPDATE xuyên episode, amount NOT NULL chặn kịch bản NULL) → coder đang sửa |
