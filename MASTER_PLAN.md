@@ -1,6 +1,6 @@
 # PayGuard — Master Plan
 
-> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 25/10/2026.
+> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 26/10/2026.
 > Thiết kế chi tiết nằm trong `docs/` theo module; **mỗi nội dung chỉ viết ở một chỗ**, file khác link tới.
 
 | Tài liệu | Nội dung |
@@ -36,7 +36,7 @@
 | Stage | Module | Trạng thái |
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; runtime P1–P4 chưa được triển khai |
-| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md), runtime chưa triển khai; bản 24/10 đã rollback |
+| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1.1 vòng 1 ✅ (config/provenance); simulator generation P1.2–P1.8 chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) | 🔁 Làm lại |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) | ⬜ |
 | P4 | Triage ([triage](docs/triage.md)) | ⬜ |
