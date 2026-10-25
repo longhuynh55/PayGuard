@@ -16,6 +16,7 @@ Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveFloat = Annotated[float, Field(gt=0.0)]
+MVP_MONEY_UNIT = "integer VND"
 ProfileName = Literal["smoke", "pilot"]
 EpisodeRole = Literal["development", "calibration", "test"]
 
@@ -106,6 +107,10 @@ class TimelineConfig(StrictModel):
 
     @model_validator(mode="after")
     def timeline_must_be_ordered(self) -> TimelineConfig:
+        if self.storage_timezone.value != "UTC":
+            raise ValueError("timeline storage_timezone is fixed at UTC by the MVP contract")
+        if self.business_timezone.value != "Asia/Ho_Chi_Minh":
+            raise ValueError("timeline business_timezone is fixed at Asia/Ho_Chi_Minh by the MVP contract")
         start = self.start_business_date.value
         end = self.end_business_date_exclusive.value
         t0 = self.t0_business_date.value
@@ -131,6 +136,11 @@ class TransactionConfig(StrictModel):
 
     @model_validator(mode="after")
     def amount_range_must_be_ordered(self) -> TransactionConfig:
+        if (
+            self.minimum_amount.unit != MVP_MONEY_UNIT
+            or self.maximum_amount.unit != MVP_MONEY_UNIT
+        ):
+            raise ValueError(f"transactions amount unit must be exactly '{MVP_MONEY_UNIT}'")
         if self.minimum_amount.value >= self.maximum_amount.value:
             raise ValueError("transactions minimum_amount must be less than maximum_amount")
         if self.minimum_amount.unit != self.maximum_amount.unit:
@@ -153,6 +163,15 @@ class LabelReportingConfig(StrictModel):
     minimum_delay_days: ConfigValue[NonNegativeInt]
     maximum_delay_days: ConfigValue[NonNegativeInt]
     probability_reported: ConfigValue[Probability]
+
+    @field_validator("maturity_horizon_days")
+    @classmethod
+    def maturity_horizon_is_fixed_at_90_days(
+        cls, value: ConfigValue[PositiveInt]
+    ) -> ConfigValue[PositiveInt]:
+        if value.value != 90:
+            raise ValueError("label_reporting maturity_horizon_days is fixed at 90 by the MVP contract")
+        return value
 
     @model_validator(mode="after")
     def delay_range_must_be_ordered(self) -> LabelReportingConfig:

@@ -1,6 +1,6 @@
 == uv run pytest
-..........                                                               [100%]
-10 passed in 0.44s
+.................                                                        [100%]
+17 passed in 0.55s
 == verify_plan_claims
 Verified 18 illustrative examples. Results: /home/lieu_hoai_phuc/.herdr/worktrees/Aiagent/slice-p1-1/review/verification_results.json
 == check_links

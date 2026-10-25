@@ -77,6 +77,42 @@ def test_invalid_timeline_schedule_is_rejected() -> None:
         validate_simulator_config(data)
 
 
+@pytest.mark.parametrize("horizon_days", [30, 60])
+def test_expansion_label_horizons_are_rejected(horizon_days: int) -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["label_reporting"]["maturity_horizon_days"]["value"] = horizon_days
+
+    with pytest.raises(ConfigValidationError, match="maturity_horizon_days is fixed at 90"):
+        validate_simulator_config(data)
+
+
+@pytest.mark.parametrize(
+    ("timezone_field", "invalid_value"),
+    [
+        ("storage_timezone", "America/New_York"),
+        ("business_timezone", "UTC"),
+    ],
+)
+def test_timezones_outside_the_mvp_contract_are_rejected(
+    timezone_field: str, invalid_value: str
+) -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["timeline"][timezone_field]["value"] = invalid_value
+
+    with pytest.raises(ConfigValidationError, match=f"{timezone_field} is fixed"):
+        validate_simulator_config(data)
+
+
+@pytest.mark.parametrize("unit", ["USD", "nghìn VND", "triệu VND"])
+def test_non_integer_vnd_amount_units_are_rejected(unit: str) -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["transactions"]["minimum_amount"]["unit"] = unit
+    data["transactions"]["maximum_amount"]["unit"] = unit
+
+    with pytest.raises(ConfigValidationError, match="amount unit must be exactly 'integer VND'"):
+        validate_simulator_config(data)
+
+
 @pytest.mark.parametrize("missing_key", ["unit", "provenance"])
 def test_parameter_without_unit_or_provenance_is_rejected(missing_key: str) -> None:
     data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
