@@ -14,9 +14,10 @@ GIAO (prompt theo sub-plan) → CHỜ (herdr agent wait) → TEST → REVIEW (gp
    → PASS + test xanh: TỰ MERGE vào main → cập nhật Trạng thái → task kế tiếp
 ```
 
-1. **Giao:** `herdr worktree create --branch slice/<task> --base main`; khởi động coder; prompt gồm task ID, vòng, luật Implementer, lệnh kiểm tra và dòng kết thúc `TASK <id> ROUND<n> DONE`. CHỈ gửi prompt khi coder `idle`/`done` — gửi lúc `blocked` sẽ mất.
+1. **Giao:** `herdr worktree create --branch slice/<task> --base main`; khởi động coder bằng `codex -m gpt-6-luna -c 'model_reasoning_effort="max"' -s workspace-write -a never -c 'sandbox_workspace_write.network_access=true'` (không bao giờ hỏi; lệnh bị sandbox chặn trả lỗi về cho model; có mạng cho uv; CHỈ ghi trong worktree); prompt gồm task ID, vòng, luật Implementer, lệnh kiểm tra và dòng kết thúc `TASK <id> ROUND<n> DONE`. CHỈ gửi prompt khi coder `idle`/`done` — gửi lúc `blocked` sẽ mất.
+   Coder **KHÔNG commit** (thư mục `.git` của worktree nằm ngoài sandbox); để nguyên thay đổi.
 2. **Test:** trong worktree chạy `uv run pytest`, `python3 review/verify_plan_claims.py`, `python3 review/check_links.py`; lưu vào `review/findings/<task>-tests.txt`. Đỏ → gửi coder sửa (không tính là vòng review).
-3. **Review:** `scripts/review_task.sh <task> <vòng>`.
+3. **Commit + review:** orchestrator commit thay đổi trong worktree, rồi `scripts/review_task.sh <task> <vòng>`. Sửa sau review → commit mới trên cùng nhánh.
 4. **Merge** khi verdict `PASS` và test xanh: `git merge --no-ff slice/<task>` trên `main`, chạy lại test trên `main`, xóa worktree. Conflict hoặc test đỏ sau merge → DỪNG.
 5. **Ghi nhận:** dòng trạng thái task trong sub-plan + bảng Trạng thái MASTER khi xong stage.
 
@@ -26,12 +27,19 @@ Sub-plan của P2/P3 do Claude viết trước khi stage bắt đầu, cùng for
 
 | Claude TỰ LÀM | Claude DỪNG, báo người dùng (`herdr notification`) |
 |---|---|
-| Giao task đúng sub-plan; chạy test, review | Câu hỏi thiết kế/semantics mà docs CHƯA trả lời |
-| Trả lời coder KHI docs đã có câu trả lời (trích nguồn) | Xin quyền, trust, lệnh nguy hiểm, cài gói ngoài uv |
+| Giao task đúng sub-plan; chạy test, review | Câu hỏi thiết kế/semantics mà docs CHƯA trả lời **và** đụng protocol đã khóa |
+| Trả lời coder KHI docs đã có câu trả lời (trích nguồn); docs chưa có và KHÔNG đụng protocol → chọn phương án THẬN TRỌNG NHẤT, ghi vào "Quyết định chờ duyệt" | Xin quyền, trust, lệnh nguy hiểm, cài gói ngoài uv |
 | Gửi coder sửa finding "chặn MVP", ≤ 2 vòng | Hết 2 vòng vẫn còn finding chặn |
 | Tự merge khi PASS + test xanh | Đổi protocol, làm phần Mở rộng, đổi split/ngưỡng đã khóa |
 | Viết sub-plan P2/P3 theo docs đã khóa | Merge conflict, test đỏ trên main sau merge |
 | Cập nhật trạng thái, nhật ký | Coder kẹt > 45 phút không tiến triển |
+
+## Quyết định chờ duyệt
+
+Quyết định Claude tự chọn khi chạy không người (người dùng đã cho phép 26/10). Người dùng duyệt lại; không đồng ý → sửa ở task sau.
+
+| Thời điểm | Task | Câu hỏi | Đã chọn | Lý do |
+|---|---|---|---|---|
 
 ## Môi trường của coder
 
@@ -42,3 +50,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | Thời điểm | Task | Kết quả |
 |---|---|---|
 | 25/10 23:48 | P1.1 r1 | Coder hỏi 3 semantics (timestamp, tiền, lịch sử trước T0) → người dùng chốt: UTC + lịch VN, VND nguyên, lịch sử chung `episode_id = 'base'` |
+| 26/10 00:01 | P1.1 r1 | Coder bị chặn ở `git add` (.git ngoài sandbox) → đổi quy trình: orchestrator commit. 10 test pass; commit `1fd078b`; review vòng 1 đang chạy |
