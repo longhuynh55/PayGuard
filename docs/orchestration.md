@@ -61,3 +61,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 | P1.2 | Người dùng duyệt vòng sửa 3 (ngoại lệ) cho finding qua ranh giới T0: `transaction_events.episode_id` riêng, event ≥ T0 ghi theo episode. Script review cho vòng 3 chỉ khi `ALLOW_EXTRA_ROUND=1` |
 | 26/10 01:08 | P1.2 | Vòng sửa 3 → 38 test → review vòng 3 PASS → merge `0487c3a`. Giao P1.3 vòng 1 |
 | 26/10 02:55 | P1.3 r1 | Coder xong (46 test). Review lần đầu lỗi 3 lần do mạng tới OpenAI → chạy lại → PASS, 1 finding không chặn (Poisson sampler sai ở mean lớn/rất nhỏ → backlog vòng 2) → merge. Giao P1.4 vòng 1 |
+| 26/10 03:25 | P1.4 r1 | Coder xong (50 test). Review vòng 1 CHANGES_REQUIRED: card testing dồn vào T0−1 nên fit/validation/calibration không có fraud; bộ đếm benign sai → coder sửa (51 test, chiến dịch 12/2/4 theo cohort) → review vòng 2 PASS → merge. Giao P1.5 |
