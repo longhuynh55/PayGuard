@@ -40,6 +40,7 @@ Quyết định Claude tự chọn khi chạy không người (người dùng đ
 
 | Thời điểm | Task | Câu hỏi | Đã chọn | Lý do |
 |---|---|---|---|---|
+| 26/10 03:00 | P1.4 | P1.3 vòng 1 chỉ có kênh QR, nhưng card testing là fraud trên thẻ | Thêm mã kênh `card` trong config cho giao dịch card testing; không đổi schema (cột `channel` đã có) | Thận trọng nhất: không đụng schema; kênh thẻ đầy đủ cho giao dịch hợp lệ vẫn để vòng 2 P1.3 |
 | 26/10 00:25 | P1.2 | Trạng thái vòng đời giao dịch (authorized/settled…) lộ tương lai nếu nằm trên cùng một hàng | Bảng append-only `transaction_events`, mỗi sự kiện có `available_at` riêng | Khớp mẫu label events append-only; hoãn cả hàng tới settlement sẽ ẩn giao dịch đang xử lý khỏi monitoring |
 | 26/10 00:17 | P1.2 | Engine lưu trữ: SQLite hay DuckDB (`docs/overview.md` ghi DuckDB) | Coder chọn **SQLite** (thư viện chuẩn) cho storage P1 | Không cần dependency; DuckDB đọc trực tiếp được file SQLite nên P2 vẫn có thể tính feature bằng DuckDB. Nếu muốn thống nhất DuckDB ngay → đổi ở vòng 2 P1.2 |
 
