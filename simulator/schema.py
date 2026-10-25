@@ -14,14 +14,14 @@ UTC_TEXT_CHECK = (
 OPERATIONAL_DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS episodes (
-        episode_id TEXT PRIMARY KEY CHECK (length(episode_id) > 0),
+        episode_id TEXT NOT NULL PRIMARY KEY CHECK (length(episode_id) > 0),
         role TEXT NOT NULL CHECK (role IN ('base', 'development', 'calibration', 'test')),
         CHECK ((episode_id = 'base') = (role = 'base'))
     )
     """,
     f"""
     CREATE TABLE IF NOT EXISTS customers (
-        customer_id TEXT PRIMARY KEY CHECK (length(customer_id) > 0),
+        customer_id TEXT NOT NULL PRIMARY KEY CHECK (length(customer_id) > 0),
         episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
@@ -32,7 +32,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     """,
     f"""
     CREATE TABLE IF NOT EXISTS merchants (
-        merchant_id TEXT PRIMARY KEY CHECK (length(merchant_id) > 0),
+        merchant_id TEXT NOT NULL PRIMARY KEY CHECK (length(merchant_id) > 0),
         episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
@@ -42,30 +42,37 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     """,
     f"""
     CREATE TABLE IF NOT EXISTS transactions (
-        txn_id TEXT PRIMARY KEY CHECK (length(txn_id) > 0),
+        txn_id TEXT NOT NULL PRIMARY KEY CHECK (length(txn_id) > 0),
         episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
         customer_id TEXT NOT NULL REFERENCES customers(customer_id),
         merchant_id TEXT NOT NULL REFERENCES merchants(merchant_id),
         created_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='created_at')}),
-        authorized_at TEXT NULL CHECK (
-            authorized_at IS NULL OR ({UTC_TEXT_CHECK.format(column='authorized_at')})
-        ),
-        settled_at TEXT NULL CHECK (
-            settled_at IS NULL OR ({UTC_TEXT_CHECK.format(column='settled_at')})
-        ),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
-        amount INTEGER NOT NULL CHECK (typeof(amount) = 'integer'),
+        amount INTEGER NULL CHECK (amount IS NULL OR typeof(amount) = 'integer'),
         channel TEXT NOT NULL CHECK (length(channel) > 0),
-        status TEXT NOT NULL CHECK (length(status) > 0),
-        response_code TEXT NULL,
         UNIQUE (txn_id, episode_id),
         CHECK (event_at = created_at)
     )
     """,
     f"""
+    CREATE TABLE IF NOT EXISTS transaction_events (
+        event_id TEXT NOT NULL PRIMARY KEY CHECK (length(event_id) > 0),
+        txn_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
+        event_type TEXT NOT NULL CHECK (
+            event_type IN ('authorized', 'settled', 'declined', 'refunded', 'reversed')
+        ),
+        event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
+        available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        response_code TEXT NULL,
+        FOREIGN KEY (txn_id, episode_id) REFERENCES transactions(txn_id, episode_id),
+        CHECK (available_at >= event_at)
+    )
+    """,
+    f"""
     CREATE TABLE IF NOT EXISTS label_events (
-        event_id TEXT PRIMARY KEY CHECK (length(event_id) > 0),
+        event_id TEXT NOT NULL PRIMARY KEY CHECK (length(event_id) > 0),
         txn_id TEXT NOT NULL,
         episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
@@ -83,7 +90,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     """,
     f"""
     CREATE TABLE IF NOT EXISTS business_calendar (
-        calendar_event_id TEXT PRIMARY KEY CHECK (length(calendar_event_id) > 0),
+        calendar_event_id TEXT NOT NULL PRIMARY KEY CHECK (length(calendar_event_id) > 0),
         episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
@@ -117,6 +124,55 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     END
     """,
     """
+    CREATE TRIGGER IF NOT EXISTS transactions_identity_immutable
+    BEFORE UPDATE OF txn_id, episode_id, customer_id, merchant_id ON transactions
+    WHEN NEW.txn_id IS NOT OLD.txn_id
+      OR NEW.episode_id IS NOT OLD.episode_id
+      OR NEW.customer_id IS NOT OLD.customer_id
+      OR NEW.merchant_id IS NOT OLD.merchant_id
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction identity and episode relationships are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS customers_identity_immutable
+    BEFORE UPDATE OF customer_id, episode_id ON customers
+    WHEN NEW.customer_id IS NOT OLD.customer_id OR NEW.episode_id IS NOT OLD.episode_id
+    BEGIN
+        SELECT RAISE(ABORT, 'customer identity and episode are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS merchants_identity_immutable
+    BEFORE UPDATE OF merchant_id, episode_id ON merchants
+    WHEN NEW.merchant_id IS NOT OLD.merchant_id OR NEW.episode_id IS NOT OLD.episode_id
+    BEGIN
+        SELECT RAISE(ABORT, 'merchant identity and episode are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS transaction_events_no_update
+    BEFORE UPDATE ON transaction_events
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction_events is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS transaction_events_no_replace
+    BEFORE INSERT ON transaction_events
+    WHEN EXISTS (SELECT 1 FROM transaction_events WHERE event_id = NEW.event_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction_events is append-only; event ids cannot be replaced');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS transaction_events_no_delete
+    BEFORE DELETE ON transaction_events
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction_events is append-only');
+    END
+    """,
+    """
     CREATE TRIGGER IF NOT EXISTS label_event_time_matches_transaction
     BEFORE INSERT ON label_events
     WHEN (SELECT event_at FROM transactions
@@ -132,18 +188,18 @@ OPERATIONAL_DDL: tuple[str, ...] = (
 PRIVATE_DDL: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS private_episodes (
-        episode_id TEXT PRIMARY KEY CHECK (length(episode_id) > 0)
+        episode_id TEXT NOT NULL PRIMARY KEY CHECK (length(episode_id) > 0)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS run_metadata (
-        key TEXT PRIMARY KEY CHECK (length(key) > 0),
+        key TEXT NOT NULL PRIMARY KEY CHECK (length(key) > 0),
         value_json TEXT NOT NULL CHECK (json_valid(value_json))
     )
     """,
     f"""
     CREATE TABLE IF NOT EXISTS incident_truth (
-        incident_truth_id TEXT PRIMARY KEY CHECK (length(incident_truth_id) > 0),
+        incident_truth_id TEXT NOT NULL PRIMARY KEY CHECK (length(incident_truth_id) > 0),
         episode_id TEXT NOT NULL REFERENCES private_episodes(episode_id),
         cause TEXT NOT NULL CHECK (length(cause) > 0),
         requires_intervention INTEGER NOT NULL CHECK (requires_intervention IN (0, 1)),
@@ -172,10 +228,25 @@ PRIVATE_DDL: tuple[str, ...] = (
 )
 
 OPERATIONAL_TABLES: frozenset[str] = frozenset(
-    {"episodes", "customers", "merchants", "transactions", "label_events", "business_calendar"}
+    {
+        "episodes",
+        "customers",
+        "merchants",
+        "transactions",
+        "transaction_events",
+        "label_events",
+        "business_calendar",
+    }
 )
 AS_OF_TABLES: frozenset[str] = frozenset(
-    {"customers", "merchants", "transactions", "label_events", "business_calendar"}
+    {
+        "customers",
+        "merchants",
+        "transactions",
+        "transaction_events",
+        "label_events",
+        "business_calendar",
+    }
 )
 PRIVATE_TABLES: frozenset[str] = frozenset({"private_episodes", "run_metadata", "incident_truth"})
 
@@ -183,8 +254,9 @@ OPERATIONAL_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "customers": frozenset({"event_at", "available_at"}),
     "merchants": frozenset({"event_at", "available_at"}),
     "transactions": frozenset(
-        {"created_at", "authorized_at", "settled_at", "event_at", "available_at"}
+        {"created_at", "event_at", "available_at"}
     ),
+    "transaction_events": frozenset({"event_at", "available_at"}),
     "label_events": frozenset({"event_at", "reported_at", "available_at"}),
     "business_calendar": frozenset({"event_at", "available_at"}),
 }

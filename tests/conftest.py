@@ -14,7 +14,15 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "p1_2_operational.json"
 
 def load_operational_fixture(pair: StorePair) -> dict[str, Any]:
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
-    for table in ("episodes", "customers", "merchants", "transactions", "label_events", "business_calendar"):
+    for table in (
+        "episodes",
+        "customers",
+        "merchants",
+        "transactions",
+        "transaction_events",
+        "label_events",
+        "business_calendar",
+    ):
         for row in fixture[table]:
             insert_operational_record(pair.operational, table, row)
     return fixture
