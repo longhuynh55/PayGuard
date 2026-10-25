@@ -1,0 +1,30 @@
+{
+  "episodes": [
+    {"episode_id": "ep-a", "role": "development"},
+    {"episode_id": "ep-b", "role": "calibration"}
+  ],
+  "customers": [
+    {"customer_id": "customer-base", "episode_id": "base", "event_at": "2026-01-20T00:00:00.000000Z", "available_at": "2026-01-20T00:00:00.000000Z", "segment": "retail", "province": "HCM", "age_band": "35-44"},
+    {"customer_id": "customer-a", "episode_id": "ep-a", "event_at": "2026-02-01T00:00:00.000000Z", "available_at": "2026-02-01T00:00:00.000000Z", "segment": "retail", "province": "HCM", "age_band": "25-34"},
+    {"customer_id": "customer-b", "episode_id": "ep-b", "event_at": "2026-02-01T00:00:00.000000Z", "available_at": "2026-02-01T00:00:00.000000Z", "segment": "retail", "province": "HN", "age_band": "25-34"}
+  ],
+  "merchants": [
+    {"merchant_id": "merchant-base", "episode_id": "base", "event_at": "2026-01-20T00:00:00.000000Z", "available_at": "2026-01-20T00:00:00.000000Z", "mcc": "5411", "province": "HCM"},
+    {"merchant_id": "merchant-a", "episode_id": "ep-a", "event_at": "2026-02-01T00:00:00.000000Z", "available_at": "2026-02-01T00:00:00.000000Z", "mcc": "5812", "province": "HCM"},
+    {"merchant_id": "merchant-b", "episode_id": "ep-b", "event_at": "2026-02-01T00:00:00.000000Z", "available_at": "2026-02-01T00:00:00.000000Z", "mcc": "5812", "province": "HN"}
+  ],
+  "transactions": [
+    {"txn_id": "txn-base-before-t0", "episode_id": "base", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-01-30T10:00:00.000000Z", "authorized_at": "2026-01-30T10:00:01.000000Z", "settled_at": "2026-01-30T10:10:00.000000Z", "event_at": "2026-01-30T10:00:00.000000Z", "available_at": "2026-01-30T10:00:00.000000Z", "amount": 125000, "channel": "qr", "status": "settled", "response_code": "00"},
+    {"txn_id": "txn-base-at-t0", "episode_id": "base", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-01-31T17:00:00.000000Z", "authorized_at": "2026-01-31T17:00:01.000000Z", "settled_at": null, "event_at": "2026-01-31T17:00:00.000000Z", "available_at": "2026-01-31T17:00:00.000000Z", "amount": 250000, "channel": "card", "status": "authorized", "response_code": "00"},
+    {"txn_id": "txn-a-at-availability-cutoff", "episode_id": "ep-a", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-02-01T00:00:00.000000Z", "authorized_at": "2026-02-01T00:00:01.000000Z", "settled_at": null, "event_at": "2026-02-01T00:00:00.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "amount": 500000, "channel": "wallet", "status": "authorized", "response_code": "00"},
+    {"txn_id": "txn-a-not-yet-available", "episode_id": "ep-a", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-02-01T00:01:00.000000Z", "authorized_at": "2026-02-01T00:01:01.000000Z", "settled_at": null, "event_at": "2026-02-01T00:01:00.000000Z", "available_at": "2026-02-02T00:00:00.000001Z", "amount": 750000, "channel": "wallet", "status": "authorized", "response_code": "00"},
+    {"txn_id": "txn-b-other-episode", "episode_id": "ep-b", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-02-01T00:02:00.000000Z", "authorized_at": "2026-02-01T00:02:01.000000Z", "settled_at": null, "event_at": "2026-02-01T00:02:00.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "amount": 900000, "channel": "qr", "status": "authorized", "response_code": "00"}
+  ],
+  "label_events": [
+    {"event_id": "label-a-at-availability-cutoff", "txn_id": "txn-a-at-availability-cutoff", "episode_id": "ep-a", "event_at": "2026-02-01T00:00:00.000000Z", "label": "fraud", "label_status": "confirmed", "reported_at": "2026-02-01T12:00:00.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "source": "investigator", "supersedes_event_id": null},
+    {"event_id": "label-base-delayed", "txn_id": "txn-base-before-t0", "episode_id": "base", "event_at": "2026-01-30T10:00:00.000000Z", "label": "legit", "label_status": "confirmed", "reported_at": "2026-02-02T01:00:00.000000Z", "available_at": "2026-02-02T01:00:00.000000Z", "source": "customer_report", "supersedes_event_id": null}
+  ],
+  "business_calendar": [
+    {"calendar_event_id": "calendar-a", "episode_id": "ep-a", "event_at": "2026-02-01T17:00:00.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "business_date": "2026-02-02", "event_name": "salary-day", "lag_days": 0, "expected_effect_json": {"txn_count": {"aggregation": "sum", "relative_change": 0.2}}, "scope_json": {"channel": ["qr"]}}
+  ]
+}
