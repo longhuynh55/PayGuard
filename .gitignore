@@ -1,0 +1,13 @@
+# Regenerated data and environments
+data/
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local secrets
+.env

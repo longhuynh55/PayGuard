@@ -1,0 +1,122 @@
+# PayGuard — Master Plan
+
+> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 25/10/2026.
+> Thiết kế chi tiết nằm trong `docs/` theo module; **mỗi nội dung chỉ viết ở một chỗ**, file khác link tới.
+
+| Tài liệu | Nội dung |
+|---|---|
+| [docs/overview.md](docs/overview.md) | Business problem, giải pháp, ràng buộc, kiến trúc, rủi ro, cách trình bày |
+| [docs/data.md](docs/data.md) | Simulator, schema as-of, nhãn, `business_calendar`, episode, bảng truth — **sở hữu mọi schema dữ liệu** |
+| [docs/model.md](docs/model.md) | Split 3 tập, LightGBM, calibration, conformal giao dịch |
+| [docs/monitoring.md](docs/monitoring.md) | Metric → signal → alert → incident, incident con |
+| [docs/triage.md](docs/triage.md) | Taxonomy, runbook checklist, gate, quyền đóng, agent, `run_sql` |
+| [docs/evaluation.md](docs/evaluation.md) | Vai trò episode, ghép truth, metric, baseline, thống kê |
+| [docs/app.md](docs/app.md) | API, UI, Docker, demo |
+| [docs/rationale.md](docs/rationale.md) | Nghiên cứu, lý do thiết kế, tài liệu tham khảo |
+| [archive/](archive/) | Bản plan cũ và lịch sử review — không cập nhật nữa |
+
+---
+
+## 1. Đích đến
+
+**Business problem:** alert drift của model fraud quá nhiều, phần lớn vô hại; nhãn về chậm 30–90 ngày; điều tra mỗi alert tốn hàng giờ → alert fatigue.
+
+**Project "xong" khi có đủ:**
+1. Luồng end-to-end chạy bằng một lệnh: dữ liệu → model → monitoring → alert → rule triage → agent → báo cáo.
+2. Bảng kết quả trả lời được: *hybrid rule + agent có UQ có hơn rule-based một mình không, ở nhóm sự cố nào, với chi phí bao nhiêu?*
+3. Demo: video 3 phút + `docker compose up` + Streamlit online chỉ đọc kết quả.
+4. README có problem statement, kiến trúc, kết quả, design decisions, limitations, related work.
+5. Nhãn/feature đúng as-of; evaluator tính cả monitoring bỏ sót và rule đóng nhầm; mọi tỷ lệ lỗi có mẫu số và khoảng bất định phù hợp. Pilot không được diễn giải thành bảo đảm rủi ro gần 0.
+
+---
+
+## 2. Trạng thái
+
+| Stage | Module | Trạng thái |
+|---|---|---|
+| P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; runtime P1–P4 chưa được triển khai |
+| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Làm lại — bản 24/10 đã rollback; số cũ trong docs chỉ để tham khảo |
+| P2 | Fraud model ([model](docs/model.md)) | 🔁 Làm lại |
+| P3 | Monitoring ([monitoring](docs/monitoring.md)) | ⬜ |
+| P4 | Triage ([triage](docs/triage.md)) | ⬜ |
+| P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
+| P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
+
+**Việc tiếp theo:** đặt trần chi phí tạm cho pilot → viết lại P1 → P2 → luồng mỏng tới mốc ★ → đo token trên 3 case cố định → khóa ngân sách benchmark và số episode (mục 5). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [18 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động và đơn vị rủi ro; chúng không kiểm tra implementation.
+
+---
+
+## 3. Lộ trình (~7 tuần)
+
+Ước lượng theo ngày làm việc. ★ = mốc end-to-end bản thô. Chỉ làm phần MVP (mục 4).
+
+| Stage | Việc | Xong khi |
+|---|---|---|
+| **P1** Simulator + injector (7 ngày) | Thế giới nền, schema as-of, label events + tail, `business_calendar`; injector các kịch bản; bảng truth có `effect_available_at` / `accepted_actions` / `intervention_start_at` / `deadline_at`; 60 episode | Integrity + leakage check đạt; truy vấn tại t không đổi khi thêm dữ liệu sau t; snapshot nhãn đúng 4 trạng thái; mỗi episode có truth đúng; truth không truy cập được từ DB của agent |
+| **P2** Model (5 ngày) | Snapshot nhãn, split 3 tập, feature as-of, LightGBM, isotonic, conformal trên score thô | Xem [model.md](docs/model.md) mục Xong khi |
+| **P3** Monitoring (4 ngày) | Job hằng ngày, signal, alert → incident, incident con; evaluator đối soát detection recall | Mỗi episode sinh alert tái lập được |
+| ★ Luồng mỏng (cuối tuần 3) | snapshot → score → một monitor → một rule → gate → `decisions` → evaluator; thêm agent một bước (1 SQL, không UQ); đo token trên 3 case | Ra bảng kết quả dù còn xấu; có số token thật |
+| **P4** Triage (10 ngày) | P4a 4 runbook checklist theo metric + quyền đóng theo runbook (2 ngày) · P4b `run_sql` N = 3 + bộ câu hỏi + DB phản ví dụ (4 ngày) · P4c agent K = 3, phân nhánh đóng/routing/recheck (4 ngày) | Xem [triage.md](docs/triage.md) mục Xong khi |
+| **P5** Đánh giá (4 ngày) | 4 baseline + hai phép so sánh agent; utility + độ nhạy; ablation có công khai chi phí | Bảng và biểu đồ cuối cho README, kể cả kết quả âm tính |
+| **P6** Đóng gói (5 ngày) | FastAPI, Streamlit, Docker Compose, pytest + CI, README, video | `docker compose up` chạy được demo |
+
+Nâng cấp sau (không chặn): Kafka/Spark/Airflow · ensemble epistemic · user simulator · Next.js · user study nhỏ.
+
+---
+
+## 4. Phạm vi MVP và phần làm sau
+
+MVP là phần tối thiểu để trả lời câu hỏi chính. Phần "làm sau" không sai, chỉ chưa làm thay đổi kết luận chính; schema chừa sẵn cột để thêm sau không phải viết lại. Mỗi module cũng gắn nhãn *Mở rộng* tại chỗ.
+
+| Nhóm | MVP | Chi tiết |
+|---|---|---|
+| Nhãn | 4 trạng thái, H = 90, một kết luận/giao dịch | [data](docs/data.md) |
+| As-of | `event_at`/`available_at`; mọi feature/SQL giới hạn theo `as_of_time` và episode | [data](docs/data.md) |
+| Truth | File/DB riêng, tool agent không kết nối tới | [data](docs/data.md) |
+| Split | Model 3 tập; episode dev/calibration/test + manifest khóa trước tuning | [model](docs/model.md), [evaluation](docs/evaluation.md) |
+| Quyết định | cause / evidence_status / action tách riêng; 4 runbook bằng code; đóng và routing qua nhánh riêng; quyền đóng rule/agent chọn riêng; recheck ≤ 2 | [triage](docs/triage.md) |
+| Incident theo thời gian | Gộp vào incident đang mở; đã quyết định thì tạo incident con; chấm theo `decision_at` | [monitoring](docs/monitoring.md), [evaluation](docs/evaluation.md) |
+| UQ | Agent K = N = 3, tau ∈ {2/3, 1}; giao dịch Mondrian conformal | [triage](docs/triage.md), [model](docs/model.md) |
+| Đánh giá | Rủi ro so policy trên tập truth/episode cố định; detection, timely routing, metric incident/workload/chi phí; báo giới hạn quyền đóng agent; bootstrap theo episode | [evaluation](docs/evaluation.md) |
+| Baseline | 4 baseline + hai phép so sánh agent | [evaluation](docs/evaluation.md) |
+| SQL | Bộ câu hỏi 40/30/15/15 + vài DB phản ví dụ | [triage](docs/triage.md) |
+
+**Làm sau:** `disputed` và sửa nhãn, H theo kênh, H = 30/60 · oracle-label ablation, feedback sớm vào train · conformal agent (KnowNo), adaptive N / thay K, LTT · nhánh chứng nhận 299 episode, stress test cơ chế mới · phân xử thủ công ca ambiguous, bộ DB phản ví dụ đầy đủ · MLflow.
+
+---
+
+## 5. Ngân sách LLM 🟡 — chốt sau luồng mỏng
+
+Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của số episode là chi phí agent. 60 episode là **sàn**. Cần pipeline để đo nên chia hai mức: trần tạm cho pilot (không chặn P1–P3) và ngân sách benchmark khóa sau khi đo.
+
+- Ước lượng thô mỗi incident tới agent: 3 lượt × ~5 SQL × 3 mẫu ≈ 45 lần sinh SQL + ~15–20 bước suy luận ≈ **60 lần gọi**. Chi phí ≈ số incident tới agent × 60 × token/lần × giá. So sánh "giá trị vận hành" chạy thêm một lượt K = N = 1 trên mọi ca tới agent.
+- **Việc:** (1) tra giá DeepSeek V4 Flash trên trang chính thức, đặt trần tạm; (2) ở mốc ★, chạy 3 incident cố định đo token thật; (3) khóa trần USD cho toàn benchmark (gồm 4 baseline và ablation) → suy ra số episode; nếu vượt 60 thì tăng calibration/test theo tỉ lệ 1:2:2.
+
+## 6. Tái lập
+
+`git init` ngay khi bắt đầu code; manifest seed/split/config/model; dữ liệu sinh lại và môi trường ảo không đưa vào git. Không giả định số đo cũ đã được tái lập.
+
+---
+
+## 7. Nhật ký quyết định
+
+| Ngày | Quyết định |
+|---|---|
+| 25/10/2026 | Sửa sau review rule/agent: mùa vụ dùng nền theo ngày và aggregation theo metric; rủi ro so policy dùng tập truth/episode cố định, reward không tăng do incident con; tách nhánh close và routing; chốt giới hạn giá trị agent trong 4 runbook MVP. Bổ sung ví dụ kiểm chứng; chưa triển khai runtime |
+| 25/10/2026 | Tổ chức lại tài liệu theo module (`docs/`); MASTER chỉ giữ đích đến, trạng thái, lộ trình, phạm vi MVP, ngân sách, nhật ký. PROJECT_PLAN, RESEARCH_DECISIONS, PLAN_REVIEW và bản MASTER cũ chuyển vào `archive/`. Gộp P1 + P1.5 thành P1 |
+| 25/10/2026 | Sửa sau review lần 3: so sánh gate UQ dùng cùng kết luận đa số + bằng chứng, chỉ bật/tắt điều kiện score; routing đúng hạn kiểm tra đúng incident và `intervention_start_at <= decision_at <= deadline_at` |
+| 25/10/2026 | Sửa sau review lần 2: runbook mùa vụ kiểm tra vị trí + độ lớn theo ngày thay cho độ phủ ≥ 50%; hai phép so sánh agent (gate UQ / giá trị vận hành K = 1 vs K = 3); timely routing có `accepted_actions` + `deadline_at` (D = 7), recheck không tính routing |
+| 25/10/2026 | Sửa sau review: tách quyền tự đóng rule (theo runbook) và agent (tau); incident con + chấm theo `decision_at`; checklist runbook bằng code; ngân sách tạm → đo trên luồng mỏng → khóa; gắn nhãn MVP/mở rộng tại từng module |
+| 25/10/2026 | Code P1/P2 bản 24/10 rollback → làm lại. Khóa protocol, chốt phạm vi MVP/làm sau. Rút split model từ 4 xuống 3 tập: fit 1/7–21/9, validation 22–30/9, calibration tháng 10 dùng chung cho isotonic + conformal (score thô) + CBPE. Ngân sách quyết định số episode, 60 là sàn |
+| 25/10/2026 | Chốt protocol nhãn H = 90 theo cohort, pending không âm hóa, tách observed-label/oracle và các vai trò calibration |
+| 25/10/2026 | UQ agent MVP dùng abstention thực nghiệm + gate chung rule/agent; conformal agent thành nhánh bổ sung; conformal giao dịch giữ ở P2 |
+| 25/10/2026 | Pilot 12/24/24 development/calibration/test; metric end-to-end, attribution ambiguous/unmatched, rủi ro theo mẫu số; chưa có chứng nhận gần 0. Taxonomy bỏ `insignificant`, mẫu nhỏ là `evidence_status = insufficient` |
+| 24/10/2026 | Định vị theo business problem (alert fatigue), không theo tính mới |
+| 24/10/2026 | Triage hybrid: rule trước, agent sau; rule-based là baseline chính |
+| 24/10/2026 | SQL 40/30/15/15 · user simulator để sau · ma trận chi phí (−5/−3/−1/0/+1) + độ nhạy · demo video + Docker + Streamlit chỉ đọc |
+| 24/10/2026 | LLM: DeepSeek V4 Flash; UQ black-box trước |
+| 24/10/2026 | Simulator v0: collusion chỉ trước mốc drift để giai đoạn drift có một nguyên nhân |
+| 24/10/2026 | Simulator: bản đầy đủ vai trò tài khoản (hộ kinh doanh, mule nội bộ có cash-out), thêm sự cố bẫy `legit_business_spike` |
+| 24/10/2026 | Chốt chia dữ liệu theo độ chín của nhãn (T0 = 1/2/2026); 60 episode "thế giới song song" + `business_calendar`; alert 4 tầng, chấm theo incident |
+| 24/10/2026 | P2: conformal Mondrian bất đối xứng (α_legit 0,005, α_fraud 0,20); huấn luyện tất định |
+| 24/10/2026 | Audit nghiệp vụ simulator mức 1+2 (thiết bị hợp lệ thay đổi, chữ ký ATO/card testing theo xác suất, nhãn theo kênh + friendly fraud, Tết đổi cơ cấu, mule thuê, refund/reversal, merchant quen, retry); thêm leakage check |

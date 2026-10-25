@@ -1,0 +1,314 @@
+{
+  "zero_error_bounds": {
+    "one_sided_95_percent_upper_bounds": {
+      "24": 0.11734615615494881,
+      "36": 0.07984650951989436,
+      "299": 0.009969146792899286
+    },
+    "minimum_zero_error_trials_for_upper_bound_at_most_1_percent": 299,
+    "ordinary_bootstrap_range": [
+      0.0,
+      0.0
+    ],
+    "assumptions": "fixed policy; independent identically distributed Bernoulli trials"
+  },
+  "marginal_coverage_is_not_selective_accuracy": {
+    "set_coverage": 0.9,
+    "false_closures_per_all_cases": 0.1,
+    "dangerous_fraction_among_closed_cases": 1.0,
+    "closure_rate_among_dangerous_cases": 1.0,
+    "note": "Does not contradict marginal coverage or the KnowNo theorem."
+  },
+  "sql_result_agreement_is_not_semantic_correctness": {
+    "question": "Fraud rate across ALL transactions",
+    "gold_and_wrong_on_initial_database": [
+      0.5,
+      0.5
+    ],
+    "gold_and_wrong_after_counterexample_row": [
+      0.3333333333333333,
+      0.5
+    ],
+    "consistency_of_five_wrong_answers": 1.0
+  },
+  "availability_time_counterexample": {
+    "as_of_before": 10.0,
+    "as_of_after": 10.0,
+    "event_time_only": 30.0,
+    "unrestricted": 130.0
+  },
+  "delayed_label_counterexample": {
+    "fraction_of_positive_reports_available": 0.89,
+    "true_fraud_rate": 0.1,
+    "fraud_rate_if_pending_means_negative": 0.089,
+    "pending_count": 11,
+    "note": "A possibility proof, not evidence that 89% maturity necessarily invalidates calibration."
+  },
+  "conditional_versus_end_to_end": {
+    "triage_success_given_detection": 0.9,
+    "successful_detection_and_routing": 0.18
+  },
+  "overlap_is_not_unique_attribution": {
+    "time_and_segment_matches": [
+      [
+        "seasonal",
+        "new_fraud"
+      ],
+      [
+        "seasonal",
+        "new_fraud"
+      ]
+    ],
+    "matches_with_known_injected_effects": [
+      [
+        "seasonal"
+      ],
+      [
+        "new_fraud"
+      ]
+    ],
+    "note": "Feature matching is illustrative; indirect effects require a richer attribution policy."
+  },
+  "early_agreement_counterexample": {
+    "after_3_samples": {
+      "winner": "wrong",
+      "agreement": 1.0
+    },
+    "after_10_samples": {
+      "winner": "right",
+      "agreement": 0.7
+    },
+    "note": "Adaptive stopping must be evaluated as part of the actual policy."
+  },
+  "label_snapshot_with_revisions": {
+    "historical_snapshot_before_and_after_future_revision": [
+      "confirmed_legit",
+      "confirmed_legit"
+    ],
+    "snapshot_when_revision_becomes_available": "confirmed_fraud",
+    "unresolved_conflict": "disputed",
+    "unreported_at_89_and_90_days": [
+      "pending",
+      "matured_negative"
+    ]
+  },
+  "supervised_split_maturity": {
+    "fit": {
+      "start_inclusive": "2025-07-01T00:00:00",
+      "end_exclusive": "2025-09-22T00:00:00",
+      "minimum_age_days": 132.00000000001157
+    },
+    "validation": {
+      "start_inclusive": "2025-09-22T00:00:00",
+      "end_exclusive": "2025-10-01T00:00:00",
+      "minimum_age_days": 123.00000000001158
+    },
+    "calibration": {
+      "start_inclusive": "2025-10-01T00:00:00",
+      "end_exclusive": "2025-11-01T00:00:00",
+      "minimum_age_days": 92.00000000001158
+    },
+    "scope": "Checks age/disjointness only; class support cannot be checked without actual data."
+  },
+  "closure_gate_cases": {
+    "illustrative_gate_outcomes": {
+      "complete_benign": "close",
+      "small_sample": "recheck",
+      "seasonal_plus_fraud": "human_review",
+      "invalid_tool_snapshot": "human_review",
+      "recheck_exhausted": "human_review",
+      "below_threshold": "recheck",
+      "agent_closure_disabled": "human_review",
+      "rule_closure_disabled": "human_review",
+      "rule_disabled_does_not_disable_agent": "close",
+      "benign_without_runbook": "human_review",
+      "pipeline_routes_without_benign_or_close_authority": "data_ticket",
+      "pipeline_and_fraud_conflict": "human_review",
+      "fraud_signal_routes_without_close_score": "fraud_ops",
+      "fraud_without_supported_signal": "human_review",
+      "pipeline_without_checklist": "human_review",
+      "routing_with_invalid_snapshot": "human_review",
+      "conflicting_routing_evidence": "human_review",
+      "explicit_human_review": "human_review",
+      "recheck_needs_a_waiting_reason": "human_review",
+      "explicit_recheck_with_waiting_reason": "recheck"
+    },
+    "scope": "Toy action router; no actual tool, rule, fraud model or LLM was exercised."
+  },
+  "separated_rule_agent_authority": {
+    "joint_tau": null,
+    "runbook_close_enabled": {
+      "seasonal_calendar": false
+    },
+    "agent_tau_after_rule_lock": 1,
+    "note": "Toy scores; the rerouted agent scores are assumed, not measured."
+  },
+  "decision_time_scoring": {
+    "unsafe_by_final_label": {
+      "I1": true,
+      "I2": false
+    },
+    "unsafe_at_decision_time": {
+      "I1": false,
+      "I2": false
+    },
+    "fraud_routed_via_child_incident": true,
+    "recheck_only_counts_as_routed": false,
+    "routed_after_deadline_counts": false,
+    "other_incident_or_before_start_counts": false,
+    "close_after_fraud_available_is_unsafe": true
+  },
+  "seasonal_runbook_daily_check": {
+    "max_overlap_by_event_length": {
+      "1_day_event": 0.143,
+      "3_day_event": 0.429,
+      "4_day_event": 0.571
+    },
+    "one_day_payday_passes_daily_check": true,
+    "payday_plus_fraud_passes_daily_check": false,
+    "unequal_daily_baseline_passes": true,
+    "unequal_baseline_observed_lift": 0.37735849056603765,
+    "weighted_expected_lift": 0.37735849056603776,
+    "incorrect_uniform_expected_lift": 0.05714285714285715,
+    "ratio_of_totals": 0.0875,
+    "incorrect_mean_of_daily_rates": 0.09285714285714287,
+    "expected_mean": 92.5,
+    "invalid_denominator_or_unsupported_metric": "insufficient",
+    "note": "Toy daily series; tolerances are illustrative. Same-day hidden fraud may still pass."
+  },
+  "gate_ablation_same_evidence": {
+    "first_trace": "dangerous",
+    "majority_conclusion": "benign",
+    "outcomes": {
+      "no_gate": "close",
+      "gate_tau_2_3": "close",
+      "gate_tau_1": "recheck"
+    },
+    "note": "With tau=2/3 and non-binding SQL consistency the arms coincide; tau=1 differs."
+  },
+  "policy_independent_risk_units": {
+    "seven_child_cases": {
+      "dangerous_incident_count": 7,
+      "dangerous_closure_rate": 0.14285714285714285,
+      "unsafe_truth_rate": 0.5,
+      "unsafe_episode_rate": 0.5,
+      "detection_recall": 0.5,
+      "timely_routing_recall": 0.5,
+      "distinct_routing_rewards": 1,
+      "distinct_benign_closure_rewards": 0,
+      "unsafe_truth_ids": [
+        "F1"
+      ],
+      "unadjudicated_closures": 0,
+      "assessment": "fully_matched_example"
+    },
+    "three_child_cases": {
+      "dangerous_incident_count": 3,
+      "dangerous_closure_rate": 0.3333333333333333,
+      "unsafe_truth_rate": 0.5,
+      "unsafe_episode_rate": 0.5,
+      "detection_recall": 0.5,
+      "timely_routing_recall": 0.5,
+      "distinct_routing_rewards": 1,
+      "distinct_benign_closure_rewards": 0,
+      "unsafe_truth_ids": [
+        "F1"
+      ],
+      "unadjudicated_closures": 0,
+      "assessment": "fully_matched_example"
+    },
+    "repeated_unsafe_closure_same_truth": {
+      "dangerous_incident_count": 8,
+      "dangerous_closure_rate": 0.25,
+      "unsafe_truth_rate": 0.5,
+      "unsafe_episode_rate": 0.5,
+      "detection_recall": 0.5,
+      "timely_routing_recall": 0.5,
+      "distinct_routing_rewards": 1,
+      "distinct_benign_closure_rewards": 1,
+      "unsafe_truth_ids": [
+        "F1"
+      ],
+      "unadjudicated_closures": 0,
+      "assessment": "fully_matched_example"
+    },
+    "mixed_cause_closure_gets_no_benign_reward": {
+      "dangerous_incident_count": 1,
+      "dangerous_closure_rate": 1.0,
+      "unsafe_truth_rate": 0.5,
+      "unsafe_episode_rate": 0.5,
+      "detection_recall": 0.5,
+      "timely_routing_recall": 0.0,
+      "distinct_routing_rewards": 0,
+      "distinct_benign_closure_rewards": 0,
+      "unsafe_truth_ids": [
+        "F1"
+      ],
+      "unadjudicated_closures": 0,
+      "assessment": "fully_matched_example"
+    },
+    "unadjudicated_closure": {
+      "dangerous_incident_count": 3,
+      "dangerous_closure_rate": 0.3333333333333333,
+      "unsafe_truth_rate": 0.5,
+      "unsafe_episode_rate": 0.5,
+      "detection_recall": 0.5,
+      "timely_routing_recall": 0.5,
+      "distinct_routing_rewards": 1,
+      "distinct_benign_closure_rewards": 0,
+      "unsafe_truth_ids": [
+        "F1"
+      ],
+      "unadjudicated_closures": 1,
+      "assessment": "observed_lower_bound"
+    },
+    "no_alerts": {
+      "dangerous_incident_count": 0,
+      "dangerous_closure_rate": null,
+      "unsafe_truth_rate": 0.0,
+      "unsafe_episode_rate": 0.0,
+      "detection_recall": 0.0,
+      "timely_routing_recall": 0.0,
+      "distinct_routing_rewards": 0,
+      "distinct_benign_closure_rewards": 0,
+      "unsafe_truth_ids": [],
+      "unadjudicated_closures": 0,
+      "assessment": "fully_matched_example"
+    },
+    "note": "Fixed truth/episode denominators; zero closures do not establish detection success."
+  },
+  "agent_closure_reachability": {
+    "supported_rule_enabled": {
+      "rule_closed": true,
+      "agent_received": false,
+      "agent_can_consider_closing": false
+    },
+    "outside_benign_runbook": {
+      "rule_closed": false,
+      "agent_received": true,
+      "agent_can_consider_closing": false
+    },
+    "failed_checklist": {
+      "rule_closed": false,
+      "agent_received": true,
+      "agent_can_consider_closing": false
+    },
+    "supported_rule_disabled": {
+      "rule_closed": false,
+      "agent_received": true,
+      "agent_can_consider_closing": true
+    },
+    "note": "Reachability under identical scope/snapshot, not evidence of LLM capability or actual closures."
+  },
+  "episode_risk_and_zero_denominator": {
+    "incident_count": 40,
+    "episode_bernoulli_trial_count": 2,
+    "episode_losses": [
+      1,
+      0
+    ],
+    "zero_denominator_rate": null,
+    "note": "40 incidents are not 40 independent episode-level Bernoulli trials."
+  },
+  "scope": "18 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
+}
