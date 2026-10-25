@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Generic, Literal, TypeVar
@@ -15,6 +16,7 @@ T = TypeVar("T")
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
+NonNegativeFloat = Annotated[float, Field(ge=0.0)]
 PositiveFloat = Annotated[float, Field(gt=0.0)]
 MVP_MONEY_UNIT = "integer VND"
 ProfileName = Literal["smoke", "pilot"]
@@ -128,11 +130,68 @@ class WorldConfig(StrictModel):
     expected_transactions_per_customer_local_day: ConfigValue[PositiveFloat]
     minimum_customer_count: ConfigValue[PositiveInt]
     minimum_merchant_count: ConfigValue[PositiveInt]
+    customer_segments: ConfigValue[list[str]]
+    customer_provinces: ConfigValue[list[str]]
+    customer_age_bands: ConfigValue[list[str]]
+    merchant_mcc_codes: ConfigValue[list[str]]
+    merchant_provinces: ConfigValue[list[str]]
+
+    @field_validator(
+        "customer_segments",
+        "customer_provinces",
+        "customer_age_bands",
+        "merchant_mcc_codes",
+        "merchant_provinces",
+    )
+    @classmethod
+    def profile_categories_must_be_unique_nonempty_values(
+        cls, value: ConfigValue[list[str]]
+    ) -> ConfigValue[list[str]]:
+        values = value.value
+        if not values or any(not item.strip() for item in values):
+            raise ValueError("profile categories must contain non-empty values")
+        if len(values) != len(set(values)):
+            raise ValueError("profile categories must not contain duplicates")
+        return value
 
 
 class TransactionConfig(StrictModel):
     minimum_amount: ConfigValue[PositiveInt]
     maximum_amount: ConfigValue[PositiveInt]
+    channel: ConfigValue[str]
+    authorization_response_code: ConfigValue[str]
+    authorization_delay_seconds: ConfigValue[PositiveInt]
+    hourly_transaction_weights: ConfigValue[list[NonNegativeFloat]]
+    settlement_delay_minutes: ConfigValue[PositiveInt]
+
+    @field_validator("channel")
+    @classmethod
+    def channel_must_be_nonempty(cls, value: ConfigValue[str]) -> ConfigValue[str]:
+        if not value.value.strip():
+            raise ValueError("transactions channel must not be blank")
+        return value
+
+    @field_validator("authorization_response_code")
+    @classmethod
+    def authorization_response_code_must_be_nonempty(
+        cls, value: ConfigValue[str]
+    ) -> ConfigValue[str]:
+        if not value.value.strip():
+            raise ValueError("transactions authorization_response_code must not be blank")
+        return value
+
+    @field_validator("hourly_transaction_weights")
+    @classmethod
+    def hourly_weights_must_cover_local_day(
+        cls, value: ConfigValue[list[NonNegativeFloat]]
+    ) -> ConfigValue[list[NonNegativeFloat]]:
+        if len(value.value) != 24:
+            raise ValueError("transactions hourly weights must contain one value for each local hour")
+        if any(not math.isfinite(weight) for weight in value.value):
+            raise ValueError("transactions hourly weights must be finite numbers")
+        if not any(weight > 0 for weight in value.value):
+            raise ValueError("transactions hourly weights must contain a positive value")
+        return value
 
     @model_validator(mode="after")
     def amount_range_must_be_ordered(self) -> TransactionConfig:
@@ -145,6 +204,12 @@ class TransactionConfig(StrictModel):
             raise ValueError("transactions minimum_amount must be less than maximum_amount")
         if self.minimum_amount.unit != self.maximum_amount.unit:
             raise ValueError("transactions minimum_amount and maximum_amount must use the same unit")
+        lifecycle_delay_seconds = (
+            self.authorization_delay_seconds.value
+            + self.settlement_delay_minutes.value * 60
+        )
+        if lifecycle_delay_seconds >= 24 * 60 * 60:
+            raise ValueError("transactions authorization and settlement delays must total less than one day")
         return self
 
 

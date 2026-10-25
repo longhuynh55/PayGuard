@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from simulator.config import load_simulator_config
 from simulator.storage import (
     StorageError,
+    create_export_stores,
     insert_operational_record,
     insert_private_record,
     list_operational_schema,
     utc_timestamp,
 )
+from simulator.transactions import generate_transactions
+from simulator.world import generate_world
 
 
 def test_manual_fixture_writes_and_reads_from_separate_exports(p1_2_store) -> None:
@@ -286,3 +293,99 @@ def test_timestamp_writer_normalizes_utc_and_rejects_naive_values() -> None:
 def test_private_writer_cannot_target_operational_table(p1_2_store) -> None:
     with pytest.raises(StorageError, match="unknown private table"):
         insert_private_record(p1_2_store.private, "transactions", {})
+
+
+def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path: Path) -> None:
+    config = load_simulator_config("configs/simulator.yaml")
+    pair = create_export_stores(tmp_path / "p1_3-smoke")
+    try:
+        world = generate_world(pair.operational, config, "smoke")
+        summary = generate_transactions(pair.operational, config, "smoke")
+        pair.commit()
+
+        assert len(world.customer_ids) == config.scale_for("smoke").customer_count.value
+        assert len(world.merchant_ids) == config.scale_for("smoke").merchant_count.value
+        assert summary.transaction_count > 0
+        assert summary.lifecycle_event_count == summary.transaction_count * 2
+
+        customers = [dict(row) for row in pair.operational.execute("SELECT * FROM customers")]
+        merchants = [dict(row) for row in pair.operational.execute("SELECT * FROM merchants")]
+        transactions = [dict(row) for row in pair.operational.execute("SELECT * FROM transactions")]
+        events = [dict(row) for row in pair.operational.execute("SELECT * FROM transaction_events")]
+        assert {row["episode_id"] for row in customers + merchants + transactions + events} == {"base"}
+        assert {row["customer_id"] for row in transactions} <= set(world.customer_ids)
+        assert {row["merchant_id"] for row in transactions} <= set(world.merchant_ids)
+        assert all(row["segment"] in config.world.customer_segments.value for row in customers)
+        assert all(row["province"] in config.world.customer_provinces.value for row in customers)
+        assert all(row["age_band"] in config.world.customer_age_bands.value for row in customers)
+        assert all(row["mcc"] in config.world.merchant_mcc_codes.value for row in merchants)
+        assert all(row["province"] in config.world.merchant_provinces.value for row in merchants)
+        assert pair.operational.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        local_tz = ZoneInfo(config.timeline.business_timezone.value)
+        start = config.timeline.start_business_date.value
+        t0 = config.timeline.t0_business_date.value
+        t0_utc = datetime.combine(t0, time.min).replace(tzinfo=local_tz).astimezone(UTC)
+        for entity in customers + merchants:
+            event_at = datetime.fromisoformat(entity["event_at"].replace("Z", "+00:00"))
+            available_at = datetime.fromisoformat(entity["available_at"].replace("Z", "+00:00"))
+            assert available_at >= event_at
+            assert available_at == event_at
+            assert event_at < t0_utc
+            assert event_at.astimezone(local_tz).date() >= start
+
+        txn_ids = set()
+        transactions_by_date: dict[str, int] = {}
+        hour_counts: dict[int, int] = {}
+        for row in transactions:
+            txn_ids.add(row["txn_id"])
+            assert row["event_at"] == row["created_at"]
+            assert row["available_at"] == row["created_at"]
+            assert type(row["amount"]) is int
+            assert config.transactions.minimum_amount.value <= row["amount"] <= config.transactions.maximum_amount.value
+            assert row["channel"] == config.transactions.channel.value
+            created_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            local_created_at = created_at.astimezone(local_tz)
+            assert start <= local_created_at.date() < t0
+            transactions_by_date[local_created_at.date().isoformat()] = (
+                transactions_by_date.get(local_created_at.date().isoformat(), 0) + 1
+            )
+            hour_counts[local_created_at.hour] = hour_counts.get(local_created_at.hour, 0) + 1
+
+        events_by_transaction: dict[str, list[dict]] = {}
+        for event in events:
+            events_by_transaction.setdefault(event["txn_id"], []).append(event)
+            event_at = datetime.fromisoformat(event["event_at"].replace("Z", "+00:00"))
+            available_at = datetime.fromisoformat(event["available_at"].replace("Z", "+00:00"))
+            assert available_at >= event_at
+            assert event_at < t0_utc
+        assert set(events_by_transaction) == txn_ids
+        for row in transactions:
+            created_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+            lifecycle = sorted(events_by_transaction[row["txn_id"]], key=lambda event: event["event_at"])
+            assert [event["event_type"] for event in lifecycle] == ["authorized", "settled"]
+            authorized_at = created_at + timedelta(
+                seconds=config.transactions.authorization_delay_seconds.value
+            )
+            settled_at = authorized_at + timedelta(
+                minutes=config.transactions.settlement_delay_minutes.value
+            )
+            assert lifecycle[0]["event_at"] == utc_timestamp(authorized_at)
+            assert lifecycle[0]["response_code"] == config.transactions.authorization_response_code.value
+            assert lifecycle[0]["available_at"] == lifecycle[0]["event_at"]
+            assert lifecycle[1]["event_at"] == utc_timestamp(settled_at)
+            assert lifecycle[1]["available_at"] == lifecycle[1]["event_at"]
+
+        expected_count = (
+            len(world.customer_ids)
+            * (t0 - start).days
+            * config.world.expected_transactions_per_customer_local_day.value
+        )
+        assert expected_count * 0.75 < len(transactions) < expected_count * 1.25
+        assert len(transactions_by_date) > 150
+        assert len(set(transactions_by_date.values())) > 1
+        peak_hours = sum(hour_counts.get(hour, 0) for hour in (11, 12, 13, 17, 18, 19, 20))
+        quiet_hours = sum(hour_counts.get(hour, 0) for hour in range(6))
+        assert peak_hours > quiet_hours * 4
+    finally:
+        pair.close()
