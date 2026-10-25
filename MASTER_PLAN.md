@@ -38,8 +38,8 @@
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; runtime P1–P4 chưa được triển khai |
 | P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md), runtime chưa triển khai; bản 24/10 đã rollback |
-| P2 | Fraud model ([model](docs/model.md)) | 🔁 Làm lại |
-| P3 | Monitoring ([monitoring](docs/monitoring.md)) | ⬜ |
+| P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | 🔁 Làm lại |
+| P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ⬜ |
 | P4 | Triage ([triage](docs/triage.md)) | ⬜ |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
