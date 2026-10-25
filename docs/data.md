@@ -22,25 +22,57 @@ Sự cố bẫy `legit_business_spike`: hộ kinh doanh có fan-in cao một cá
 
 ## 2. Schema và hợp đồng as-of
 
-| Bảng | Cột chính | Ghi chú |
+### Biểu diễn lưu trữ P1
+
+P1 lưu operational và private trong **hai SQLite database độc lập**; đường dẫn export lần lượt nằm dưới `operational/` và `private/`. Agent/tool chỉ được nhận kết nối operational ở các stage sau; việc đặt file ở hai đường dẫn khác nhau tự nó không chứng minh quyền truy cập đã bị cô lập. SQLite được chọn để fixture nhỏ dùng thư viện chuẩn, không cần dịch vụ ngoài.
+
+- Các cột timestamp lưu bằng `TEXT` UTC chuẩn hóa thành `YYYY-MM-DDTHH:MM:SS.ffffffZ` (luôn 6 chữ số phần lẻ, luôn `Z`) để so sánh cutoff theo thứ tự từ điển. API ghi nhận timestamp chỉ nhận datetime có timezone hoặc chuỗi ISO có offset; giá trị được đổi sang UTC trước khi ghi. Không nhận datetime mơ hồ/naive.
+- Ngày nghiệp vụ lưu `TEXT` dạng `YYYY-MM-DD` theo `Asia/Ho_Chi_Minh`; ngày này không phải timestamp UTC.
+- Số tiền lưu `INTEGER` VND khi có giá trị; `transactions.amount` được phép NULL để biểu diễn lỗi pipeline. Không nhân/chia ngầm theo nghìn hay triệu. ID và mã phân loại lưu `TEXT`, giữ nguyên số 0 ở đầu nếu có. JSON lưu thành `TEXT` UTF-8 hợp lệ; các trường JSON bên dưới nêu loại object/array yêu cầu.
+- Bảng dữ liệu có thời gian quan sát đều có `episode_id`, `event_at`, `available_at`. `event_at` là thời điểm nghiệp vụ mà bản ghi mô tả; `available_at` là thời điểm bản ghi trở nên đọc được. Dòng giao dịch biểu diễn các thuộc tính biết lúc tạo; chuyển trạng thái được ghi thành event riêng, không cập nhật ngược dòng giao dịch. Với `label_events`, `event_at` kế thừa `transactions.event_at` của giao dịch được kết luận, còn `reported_at` là lúc nguồn báo kết luận.
+
+### Operational tables
+
+Các cột không ghi nullable là `NOT NULL`; mọi cột `PRIMARY KEY` khai báo `NOT NULL` tường minh (SQLite cho phép NULL trong một số khóa chính TEXT nếu không ghi rõ). `PRIMARY KEY` và `UNIQUE` là ràng buộc duy nhất. Không bảng operational nào có cột sự cố, cơ chế fraud ẩn, đáp án injector, seed hay metadata cấu hình generator.
+
+| Bảng | Cột và kiểu | Khóa / ràng buộc |
 |---|---|---|
-| `customers`, `merchants` | profile, vai trò tài khoản | |
-| `transactions` | các mốc nghiệp vụ (`created_at`/`authorized_at`/`settled_at`), `event_at`, `available_at`, `status`, `response_code`, `episode_id` | |
-| `label_events` | `txn_id`, `event_id`, `label`, `label_status`, `reported_at`, `available_at`, `source` (chargeback / investigator / customer_report), `supersedes_event_id` | `available_at >= reported_at` |
-| `business_calendar` | sự kiện, ngày, `lag_days`, `expected_effect` (kỳ vọng theo metric), `scope` (segment bị ảnh hưởng) | Rule/agent được truy vấn; hợp đồng metric ở dưới |
-| Truth sự cố | xem mục 5 | **Không** nằm trong DB của agent |
+| `episodes` | `episode_id TEXT`, `role TEXT` | PK `episode_id`; `role` thuộc `base`, `development`, `calibration`, `test`; chỉ `episode_id='base'` được có `role='base'`, và ngược lại. Có đúng một hàng sentinel `base`; mỗi episode khác dùng một role đã khóa trong manifest. Không temporal/as-of table. |
+| `customers` | `customer_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `available_at TEXT`, `segment TEXT`, `province TEXT`, `age_band TEXT NULL` | PK `customer_id`; FK `episode_id → episodes.episode_id`. ID khách hàng duy nhất toàn database; thông tin nền dùng chung thuộc `base`, thông tin mới của episode thuộc episode đó. Sau insert không được đổi `customer_id` hoặc `episode_id`. |
+| `merchants` | `merchant_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `available_at TEXT`, `mcc TEXT`, `province TEXT` | PK `merchant_id`; FK `episode_id → episodes.episode_id`. ID merchant duy nhất toàn database; giữ MCC dạng text để giữ số 0 đầu. Sau insert không được đổi `merchant_id` hoặc `episode_id`. |
+| `transactions` | `txn_id TEXT`, `episode_id TEXT`, `customer_id TEXT`, `merchant_id TEXT`, `created_at TEXT`, `event_at TEXT`, `available_at TEXT`, `amount INTEGER NULL`, `channel TEXT` | PK `txn_id`; UNIQUE `(txn_id, episode_id)`; FK episode/customer/merchant. Customer và merchant được tham chiếu phải thuộc `base` hoặc cùng episode với giao dịch. `event_at = created_at`; cột này chỉ chứa thông tin đã biết lúc tạo. `amount`, nếu có, là số nguyên VND. Sau insert không được đổi `txn_id`, `episode_id`, `customer_id` hoặc `merchant_id`. |
+| `transaction_events` | `event_id TEXT`, `txn_id TEXT`, `episode_id TEXT`, `event_type TEXT`, `event_at TEXT`, `available_at TEXT`, `response_code TEXT NULL` | PK `event_id`; FK `txn_id → transactions.txn_id` và `episode_id → episodes.episode_id`. `event_type` thuộc `authorized`, `settled`, `declined`, `refunded`, `reversed`; `available_at >= event_at`. Event có `event_at < T0` phải mang `episode_id='base'`; event từ T0 trở đi mang episode riêng. FK parent cho phép event `base` trỏ giao dịch base; event của `e` trỏ giao dịch base hoặc giao dịch của `e`, không giao dịch episode khác. Bảng append-only: UPDATE/DELETE bị từ chối; hiệu chỉnh bằng event mới. |
+| `label_events` | `event_id TEXT`, `txn_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `label TEXT`, `label_status TEXT`, `reported_at TEXT`, `available_at TEXT`, `source TEXT`, `supersedes_event_id TEXT NULL` | PK `event_id`; UNIQUE `txn_id` trong MVP (tối đa một kết luận/giao dịch); FK `(txn_id, episode_id) → transactions(txn_id, episode_id)` và FK tự tham chiếu `supersedes_event_id`. `label` là `fraud` hoặc `legit`; `label_status` là `confirmed`; `source` là `chargeback`, `investigator` hoặc `customer_report`; `available_at >= reported_at`; `event_at` phải khớp giao dịch; `supersedes_event_id` phải NULL trong MVP. Sự kiện nhãn chỉ lưu kết luận đã có, không lưu dòng `pending` hay `matured_negative`. |
+| `business_calendar` | `calendar_event_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `available_at TEXT`, `business_date TEXT`, `event_name TEXT`, `lag_days INTEGER`, `expected_effect_json TEXT`, `scope_json TEXT` | PK `calendar_event_id`; FK episode. `business_date` theo ngày VN; `event_at` là đầu ngày nghiệp vụ đó đổi sang UTC. `expected_effect_json` là object theo `metric_id`; `scope_json` là object mô tả phạm vi. |
+
+`event_at`, `available_at`, và các cột timestamp không NULL khác dùng định dạng UTC cố định ở trên. `authorized_at`/`settled_at` không phải cột trên `transactions`; trạng thái sau lúc tạo chỉ có thể đọc từ `transaction_events` đã khả dụng tại snapshot. Lifecycle event trước T0 thuộc lịch sử `base`; event từ T0 trở đi là tương lai riêng của episode, kể cả khi `txn_id` tham chiếu giao dịch nền `base`. Các FK được bật trên từng kết nối SQLite. SQLite operational không chứa FK sang database private.
+
+### Private tables
+
+Các bảng sau chỉ tạo trong database private; không có trong danh sách/DDL operational và không được cấp cho agent/tool. Danh sách này bổ sung kiểu vật lý cho các trường truth ở mục 5.
+
+| Bảng private | Cột và kiểu | Khóa / ràng buộc |
+|---|---|---|
+| `private_episodes` | `episode_id TEXT` | PK `episode_id NOT NULL`; danh mục episode riêng để kiểm tra FK trong database private. |
+| `run_metadata` | `key TEXT`, `value_json TEXT` | PK `key NOT NULL`; `value_json` là JSON hợp lệ. Seed/config/version generator nằm ở đây, không operational. |
+| `incident_truth` | `incident_truth_id TEXT`, `episode_id TEXT`, `cause TEXT`, `requires_intervention INTEGER`, `mechanism TEXT`, `rule_covered INTEGER`, `affected_entities_json TEXT`, `affected_segments_json TEXT`, `affected_features_json TEXT`, `effect_start_at TEXT`, `effect_end_at TEXT NULL`, `effect_available_at TEXT`, `intervention_start_at TEXT`, `deadline_at TEXT`, `accepted_actions_json TEXT`, `parent_scenario TEXT NULL` | PK `incident_truth_id NOT NULL`; FK episode tới `private_episodes.episode_id`; `requires_intervention` và `rule_covered` là boolean 0/1; các cột `_json` là JSON (ba trường phạm vi là array, `accepted_actions` là array); thời gian theo UTC. `parent_scenario` là ID nhóm cha, NULL nếu không có. |
+
+Các tên cột trong bảng dưới đây là interface schema, không phải quyền đọc. `operational` và `private` được export độc lập; chỉ evaluator được nối tới private theo hợp đồng ở mục 5.
+
+### Hợp đồng as-of
 
 **Quy tắc as-of:**
 - Mọi feature và SQL chỉ đọc bản ghi có `available_at <= as_of_time`. Truy vấn tại t không đổi khi thêm dữ liệu chỉ khả dụng sau t.
 - Với episode `e`, lựa chọn dữ liệu duy nhất là `(episode_id = 'base' AND event_at < T0) UNION (episode_id = e)`, áp điều kiện `available_at <= as_of_time` cho **cả hai nhánh**. P1.2 hiện thực lựa chọn này qua một hàm as-of duy nhất; caller không tự truy vấn/join các bảng episode.
+- `e` phải là episode đã đăng ký và khác `base`. Hàm as-of chỉ nhận tên một temporal operational table trong allowlist; `episodes` là bảng manifest, không phải dữ liệu feature/as-of.
 - Aggregate theo cửa sổ (ví dụ cash-out 24 h) chỉ dùng khi đã quan sát đủ cửa sổ, hoặc đánh dấu censored.
 - Mọi score, alert, truy vấn và kết luận lưu `as_of_time` và phiên bản snapshot.
 
 ### Timestamp, ngày nghiệp vụ, tiền và lịch sử episode chung
 
-- Timestamp (`created_at`, `authorized_at`, `settled_at`, `event_at`, `available_at` và các timestamp tương tự) được lưu dưới dạng UTC. Ngày/giờ cấu hình cho nghiệp vụ được diễn giải trong `Asia/Ho_Chi_Minh` rồi quy đổi sang UTC khi tạo timestamp.
+- Timestamp (`created_at`, `event_at`, `available_at`, `reported_at` và các timestamp tương tự) được lưu dưới dạng UTC. Ngày/giờ cấu hình cho nghiệp vụ được diễn giải trong `Asia/Ho_Chi_Minh` rồi quy đổi sang UTC khi tạo timestamp.
 - T0 là đầu ngày nghiệp vụ `2026-02-01` tại `Asia/Ho_Chi_Minh` (`2026-01-31T17:00:00Z`). `business_calendar` lưu ngày nghiệp vụ theo lịch Việt Nam. Ngày chạy job monitoring hằng ngày, ngày lương và ngày khuyến mãi `11/11` đều được xác định theo `Asia/Ho_Chi_Minh`, không theo ngày UTC.
-- `amount` là số nguyên VND; không nhân/chia ngầm theo nghìn hay triệu. Ví dụ, ngưỡng 10 triệu đồng biểu diễn là `10000000`.
+- `amount` khi có giá trị là số nguyên VND; NULL được giữ nguyên để biểu diễn sự cố pipeline. Không nhân/chia ngầm theo nghìn hay triệu. Ví dụ, ngưỡng 10 triệu đồng biểu diễn là `10000000`.
 - Lịch sử chung trước T0 chỉ lưu một lần với `episode_id = 'base'`; không sao chép theo episode. Khi đọc episode `e`, chỉ hàm as-of ở trên được hợp lịch sử base trước T0 với dữ liệu của `e`, đồng thời giới hạn khả dụng bằng `available_at <= as_of_time` trên cả hai nhánh. `e` là ID episode, không dùng giá trị dành riêng `'base'`.
 
 Các quyết định timezone, đơn vị tiền và cách tham chiếu lịch sử chung được người dùng chốt cho P1.1 ngày 26/10/2026. Cấu hình runtime và provenance nằm tại [`configs/simulator.yaml`](../configs/simulator.yaml) và [`configs/episodes.yaml`](../configs/episodes.yaml).

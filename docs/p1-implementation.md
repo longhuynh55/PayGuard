@@ -82,7 +82,7 @@ Task giữ nguyên P1.1–P1.8; mỗi task làm theo **hai vòng**. Vòng 1 làm
 | Task | Vòng 1 — luồng mỏng | Vòng 2 — sau ★ |
 |---|---|---|
 | P1.1 Config | Đầy đủ | — |
-| P1.2 Schema, storage, as-of | Đầy đủ | — |
+| P1.2 Schema, storage, as-of (`round1-done`) | Đầy đủ | — |
 | P1.3 Thế giới, giao dịch hợp lệ | Tối thiểu: entity + giao dịch hợp lệ có nhịp ngày, profile smoke | Đủ kênh, vai trò tài khoản, refund/reversal |
 | P1.4 Fraud | **Một** cơ chế (card testing) | Đủ cơ chế, social engineering, cash-out, `legit_business_spike` |
 | P1.5 Nhãn | Đầy đủ | — |
@@ -102,11 +102,11 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Kiểm tra:** config thiếu trường bắt buộc, probability ngoài miền, lịch thời gian không hợp lệ hoặc giá trị không có đơn vị/provenance phải được báo rõ. Profile smoke giảm quy mô, không đổi ý nghĩa của protocol.
 - **Hoàn tất:** config đọc được và validate được; các giá trị chưa có nguồn mang nhãn assumption thay vì bị bỏ trống hoặc chặn vô thời hạn. Không mở thêm vòng literature review rộng.
 
-### P1.2 — Schema, storage và fixture nhỏ (`todo`)
+### P1.2 — Schema, storage và fixture nhỏ (`round1-done`)
 
 - **Mục tiêu:** có fixture thủ công rất nhỏ chạy xuyên qua bước ghi/đọc dữ liệu và snapshot as-of.
 - **Phụ thuộc:** P1.1; hợp đồng dữ liệu ở `data.md` được cụ thể hóa đủ để tạo bảng.
-- **File:** `simulator/schema.py`, `storage.py`, `asof.py`; fixture và các test integrity/as-of.
+- **File:** [`simulator/schema.py`](../simulator/schema.py), [`simulator/storage.py`](../simulator/storage.py), [`simulator/asof.py`](../simulator/asof.py), fixture [`tests/fixtures/p1_2_operational.json`](../tests/fixtures/p1_2_operational.json), test [`tests/test_simulator_integrity.py`](../tests/test_simulator_integrity.py) và [`tests/test_simulator_asof.py`](../tests/test_simulator_asof.py). Chi tiết type/khóa/nullability ở [data.md](data.md).
 - **Triển khai:** tạo schema, khóa và quan hệ; export operational/private; xây API đọc theo as-of và episode. Phân loại từng trường thành dữ liệu quan sát được, nhãn đã khả dụng hoặc metadata/truth nội bộ. Vai trò fraud ẩn, ID template/seed và đáp án injector không được đưa vào feature operational. Dựng fixture gồm nhiều episode, dữ liệu về trễ và nhãn chưa về để kiểm tra ranh giới trước khi viết generator lớn.
 - **Kiểm tra:** khóa trùng, FK mồ côi, truy vấn nhầm episode, bản ghi chưa khả dụng, thời điểm đúng bằng cutoff; thêm dữ liệu chỉ khả dụng sau t không đổi snapshot tại t. Liệt kê bảng/cột/export của operational để xác nhận không có truth nội bộ.
 - **Hoàn tất:** fixture ghi/đọc được, trả đúng các hàng theo episode/as-of và không lẫn truth. Không coi một DB nằm ở thư mục khác là bằng chứng cô lập tool end-to-end.
@@ -197,4 +197,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.1 — cấu hình và provenance.** Đầu ra đầu tiên là config có thể validate, các quyết định biểu diễn dữ liệu được ghi tại nguồn và danh sách giả định còn lại. Sau đó làm fixture của P1.2; chưa đánh dấu task nào done từ việc chỉ có sub-plan này.
+**P1.3 — thế giới và giao dịch hợp lệ.** P1.1 và P1.2 vòng 1 đã có artifact runtime; bước tiếp theo sinh entity và giao dịch nền theo [data.md](data.md).
