@@ -93,7 +93,7 @@ Task giữ nguyên P1.1–P1.8; mỗi task làm theo **hai vòng**. Vòng 1 làm
 Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng thái task ghi `round1-done` trước khi lên `done`.
 
 
-### P1.1 — Cấu hình và provenance (`todo`)
+### P1.1 — Cấu hình và provenance (`round1-done`)
 
 - **Mục tiêu:** mọi tham số được sử dụng có giá trị, đơn vị, lý do và nguồn hoặc nhãn giả định rõ ràng.
 - **Phụ thuộc / đầu vào:** các nguồn đã chọn trong `data.md` / [rationale.md](rationale.md); phạm vi MVP và các vai trò episode hiện hành.

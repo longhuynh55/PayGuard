@@ -1,0 +1,201 @@
+schema_version: 1
+
+# This seed is a reproducibility default, separate from the behavior parameters
+# and profile sizes below. Run manifests will record any override.
+seed:
+  value: 20261025
+  unit: integer seed
+  rationale: Fixed default for deterministic simulator runs; not a tuned benchmark parameter.
+  provenance:
+    kind: assumption
+    reference: P1.1 implementation default; no external source claims this seed.
+
+timeline:
+  storage_timezone:
+    value: UTC
+    unit: IANA timezone
+    rationale: Normalize persisted timestamps to one timezone.
+    provenance:
+      kind: user_decision
+      reference: User decision for P1.1 on 2026-10-26.
+  business_timezone:
+    value: Asia/Ho_Chi_Minh
+    unit: IANA timezone
+    rationale: Resolve business dates and local schedules in Vietnam time.
+    provenance:
+      kind: user_decision
+      reference: User decision for P1.1 on 2026-10-26.
+  start_business_date:
+    value: "2025-07-01"
+    unit: local business date
+    rationale: Start of the declared base simulation period.
+    provenance:
+      kind: contract
+      reference: docs/data.md, section 1.
+  end_business_date_exclusive:
+    value: "2026-07-01"
+    unit: local business date
+    rationale: Exclusive end boundary for the declared July 2025 through June 2026 period.
+    provenance:
+      kind: contract
+      reference: docs/data.md, section 1.
+  t0_business_date:
+    value: "2026-02-01"
+    unit: local business date
+    rationale: Split between shared history and episode futures.
+    provenance:
+      kind: contract
+      reference: docs/data.md, sections 1 and 4.
+  drift_start_business_date:
+    value: "2026-04-01"
+    unit: local business date
+    rationale: Declared start of background drift in the demo timeline.
+    provenance:
+      kind: contract
+      reference: docs/data.md, section 1.
+  monitoring_job_time_local:
+    value: "00:00"
+    unit: local wall-clock time
+    rationale: Explicit default execution time for a daily monitoring job; replace only through a versioned config decision.
+    provenance:
+      kind: assumption
+      reference: Simulator schedule assumption; docs/data.md fixes the local calendar timezone, not the execution hour.
+  salary_days_of_month:
+    value: [10, 25]
+    unit: day of month in Asia/Ho_Chi_Minh
+    rationale: Configurable representative paydays; these dates are synthetic assumptions, not market measurements.
+    provenance:
+      kind: assumption
+      reference: Simulator calendar assumption; no external source is claimed.
+  promotion_month_day:
+    value: "11-11"
+    unit: month-day in Asia/Ho_Chi_Minh
+    rationale: Keep the 11/11 promotion date in the local business calendar.
+    provenance:
+      kind: contract
+      reference: docs/data.md, section 1.
+
+world:
+  expected_transactions_per_customer_local_day:
+    value: 0.15
+    unit: transactions per customer per local calendar day
+    rationale: Low-volume synthetic baseline chosen for an initial simulator profile.
+    provenance:
+      kind: assumption
+      reference: Simulator scale assumption; no external dataset estimate is claimed.
+  minimum_customer_count:
+    value: 1
+    unit: customers
+    rationale: Smallest valid generated world.
+    provenance:
+      kind: assumption
+      reference: Simulator validity constraint.
+  minimum_merchant_count:
+    value: 1
+    unit: merchants
+    rationale: Smallest valid generated world.
+    provenance:
+      kind: assumption
+      reference: Simulator validity constraint.
+
+transactions:
+  minimum_amount:
+    value: 1000
+    unit: integer VND
+    rationale: Positive lower bound for generated transaction amounts.
+    provenance:
+      kind: assumption
+      reference: Simulator amount-range assumption; no external distribution is claimed.
+  maximum_amount:
+    value: 100000000
+    unit: integer VND
+    rationale: Upper bound for the initial synthetic transaction range.
+    provenance:
+      kind: assumption
+      reference: Simulator amount-range assumption; no external distribution is claimed.
+
+fraud:
+  card_testing:
+    approval_probability:
+      value: 0.05
+      unit: probability in [0, 1]
+      rationale: Assumed low approval rate for repeated card-testing attempts.
+      provenance:
+        kind: assumption
+        reference: Simulator mechanism assumption; not an empirical estimate.
+    attempts_per_card:
+      value: 8
+      unit: attempts per tested card
+      rationale: Small repeated-attempt pattern for the MVP card-testing mechanism.
+      provenance:
+        kind: assumption
+        reference: Simulator mechanism assumption; not an empirical estimate.
+    window_minutes:
+      value: 10
+      unit: minutes
+      rationale: Assumed short window used to group repeated attempts.
+      provenance:
+        kind: assumption
+        reference: Simulator mechanism assumption; not an empirical estimate.
+
+label_reporting:
+  maturity_horizon_days:
+    value: 90
+    unit: days
+    rationale: MVP maturity policy horizon.
+    provenance:
+      kind: contract
+      reference: docs/data.md, section 3.
+  minimum_delay_days:
+    value: 0
+    unit: days after event
+    rationale: Allows a reported label to be available on the event date when the chosen source supports it.
+    provenance:
+      kind: assumption
+      reference: Simulator reporting-delay assumption; no source-specific distribution is claimed.
+  maximum_delay_days:
+    value: 120
+    unit: days after event
+    rationale: Allows late reports beyond the 90-day maturity horizon for tail auditing.
+    provenance:
+      kind: assumption
+      reference: Simulator reporting-delay assumption; no source-specific distribution is claimed.
+  probability_reported:
+    value: 0.8
+    unit: probability in [0, 1]
+    rationale: Represents that some fraud may never be reported.
+    provenance:
+      kind: assumption
+      reference: Simulator reporting assumption; not an empirical estimate.
+
+profiles:
+  smoke:
+    customer_count:
+      value: 20
+      unit: customers
+      rationale: Small synthetic world for fast contract checks.
+      provenance:
+        kind: assumption
+        reference: P1.1 smoke profile scale; no protocol values are changed.
+    merchant_count:
+      value: 5
+      unit: merchants
+      rationale: Small synthetic merchant set for fast contract checks.
+      provenance:
+        kind: assumption
+        reference: P1.1 smoke profile scale; no protocol values are changed.
+  pilot:
+    customer_count:
+      value: 1000
+      unit: customers
+      rationale: Initial pilot world size, subject to support checks at P1.8.
+      provenance:
+        kind: assumption
+        reference: P1.1 pilot profile scale; no external population estimate is claimed.
+    merchant_count:
+      value: 100
+      unit: merchants
+      rationale: Initial pilot merchant count, subject to support checks at P1.8.
+      provenance:
+        kind: assumption
+        reference: P1.1 pilot profile scale; no external population estimate is claimed.

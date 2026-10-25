@@ -31,9 +31,19 @@ Sự cố bẫy `legit_business_spike`: hộ kinh doanh có fan-in cao một cá
 | Truth sự cố | xem mục 5 | **Không** nằm trong DB của agent |
 
 **Quy tắc as-of:**
-- Mọi feature và SQL chỉ đọc bản ghi có `available_at <= as_of_time` và đúng `episode_id`. Truy vấn tại t không đổi khi thêm dữ liệu chỉ khả dụng sau t.
+- Mọi feature và SQL chỉ đọc bản ghi có `available_at <= as_of_time`. Truy vấn tại t không đổi khi thêm dữ liệu chỉ khả dụng sau t.
+- Với episode `e`, lựa chọn dữ liệu duy nhất là `(episode_id = 'base' AND event_at < T0) UNION (episode_id = e)`, áp điều kiện `available_at <= as_of_time` cho **cả hai nhánh**. P1.2 hiện thực lựa chọn này qua một hàm as-of duy nhất; caller không tự truy vấn/join các bảng episode.
 - Aggregate theo cửa sổ (ví dụ cash-out 24 h) chỉ dùng khi đã quan sát đủ cửa sổ, hoặc đánh dấu censored.
 - Mọi score, alert, truy vấn và kết luận lưu `as_of_time` và phiên bản snapshot.
+
+### Timestamp, ngày nghiệp vụ, tiền và lịch sử episode chung
+
+- Timestamp (`created_at`, `authorized_at`, `settled_at`, `event_at`, `available_at` và các timestamp tương tự) được lưu dưới dạng UTC. Ngày/giờ cấu hình cho nghiệp vụ được diễn giải trong `Asia/Ho_Chi_Minh` rồi quy đổi sang UTC khi tạo timestamp.
+- T0 là đầu ngày nghiệp vụ `2026-02-01` tại `Asia/Ho_Chi_Minh` (`2026-01-31T17:00:00Z`). `business_calendar` lưu ngày nghiệp vụ theo lịch Việt Nam. Ngày chạy job monitoring hằng ngày, ngày lương và ngày khuyến mãi `11/11` đều được xác định theo `Asia/Ho_Chi_Minh`, không theo ngày UTC.
+- `amount` là số nguyên VND; không nhân/chia ngầm theo nghìn hay triệu. Ví dụ, ngưỡng 10 triệu đồng biểu diễn là `10000000`.
+- Lịch sử chung trước T0 chỉ lưu một lần với `episode_id = 'base'`; không sao chép theo episode. Khi đọc episode `e`, chỉ hàm as-of ở trên được hợp lịch sử base trước T0 với dữ liệu của `e`, đồng thời giới hạn khả dụng bằng `available_at <= as_of_time` trên cả hai nhánh. `e` là ID episode, không dùng giá trị dành riêng `'base'`.
+
+Các quyết định timezone, đơn vị tiền và cách tham chiếu lịch sử chung được người dùng chốt cho P1.1 ngày 26/10/2026. Cấu hình runtime và provenance nằm tại [`configs/simulator.yaml`](../configs/simulator.yaml) và [`configs/episodes.yaml`](../configs/episodes.yaml).
 
 **Cô lập truth:** truth/injector ở file hoặc DB riêng; tool của agent không có kết nối tới. Đặt tiền tố `_truth` hay dặn trong prompt **không** đủ làm ranh giới truy cập.
 

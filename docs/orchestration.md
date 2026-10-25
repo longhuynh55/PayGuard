@@ -31,7 +31,7 @@ Sub-plan của P2/P3 do Claude viết trước khi stage bắt đầu, cùng for
 | Trả lời coder KHI docs đã có câu trả lời (trích nguồn); docs chưa có và KHÔNG đụng protocol → chọn phương án THẬN TRỌNG NHẤT, ghi vào "Quyết định chờ duyệt" | Xin quyền, trust, lệnh nguy hiểm, cài gói ngoài uv |
 | Gửi coder sửa finding "chặn MVP", ≤ 2 vòng | Hết 2 vòng vẫn còn finding chặn |
 | Tự merge khi PASS + test xanh | Đổi protocol, làm phần Mở rộng, đổi split/ngưỡng đã khóa |
-| Viết sub-plan P2/P3 theo docs đã khóa | Merge conflict, test đỏ trên main sau merge |
+| Viết sub-plan P2/P3 theo docs đã khóa; gộp conflict CHỈ ở bảng trạng thái/nhật ký của MASTER và sub-plan (giữ cả hai phía, ghi nhật ký) | Merge conflict ở code, test hoặc nội dung hợp đồng `docs/`; test đỏ trên main sau merge |
 | Cập nhật trạng thái, nhật ký | Coder kẹt > 45 phút không tiến triển |
 
 ## Quyết định chờ duyệt
@@ -51,3 +51,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 |---|---|---|
 | 25/10 23:48 | P1.1 r1 | Coder hỏi 3 semantics (timestamp, tiền, lịch sử trước T0) → người dùng chốt: UTC + lịch VN, VND nguyên, lịch sử chung `episode_id = 'base'` |
 | 26/10 00:01 | P1.1 r1 | Coder bị chặn ở `git add` (.git ngoài sandbox) → đổi quy trình: orchestrator commit. 10 test pass; commit `1fd078b`; review vòng 1 đang chạy |
+| 26/10 00:10 | P1.1 | Review vòng 1 CHANGES_REQUIRED (3 finding chặn: H, timezone, VND) → coder sửa, 17 test → review vòng 2 PASS → merge. Conflict ở bảng trạng thái MASTER (status P1 vs link sub-plan P2/P3) → gộp tay giữ cả hai; luật conflict được làm rõ |
