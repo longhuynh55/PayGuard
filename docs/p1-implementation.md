@@ -121,14 +121,15 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Hoàn tất:** profile smoke sinh được giao dịch hợp lệ và bảng phân phối nền. Có cơ chế lưu fingerprint của nội dung canonical; không yêu cầu file DB nhị phân có hash giống nhau nếu metadata vật lý khác.
 - **Vòng 1 đã bàn giao:** entity nền và giao dịch QR hợp lệ trước T0; lifecycle append-only; fingerprint nội dung được ghi trong private `run_metadata`. Phân phối và giả định đang dùng nằm trong config cùng provenance; các kênh, vai trò tài khoản và refund/reversal còn ở vòng 2. Vòng 2 cũng sửa `_poisson_count` (`simulator/transactions.py`) cho mean lớn/rất nhỏ hoặc giới hạn miền mean trong config — finding không chặn của review vòng 1.
 
-### P1.4 — Hành vi fraud và các ca đối chứng (`todo`)
+### P1.4 — Hành vi fraud và các ca đối chứng (`round1-done`; vòng 2 chưa làm)
 
 - **Mục tiêu:** hiện thực các cơ chế fraud và đối chứng nghiệp vụ đã có trong MVP mà không đưa nhãn ẩn vào feature.
 - **Phụ thuộc:** P1.3.
 - **File:** `simulator/fraud.py`; test integrity/incidents và báo cáo diagnostic.
-- **Triển khai:** các cơ chế, vai trò người nhận, cash-out và `legit_business_spike` theo `data.md`. Tách metadata generator khỏi thuộc tính quan sát được. Các đặc trưng phía người nhận phải suy ra được từ giao dịch đã quan sát, không ghi sẵn từ truth; định nghĩa rõ cửa sổ chưa hoàn tất.
-- **Kiểm tra:** fraud/benign đối chứng đều đi qua cùng schema và luồng ghi dữ liệu; không có cột operational mã hóa trực tiếp cơ chế hoặc nhãn. Kiểm tra quan hệ chuỗi giao dịch và cash-out; ca fraud pha trộn với benign vẫn nhất quán.
-- **Hoàn tất:** từng cơ chế sinh được ví dụ có thể kiểm tra bằng dữ liệu; báo diagnostic artefact và giới hạn simulator. Một feature phân biệt mạnh phải được giải thích từ hành vi/dữ liệu khả dụng, không tự coi AUC cao hay thấp là bằng chứng duy nhất về leakage.
+- **Vòng 2 (chưa làm):** các cơ chế, vai trò người nhận, cash-out và `legit_business_spike` theo `data.md`. Tách metadata generator khỏi thuộc tính quan sát được. Các đặc trưng phía người nhận phải suy ra được từ giao dịch đã quan sát, không ghi sẵn từ truth; định nghĩa rõ cửa sổ chưa hoàn tất.
+- **Kiểm tra vòng 2:** fraud/benign đối chứng đều đi qua cùng schema và luồng ghi dữ liệu; không có cột operational mã hóa trực tiếp cơ chế hoặc nhãn. Kiểm tra quan hệ chuỗi giao dịch và cash-out; ca fraud pha trộn với benign vẫn nhất quán.
+- **Hoàn tất vòng 2:** từng cơ chế sinh được ví dụ có thể kiểm tra bằng dữ liệu; báo diagnostic artefact và giới hạn simulator. Một feature phân biệt mạnh phải được giải thích từ hành vi/dữ liệu khả dụng, không tự coi AUC cao hay thấp là bằng chứng duy nhất về leakage.
+- **Vòng 1 đã bàn giao:** `simulator/fraud.py` sinh chuỗi card testing trên channel `card` cùng ca benign nhiều giao dịch nhỏ qua `transactions` và `transaction_events`; các kết quả authorization lấy mẫu theo config. Metadata vai trò, cơ chế, ID nhóm/giao dịch và seed chỉ nằm trong private `run_metadata`. Test xác nhận schema operational không đổi, chữ ký tìm thấy từ dữ liệu quan sát, integrity fraud/control, tái lập và lịch sử nền không đổi khi bỏ qua generator fraud. Giới hạn hiện có: `customer_id` đại diện cho cùng một thẻ vì schema chưa có card token. Config provenance và hợp đồng hành vi nằm tại [`configs/simulator.yaml`](../configs/simulator.yaml) và [`data.md`](data.md).
 
 ### P1.5 — Label events, snapshot và label tail (`todo`)
 
@@ -198,4 +199,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.4 — hành vi fraud và ca đối chứng, vòng 1.** P1.3 vòng 1 đã sinh entity và lịch sử giao dịch nền smoke. Vòng 2 của P1.3 (thêm kênh, vai trò tài khoản, refund/reversal) vẫn được hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
+**P1.5 — nhãn.** P1.4 vòng 1 đã bàn giao card testing và ca benign đối chứng; vòng 2 của P1.3 và P1.4 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
