@@ -1,6 +1,6 @@
 # P1 — Sub-plan triển khai simulator và incident injector
 
-> Trạng thái: **đã lập kế hoạch, chưa triển khai runtime**. Phạm vi và mốc P1: [MASTER_PLAN.md](../MASTER_PLAN.md).
+> Trạng thái: **đang triển khai; P1.1–P1.3 vòng 1 đã có runtime**. Phạm vi và mốc P1: [MASTER_PLAN.md](../MASTER_PLAN.md).
 > File này sở hữu **thứ tự công việc, artifact và điều kiện nghiệm thu P1**. Schema/chính sách dữ liệu vẫn chỉ định nghĩa trong [data.md](data.md); không chép schema vào đây.
 
 ## 1. Kết quả cần bàn giao
@@ -111,14 +111,15 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Kiểm tra:** khóa trùng, FK mồ côi, truy vấn nhầm episode, bản ghi chưa khả dụng, thời điểm đúng bằng cutoff; thêm dữ liệu chỉ khả dụng sau t không đổi snapshot tại t. Liệt kê bảng/cột/export của operational để xác nhận không có truth nội bộ.
 - **Hoàn tất:** fixture ghi/đọc được, trả đúng các hàng theo episode/as-of và không lẫn truth. Không coi một DB nằm ở thư mục khác là bằng chứng cô lập tool end-to-end.
 
-### P1.3 — Thế giới và giao dịch hợp lệ (`todo`)
+### P1.3 — Thế giới và giao dịch hợp lệ (`round1-done`; vòng 2 chưa làm)
 
 - **Mục tiêu:** sinh lịch sử nền nhất quán từ profile khách hàng/merchant, gồm hành vi ngày/giờ/kênh theo config.
 - **Phụ thuộc:** P1.2.
-- **File:** `simulator/world.py`, `transactions.py`; bổ sung test integrity và reproducibility.
+- **File:** [`simulator/world.py`](../simulator/world.py), [`simulator/transactions.py`](../simulator/transactions.py), [`simulator/reproducibility.py`](../simulator/reproducibility.py), cấu hình tại [`configs/simulator.yaml`](../configs/simulator.yaml); test [`test_simulator_integrity.py`](../tests/test_simulator_integrity.py), [`test_simulator_reproducibility.py`](../tests/test_simulator_reproducibility.py) và cấu hình.
 - **Triển khai:** sinh entity, mạng quan hệ và luồng giao dịch hợp lệ theo nghiệp vụ trong `data.md`. Giữ riêng RNG/seed của thế giới, giao dịch và các thành phần sẽ bổ sung để thay đổi một kịch bản không làm đổi lịch sử nền ngoài ý muốn. Lịch nghiệp vụ công khai chỉ chứa kỳ vọng đã khai báo; không trích đáp án hậu kiểm từ truth.
 - **Kiểm tra:** quan hệ entity, tính hợp lệ mốc thời gian, trạng thái/response, đơn vị tiền và quan hệ refund/reversal theo hợp đồng đã chốt. Cùng seed/config cho cùng nội dung dữ liệu khi sort theo khóa; đổi seed tạo giao dịch khác nhưng vẫn đạt bất biến.
 - **Hoàn tất:** profile smoke sinh được giao dịch hợp lệ và bảng phân phối nền. Có cơ chế lưu fingerprint của nội dung canonical; không yêu cầu file DB nhị phân có hash giống nhau nếu metadata vật lý khác.
+- **Vòng 1 đã bàn giao:** entity nền và giao dịch QR hợp lệ trước T0; lifecycle append-only; fingerprint nội dung được ghi trong private `run_metadata`. Phân phối và giả định đang dùng nằm trong config cùng provenance; các kênh, vai trò tài khoản và refund/reversal còn ở vòng 2.
 
 ### P1.4 — Hành vi fraud và các ca đối chứng (`todo`)
 
@@ -197,4 +198,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.3 — thế giới và giao dịch hợp lệ.** P1.1 và P1.2 vòng 1 đã có artifact runtime; bước tiếp theo sinh entity và giao dịch nền theo [data.md](data.md).
+**P1.4 — hành vi fraud và ca đối chứng, vòng 1.** P1.3 vòng 1 đã sinh entity và lịch sử giao dịch nền smoke. Vòng 2 của P1.3 (thêm kênh, vai trò tài khoản, refund/reversal) vẫn được hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.

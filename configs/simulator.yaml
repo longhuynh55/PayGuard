@@ -79,7 +79,7 @@ world:
   expected_transactions_per_customer_local_day:
     value: 0.15
     unit: transactions per customer per local calendar day
-    rationale: Low-volume synthetic baseline chosen for an initial simulator profile.
+    rationale: Mean of a Poisson daily transaction count; low-volume synthetic baseline for the initial profile.
     provenance:
       kind: assumption
       reference: Simulator scale assumption; no external dataset estimate is claimed.
@@ -97,22 +97,92 @@ world:
     provenance:
       kind: assumption
       reference: Simulator validity constraint.
+  customer_segments:
+    value: [retail]
+    unit: segment codes
+    rationale: Round 1 uses one neutral customer segment; additional account roles are deferred.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 baseline profile; no population proportions are claimed.
+  customer_provinces:
+    value: [HCM, HN]
+    unit: province codes
+    rationale: Uniform synthetic choice from the two locations used by the current fixture.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 baseline profile; no market share is claimed.
+  customer_age_bands:
+    value: [18-24, 25-34, 35-44, 45-54, 55+]
+    unit: age-band codes
+    rationale: Uniform synthetic age-band choice for generated customer profiles.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 baseline profile; no population proportions are claimed.
+  merchant_mcc_codes:
+    value: ["5411", "5812"]
+    unit: MCC text codes
+    rationale: Uniform synthetic choice of MCC using codes already present in the P1.2 fixture.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 baseline profile; no merchant-category proportions are claimed.
+  merchant_provinces:
+    value: [HCM, HN]
+    unit: province codes
+    rationale: Uniform synthetic choice from the two locations used by the current fixture.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 baseline profile; no market share is claimed.
 
 transactions:
   minimum_amount:
     value: 1000
     unit: integer VND
-    rationale: Positive lower bound for generated transaction amounts.
+    rationale: Inclusive lower bound for uniform integer VND amount sampling.
     provenance:
       kind: assumption
       reference: Simulator amount-range assumption; no external distribution is claimed.
   maximum_amount:
     value: 100000000
     unit: integer VND
-    rationale: Upper bound for the initial synthetic transaction range.
+    rationale: Inclusive upper bound for uniform integer VND amount sampling.
     provenance:
       kind: assumption
       reference: Simulator amount-range assumption; no external distribution is claimed.
+  channel:
+    value: qr
+    unit: channel code
+    rationale: One valid baseline channel for P1.3 round 1; additional channels are deferred.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 minimal transaction profile.
+  authorization_response_code:
+    value: "00"
+    unit: response code
+    rationale: One generic approval code for the successful baseline lifecycle.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 response assumption; no processor-specific mapping is claimed.
+  authorization_delay_seconds:
+    value: 1
+    unit: seconds after transaction creation
+    rationale: Keep the authorization lifecycle event distinct from transaction creation.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 lifecycle timing assumption.
+  hourly_transaction_weights:
+    value: [0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.15, 0.15, 0.4, 0.7, 0.9, 1.2, 1.3, 1.1, 0.8, 0.8, 1.0, 1.2, 1.3, 1.2, 0.9, 0.6, 0.3, 0.15]
+    unit: relative weight per local clock hour
+    rationale: Select a local transaction hour by relative weight, then sample minute and second uniformly.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 schedule assumption; no source-backed hourly distribution is claimed.
+  settlement_delay_minutes:
+    value: 10
+    unit: minutes after authorization
+    rationale: Short synthetic delay so lifecycle events are temporally distinct from creation.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 1 lifecycle assumption; no processor-specific latency is claimed.
 
 fraud:
   card_testing:

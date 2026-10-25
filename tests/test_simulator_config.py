@@ -77,6 +77,31 @@ def test_invalid_timeline_schedule_is_rejected() -> None:
         validate_simulator_config(data)
 
 
+def test_transaction_hourly_weights_must_cover_a_local_day() -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["transactions"]["hourly_transaction_weights"]["value"] = [1.0] * 23
+
+    with pytest.raises(ConfigValidationError, match="one value for each local hour"):
+        validate_simulator_config(data)
+
+
+def test_entity_profile_categories_must_be_unique() -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["world"]["merchant_mcc_codes"]["value"] = ["5411", "5411"]
+
+    with pytest.raises(ConfigValidationError, match="must not contain duplicates"):
+        validate_simulator_config(data)
+
+
+def test_lifecycle_delays_must_fit_inside_one_local_day() -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["transactions"]["authorization_delay_seconds"]["value"] = 60
+    data["transactions"]["settlement_delay_minutes"]["value"] = 1439
+
+    with pytest.raises(ConfigValidationError, match="delays must total less than one day"):
+        validate_simulator_config(data)
+
+
 @pytest.mark.parametrize("horizon_days", [30, 60])
 def test_expansion_label_horizons_are_rejected(horizon_days: int) -> None:
     data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
