@@ -36,7 +36,7 @@ Trả lời người dùng bằng tiếng Việt; code và commit bằng tiếng
 python3 review/verify_plan_claims.py
 python3 review/check_links.py
 ```
-Môi trường dùng **uv** (Python 3.12). Khi có code: chạy test bằng `uv run pytest`; KHÔNG `pip install` ngoài uv.
+Môi trường dùng **uv** (Python 3.12); trong sandbox Codex đặt `UV_CACHE_DIR=/tmp/payguard-uv-cache`. Luật tự điều phối và điều kiện DỪNG: [docs/orchestration.md](docs/orchestration.md). Khi có code: chạy test bằng `uv run pytest`; KHÔNG `pip install` ngoài uv.
 
 ## Git
 CHỈ commit/push khi người dùng yêu cầu. KHÔNG đưa `data/`, `.venv/`, cache vào git.

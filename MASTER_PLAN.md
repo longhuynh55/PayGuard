@@ -8,6 +8,7 @@
 | [docs/overview.md](docs/overview.md) | Business problem, giải pháp, ràng buộc, kiến trúc, rủi ro, cách trình bày |
 | [docs/data.md](docs/data.md) | Simulator, schema as-of, nhãn, `business_calendar`, episode, bảng truth — **sở hữu mọi schema dữ liệu** |
 | [docs/p1-implementation.md](docs/p1-implementation.md) | Thứ tự task, file dự kiến, kiểm tra và nghiệm thu implementation P1; schema vẫn ở `docs/data.md` |
+| [docs/orchestration.md](docs/orchestration.md) | Goal hiện tại, vòng lặp tự điều phối, ranh giới tự quyết, nhật ký chạy |
 | [docs/model.md](docs/model.md) | Split 3 tập, LightGBM, calibration, conformal giao dịch |
 | [docs/monitoring.md](docs/monitoring.md) | Metric → signal → alert → incident, incident con |
 | [docs/triage.md](docs/triage.md) | Taxonomy, runbook checklist, gate, quyền đóng, agent, `run_sql` |
@@ -103,6 +104,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 25/10/2026 | Claude tự điều phối theo docs/orchestration.md: goal P1→P2→P3 (vòng 1 cả ba tới ★, rồi vòng 2), chạy liên tục; tự merge khi review PASS + test xanh; dừng hỏi người dùng theo bảng ranh giới |
 | 25/10/2026 | Flow agent: Claude Opus plan + điều phối qua herdr; Codex `gpt-6-luna` (max) code trong worktree theo task; Codex `gpt-6.1-sol` (high) review read-only qua `scripts/review_task.sh`, tối đa 2 vòng; người dùng merge. P1 làm hai vòng (vòng 1 tối thiểu tới mốc ★, vòng 2 làm sâu) — xem docs/p1-implementation.md |
 | 25/10/2026 | Thêm sub-plan P1 theo task có đầu vào/phụ thuộc, file, kiểm tra và điều kiện hoàn tất; schema vẫn chỉ ở docs/data.md. Chưa triển khai runtime; không thay đổi protocol MVP |
 | 25/10/2026 | Sửa sau review rule/agent: mùa vụ dùng nền theo ngày và aggregation theo metric; rủi ro so policy dùng tập truth/episode cố định, reward không tăng do incident con; tách nhánh close và routing; chốt giới hạn giá trị agent trong 4 runbook MVP. Bổ sung ví dụ kiểm chứng; chưa triển khai runtime |
