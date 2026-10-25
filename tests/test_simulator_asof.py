@@ -20,7 +20,11 @@ def test_episode_asof_uses_base_before_t0_and_only_available_rows(p1_2_store) ->
     )
     txn_ids = {row["txn_id"] for row in rows}
 
-    assert txn_ids == {"txn-base-before-t0", "txn-a-at-availability-cutoff"}
+    assert txn_ids == {
+        "txn-base-before-t0",
+        "txn-base-at-boundary",
+        "txn-a-at-availability-cutoff",
+    }
     assert "txn-base-at-t0" not in txn_ids  # the base branch uses event_at < T0
     assert "txn-a-not-yet-available" not in txn_ids
     assert "txn-b-other-episode" not in txn_ids
@@ -56,6 +60,58 @@ def test_lifecycle_events_do_not_reveal_authorization_or_settlement_early(p1_2_s
     assert "status" not in transaction
     assert "authorized_at" not in transaction
     assert "settled_at" not in transaction
+
+
+def test_base_transaction_lifecycle_crosses_t0_in_each_episode(p1_2_store) -> None:
+    before_t0 = read_as_of(
+        p1_2_store.operational,
+        "transaction_events",
+        episode_id="ep-a",
+        t0=T0,
+        as_of_time="2026-01-31T16:59:59.999999Z",
+    )
+    assert "txn-boundary-authorized-ep-a" not in {row["event_id"] for row in before_t0}
+
+    at_t0 = read_as_of(
+        p1_2_store.operational,
+        "transaction_events",
+        episode_id="ep-a",
+        t0=T0,
+        as_of_time=T0,
+    )
+    boundary_event = next(
+        row for row in at_t0 if row["event_id"] == "txn-boundary-authorized-ep-a"
+    )
+    assert boundary_event["txn_id"] == "txn-base-at-boundary"
+    assert boundary_event["episode_id"] == "ep-a"
+    assert boundary_event["event_at"] == "2026-01-31T17:00:00.000000Z"
+    assert boundary_event["available_at"] == "2026-01-31T17:00:00.000000Z"
+    assert "txn-boundary-declined-ep-b" not in {
+        row["event_id"] for row in at_t0
+    }
+
+    after_t0 = read_as_of(
+        p1_2_store.operational,
+        "transaction_events",
+        episode_id="ep-a",
+        t0=T0,
+        as_of_time="2026-01-31T17:00:00.000001Z",
+    )
+    assert "txn-boundary-authorized-ep-a" in {row["event_id"] for row in after_t0}
+
+    other_episode = read_as_of(
+        p1_2_store.operational,
+        "transaction_events",
+        episode_id="ep-b",
+        t0=T0,
+        as_of_time=T0,
+    )
+    assert "txn-boundary-authorized-ep-a" not in {
+        row["event_id"] for row in other_episode
+    }
+    assert "txn-boundary-declined-ep-b" in {
+        row["event_id"] for row in other_episode
+    }
 
 
 def test_availability_equal_to_cutoff_is_included(p1_2_store) -> None:

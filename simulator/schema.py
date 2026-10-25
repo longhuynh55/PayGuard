@@ -10,6 +10,7 @@ UTC_TEXT_CHECK = (
     "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T"
     "[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'"
 )
+T0_UTC_TEXT = "2026-01-31T17:00:00.000000Z"
 
 OPERATIONAL_DDL: tuple[str, ...] = (
     """
@@ -66,7 +67,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
         response_code TEXT NULL,
-        FOREIGN KEY (txn_id, episode_id) REFERENCES transactions(txn_id, episode_id),
+        FOREIGN KEY (txn_id) REFERENCES transactions(txn_id),
         CHECK (available_at >= event_at)
     )
     """,
@@ -104,6 +105,31 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         CHECK (json_type(expected_effect_json) = 'object'),
         CHECK (json_type(scope_json) = 'object')
     )
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS transaction_events_episode_boundary
+    BEFORE INSERT ON transaction_events
+    WHEN (NEW.episode_id = 'base' AND NEW.event_at >= '{T0_UTC_TEXT}')
+      OR (NEW.episode_id <> 'base' AND NEW.event_at < '{T0_UTC_TEXT}')
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction event episode must match its event_at relative to T0');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS transaction_events_parent_episode
+    BEFORE INSERT ON transaction_events
+    WHEN EXISTS (SELECT 1 FROM transactions WHERE txn_id = NEW.txn_id)
+     AND (
+         (NEW.episode_id = 'base'
+          AND (SELECT episode_id FROM transactions WHERE txn_id = NEW.txn_id) <> 'base')
+         OR
+         (NEW.episode_id <> 'base'
+          AND (SELECT episode_id FROM transactions WHERE txn_id = NEW.txn_id)
+              NOT IN ('base', NEW.episode_id))
+     )
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction event must reference a base or same-episode transaction');
+    END
     """,
     """
     CREATE TRIGGER IF NOT EXISTS transactions_customer_episode_insert

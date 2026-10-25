@@ -15,6 +15,7 @@
   ],
   "transactions": [
     {"txn_id": "txn-base-before-t0", "episode_id": "base", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-01-30T10:00:00.000000Z", "event_at": "2026-01-30T10:00:00.000000Z", "available_at": "2026-01-30T10:00:00.000000Z", "amount": 125000, "channel": "qr"},
+    {"txn_id": "txn-base-at-boundary", "episode_id": "base", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-01-31T16:59:59.000000Z", "event_at": "2026-01-31T16:59:59.000000Z", "available_at": "2026-01-31T16:59:59.000000Z", "amount": 175000, "channel": "card"},
     {"txn_id": "txn-base-at-t0", "episode_id": "base", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-01-31T17:00:00.000000Z", "event_at": "2026-01-31T17:00:00.000000Z", "available_at": "2026-01-31T17:00:00.000000Z", "amount": 250000, "channel": "card"},
     {"txn_id": "txn-a-at-availability-cutoff", "episode_id": "ep-a", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-02-01T00:00:00.000000Z", "event_at": "2026-02-01T00:00:00.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "amount": 500000, "channel": "wallet"},
     {"txn_id": "txn-a-not-yet-available", "episode_id": "ep-a", "customer_id": "customer-base", "merchant_id": "merchant-base", "created_at": "2026-02-01T00:01:00.000000Z", "event_at": "2026-02-01T00:01:00.000000Z", "available_at": "2026-02-02T00:00:00.000001Z", "amount": 750000, "channel": "wallet"},
@@ -23,7 +24,8 @@
   "transaction_events": [
     {"event_id": "txn-base-authorized", "txn_id": "txn-base-before-t0", "episode_id": "base", "event_type": "authorized", "event_at": "2026-01-30T10:00:01.000000Z", "available_at": "2026-01-30T10:00:01.000000Z", "response_code": "00"},
     {"event_id": "txn-base-settled", "txn_id": "txn-base-before-t0", "episode_id": "base", "event_type": "settled", "event_at": "2026-01-30T10:10:00.000000Z", "available_at": "2026-01-30T10:10:00.000000Z", "response_code": null},
-    {"event_id": "txn-base-at-t0-authorized", "txn_id": "txn-base-at-t0", "episode_id": "base", "event_type": "authorized", "event_at": "2026-01-31T17:00:01.000000Z", "available_at": "2026-01-31T17:00:01.000000Z", "response_code": "00"},
+    {"event_id": "txn-boundary-authorized-ep-a", "txn_id": "txn-base-at-boundary", "episode_id": "ep-a", "event_type": "authorized", "event_at": "2026-01-31T17:00:00.000000Z", "available_at": "2026-01-31T17:00:00.000000Z", "response_code": "00"},
+    {"event_id": "txn-boundary-declined-ep-b", "txn_id": "txn-base-at-boundary", "episode_id": "ep-b", "event_type": "declined", "event_at": "2026-01-31T17:00:00.000000Z", "available_at": "2026-01-31T17:00:00.000000Z", "response_code": "05"},
     {"event_id": "txn-a-authorized", "txn_id": "txn-a-at-availability-cutoff", "episode_id": "ep-a", "event_type": "authorized", "event_at": "2026-02-01T00:00:01.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "response_code": "00"},
     {"event_id": "txn-b-authorized", "txn_id": "txn-b-other-episode", "episode_id": "ep-b", "event_type": "authorized", "event_at": "2026-02-01T00:02:01.000000Z", "available_at": "2026-02-02T00:00:00.000000Z", "response_code": "00"}
   ],

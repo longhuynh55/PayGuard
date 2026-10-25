@@ -21,7 +21,7 @@ def test_manual_fixture_writes_and_reads_from_separate_exports(p1_2_store) -> No
     assert pair.operational.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert pair.private.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
-    assert pair.operational.execute("SELECT count(*) FROM transactions").fetchone()[0] == 5
+    assert pair.operational.execute("SELECT count(*) FROM transactions").fetchone()[0] == 6
     insert_private_record(pair.private, "private_episodes", {"episode_id": "ep-a"})
     insert_private_record(
         pair.private,
@@ -155,6 +155,48 @@ def test_episode_relations_cannot_be_broken_by_update(p1_2_store) -> None:
             "UPDATE merchants SET episode_id = 'ep-b' WHERE merchant_id = 'merchant-base'"
         )
     assert p1_2_store.operational.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_transaction_event_episode_boundary_and_parent_rules(p1_2_store) -> None:
+    invalid_events = [
+        {
+            "event_id": "base-event-at-t0",
+            "txn_id": "txn-base-at-boundary",
+            "episode_id": "base",
+            "event_type": "authorized",
+            "event_at": "2026-01-31T17:00:00Z",
+            "available_at": "2026-01-31T17:00:00Z",
+            "response_code": "00",
+        },
+        {
+            "event_id": "episode-event-before-t0",
+            "txn_id": "txn-base-at-boundary",
+            "episode_id": "ep-a",
+            "event_type": "authorized",
+            "event_at": "2026-01-31T16:59:59.999999Z",
+            "available_at": "2026-01-31T17:00:00Z",
+            "response_code": "00",
+        },
+    ]
+    for event in invalid_events:
+        with pytest.raises(sqlite3.IntegrityError, match="relative to T0"):
+            insert_operational_record(
+                p1_2_store.operational, "transaction_events", event
+            )
+
+    event_for_other_episode = {
+        "event_id": "episode-a-event-pointing-to-episode-b-transaction",
+        "txn_id": "txn-b-other-episode",
+        "episode_id": "ep-a",
+        "event_type": "authorized",
+        "event_at": "2026-01-31T17:00:01Z",
+        "available_at": "2026-01-31T17:00:01Z",
+        "response_code": "00",
+    }
+    with pytest.raises(sqlite3.IntegrityError, match="base or same-episode transaction"):
+        insert_operational_record(
+            p1_2_store.operational, "transaction_events", event_for_other_episode
+        )
 
 
 def test_transaction_events_are_append_only(p1_2_store) -> None:
