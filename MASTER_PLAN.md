@@ -7,6 +7,7 @@
 |---|---|
 | [docs/overview.md](docs/overview.md) | Business problem, giải pháp, ràng buộc, kiến trúc, rủi ro, cách trình bày |
 | [docs/data.md](docs/data.md) | Simulator, schema as-of, nhãn, `business_calendar`, episode, bảng truth — **sở hữu mọi schema dữ liệu** |
+| [docs/p1-implementation.md](docs/p1-implementation.md) | Thứ tự task, file dự kiến, kiểm tra và nghiệm thu implementation P1; schema vẫn ở `docs/data.md` |
 | [docs/model.md](docs/model.md) | Split 3 tập, LightGBM, calibration, conformal giao dịch |
 | [docs/monitoring.md](docs/monitoring.md) | Metric → signal → alert → incident, incident con |
 | [docs/triage.md](docs/triage.md) | Taxonomy, runbook checklist, gate, quyền đóng, agent, `run_sql` |
@@ -35,7 +36,7 @@
 | Stage | Module | Trạng thái |
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; runtime P1–P4 chưa được triển khai |
-| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Làm lại — bản 24/10 đã rollback; số cũ trong docs chỉ để tham khảo |
+| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md), runtime chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) | 🔁 Làm lại |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) | ⬜ |
 | P4 | Triage ([triage](docs/triage.md)) | ⬜ |
@@ -102,6 +103,8 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 25/10/2026 | Flow agent: Claude Opus plan + điều phối qua herdr; Codex `gpt-6-luna` (max) code trong worktree theo task; Codex `gpt-6.1-sol` (high) review read-only qua `scripts/review_task.sh`, tối đa 2 vòng; người dùng merge. P1 làm hai vòng (vòng 1 tối thiểu tới mốc ★, vòng 2 làm sâu) — xem docs/p1-implementation.md |
+| 25/10/2026 | Thêm sub-plan P1 theo task có đầu vào/phụ thuộc, file, kiểm tra và điều kiện hoàn tất; schema vẫn chỉ ở docs/data.md. Chưa triển khai runtime; không thay đổi protocol MVP |
 | 25/10/2026 | Sửa sau review rule/agent: mùa vụ dùng nền theo ngày và aggregation theo metric; rủi ro so policy dùng tập truth/episode cố định, reward không tăng do incident con; tách nhánh close và routing; chốt giới hạn giá trị agent trong 4 runbook MVP. Bổ sung ví dụ kiểm chứng; chưa triển khai runtime |
 | 25/10/2026 | Tổ chức lại tài liệu theo module (`docs/`); MASTER chỉ giữ đích đến, trạng thái, lộ trình, phạm vi MVP, ngân sách, nhật ký. PROJECT_PLAN, RESEARCH_DECISIONS, PLAN_REVIEW và bản MASTER cũ chuyển vào `archive/`. Gộp P1 + P1.5 thành P1 |
 | 25/10/2026 | Sửa sau review lần 3: so sánh gate UQ dùng cùng kết luận đa số + bằng chứng, chỉ bật/tắt điều kiện score; routing đúng hạn kiểm tra đúng incident và `intervention_start_at <= decision_at <= deadline_at` |

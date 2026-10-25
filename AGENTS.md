@@ -20,8 +20,15 @@ Trả lời người dùng bằng tiếng Việt; code và commit bằng tiếng
 - `evidence_status` do CODE tính, KHÔNG do LLM tự điền.
 
 ## Vai trò
-- **Implementer:** CHỈ làm MVP; phần *Mở rộng* PHẢI hỏi người dùng. Sửa protocol → cập nhật `review/verify_plan_claims.py` + nhật ký quyết định trong MASTER. Xong việc → cập nhật Trạng thái trong MASTER.
-- **Reviewer:** KHÔNG sửa file. Mỗi phát hiện ghi `file:line`, phản ví dụ hoặc lệnh đã chạy, đề xuất sửa, mức (chặn MVP / không chặn). Protocol đã khóa — KHÔNG mở vòng research mới.
+| Vai | Ai | Được sửa |
+|---|---|---|
+| Planner + orchestrator | **Claude Opus** (Claude Code) | `MASTER_PLAN.md`, `docs/`, task spec |
+| Implementer | **Codex `gpt-6-luna`, reasoning max**, `-s workspace-write`, trong worktree của task | Code, test, `docs/` khi hợp đồng đổi |
+| Reviewer | **Codex `gpt-6.1-sol`, reasoning high**, `scripts/review_task.sh` (read-only, ephemeral) | KHÔNG sửa gì; findings vào `review/findings/` |
+
+- **Planner/orchestrator:** viết task có tiêu chí nghiệm thu kiểm tra được; giao việc và chờ qua `herdr`; KHÔNG viết code runtime. Agent ở trạng thái `blocked` → BÁO NGƯỜI DÙNG, KHÔNG tự trả lời hay tự duyệt quyền.
+- **Implementer:** CHỈ làm MVP; phần *Mở rộng* PHẢI hỏi người dùng. Spec mơ hồ → HỎI trước khi code, KHÔNG tự đoán. KHÔNG sửa/xóa/nới test nghiệm thu để cho qua. Code đổi hợp đồng (schema, bảng, ngưỡng) → PHẢI sửa `docs/` TRONG CÙNG COMMIT. Sửa protocol → cập nhật `review/verify_plan_claims.py` + nhật ký quyết định trong MASTER. Xong việc → cập nhật Trạng thái trong MASTER.
+- **Reviewer:** KHÔNG sửa file. Mỗi phát hiện ghi `file:line`, phản ví dụ hoặc lệnh đã chạy, đề xuất sửa, mức (chặn MVP / không chặn). Kiểm tra cả lệch giữa code và `docs/`. Protocol đã khóa — KHÔNG mở vòng research mới. TỐI ĐA 2 VÒNG review mỗi task, sau đó dừng hỏi người dùng.
 - **Người dùng chốt.** Bất đồng giữa các agent → trình bày cả hai lập luận, KHÔNG tự quyết.
 
 ## Trước khi báo xong — LUÔN chạy
@@ -29,6 +36,7 @@ Trả lời người dùng bằng tiếng Việt; code và commit bằng tiếng
 python3 review/verify_plan_claims.py
 python3 review/check_links.py
 ```
+Môi trường dùng **uv** (Python 3.12). Khi có code: chạy test bằng `uv run pytest`; KHÔNG `pip install` ngoài uv.
 
 ## Git
 CHỈ commit/push khi người dùng yêu cầu. KHÔNG đưa `data/`, `.venv/`, cache vào git.
