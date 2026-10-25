@@ -11,7 +11,8 @@ task="${1:?task id, e.g. P1.1}"
 round="${2:?review round, 1 or 2}"
 base="${3:-main}"
 
-if [[ "$round" != "1" && "$round" != "2" ]]; then
+# Round 3+ only with explicit user approval for this task: ALLOW_EXTRA_ROUND=1.
+if [[ "$round" != "1" && "$round" != "2" && "${ALLOW_EXTRA_ROUND:-0}" != "1" ]]; then
   echo "AGENTS.md allows at most 2 review rounds per task; ask the user." >&2
   exit 2
 fi
