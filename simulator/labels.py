@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from simulator.asof import read_as_of
 from simulator.config import SimulatorConfig
-from simulator.fraud import CARD_TESTING_METADATA_KEY
+from simulator.fraud import card_testing_metadata_key
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record, utc_timestamp
 
@@ -54,10 +54,19 @@ def _t0_timestamp(config: SimulatorConfig) -> datetime:
     return local_t0.astimezone(UTC)
 
 
-def _load_card_testing_fraud_ids(private: sqlite3.Connection) -> set[str]:
+def label_truth_metadata_key(episode_id: str) -> str:
+    """Return the private label-truth metadata key for one episode stream."""
+    if episode_id == "base":
+        return LABEL_TRUTH_METADATA_KEY
+    return f"{LABEL_TRUTH_METADATA_KEY}:{episode_id}"
+
+
+def _load_card_testing_fraud_ids(
+    private: sqlite3.Connection, episode_id: str
+) -> set[str]:
     row = private.execute(
         "SELECT value_json FROM run_metadata WHERE key = ?",
-        (CARD_TESTING_METADATA_KEY,),
+        (card_testing_metadata_key(episode_id),),
     ).fetchone()
     if row is None:
         raise ValueError("P1.4 card-testing truth metadata is required before label generation")
@@ -87,8 +96,9 @@ def generate_label_events(
     config: SimulatorConfig,
     *,
     seed: int | None = None,
+    episode_id: str = "base",
 ) -> LabelSummary:
-    """Append reported labels for existing P1.3/P1.4 transactions only.
+    """Append reported labels for transactions in one base or episode stream.
 
     Reporting and delay draws use label-specific keyed RNG streams. True labels
     and transactions that are never reported are recorded only in private
@@ -99,25 +109,43 @@ def generate_label_events(
     run_seed = config.seed.value if seed is None else seed
     if isinstance(run_seed, bool) or not isinstance(run_seed, int) or run_seed < 0:
         raise ValueError("label seed must be a non-negative integer")
-    if operational.execute("SELECT 1 FROM label_events LIMIT 1").fetchone():
-        raise ValueError("label generation requires an empty label_events table")
+    if not isinstance(episode_id, str) or not episode_id.strip():
+        raise ValueError("label generation requires a non-empty episode_id")
+    if episode_id == "base":
+        registered = operational.execute(
+            "SELECT 1 FROM episodes WHERE episode_id = 'base' AND role = 'base'"
+        ).fetchone()
+    else:
+        registered = operational.execute(
+            "SELECT 1 FROM episodes WHERE episode_id = ? AND role <> 'base'", (episode_id,)
+        ).fetchone()
+        if private.execute(
+            "SELECT 1 FROM private_episodes WHERE episode_id = ?", (episode_id,)
+        ).fetchone() is None:
+            raise ValueError("label episode must be registered in private storage")
+    if registered is None:
+        raise ValueError("label generation requires a registered episode")
+    if operational.execute(
+        "SELECT 1 FROM label_events WHERE episode_id = ? LIMIT 1", (episode_id,)
+    ).fetchone():
+        raise ValueError("label generation requires an empty episode label stream")
+    metadata_key = label_truth_metadata_key(episode_id)
     if private.execute(
-        "SELECT 1 FROM run_metadata WHERE key = ?", (LABEL_TRUTH_METADATA_KEY,)
+        "SELECT 1 FROM run_metadata WHERE key = ?", (metadata_key,)
     ).fetchone():
         raise ValueError("label generation has already been recorded in this private export")
 
     transactions = [
         dict(row)
         for row in operational.execute(
-            "SELECT txn_id, episode_id, event_at, channel FROM transactions ORDER BY event_at, txn_id"
+            "SELECT txn_id, episode_id, event_at, channel FROM transactions "
+            "WHERE episode_id = ? ORDER BY event_at, txn_id",
+            (episode_id,),
         )
     ]
     if not transactions:
         raise ValueError("P1.3/P1.4 transactions must exist before label generation")
-    if any(row["episode_id"] != "base" for row in transactions):
-        raise ValueError("P1.5 round 1 label generation supports the existing base transactions only")
-
-    fraud_ids = _load_card_testing_fraud_ids(private)
+    fraud_ids = _load_card_testing_fraud_ids(private, episode_id)
     txn_ids = {row["txn_id"] for row in transactions}
     if not fraud_ids <= txn_ids:
         missing = sorted(fraud_ids - txn_ids)
@@ -197,9 +225,10 @@ def generate_label_events(
             private,
             "run_metadata",
             {
-                "key": LABEL_TRUTH_METADATA_KEY,
+                "key": metadata_key,
                 "value_json": {
                     "algorithm": "p1.5-label-events-v1",
+                    "episode_id": episode_id,
                     "seed": run_seed,
                     "maturity_horizon_days": horizon_days,
                     "minimum_delay_days": minimum_delay,
@@ -348,18 +377,52 @@ def label_delay_report(
         },
     }
 
-    metadata_row = private.execute(
-        "SELECT value_json FROM run_metadata WHERE key = ?", (LABEL_TRUTH_METADATA_KEY,)
+    base_metadata_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?",
+        (label_truth_metadata_key("base"),),
     ).fetchone()
-    if metadata_row is None:
+    if base_metadata_row is None:
         raise ValueError("private P1.5 label truth metadata is required for oracle delay reporting")
-    metadata = json.loads(metadata_row[0])
+    base_metadata = json.loads(base_metadata_row[0])
+    metadata_records = [base_metadata]
+    episode_txn_ids = {
+        snapshot.txn_id for snapshot in snapshots if snapshot.episode_id == episode_id
+    }
+    if episode_id != "base":
+        episode_metadata_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?",
+            (label_truth_metadata_key(episode_id),),
+        ).fetchone()
+        if episode_metadata_row is None:
+            if episode_txn_ids:
+                raise ValueError(
+                    "private P1.5 label truth metadata is required for the observed episode snapshot"
+                )
+        else:
+            episode_metadata = json.loads(episode_metadata_row[0])
+            metadata_records.append(episode_metadata)
+
+    metadata = base_metadata
+    for metadata_record in metadata_records[1:]:
+        if any(
+            metadata_record[field] != metadata[field]
+            for field in (
+                "maturity_horizon_days",
+                "maximum_delay_days",
+            )
+        ):
+            raise ValueError("base and episode label truth metadata use different reporting policies")
     horizon_days = metadata["maturity_horizon_days"]
-    outcomes = [
-        outcome
-        for outcome in metadata["transactions"]
-        if outcome["txn_id"] in visible_txn_ids
-    ]
+    outcomes_by_txn: dict[str, dict[str, Any]] = {}
+    for metadata_record in metadata_records:
+        for outcome in metadata_record["transactions"]:
+            txn_id = outcome["txn_id"]
+            if txn_id not in visible_txn_ids:
+                continue
+            if txn_id in outcomes_by_txn:
+                raise ValueError(f"private label truth duplicates transaction {txn_id!r}")
+            outcomes_by_txn[txn_id] = outcome
+    outcomes = list(outcomes_by_txn.values())
     if len(outcomes) != len(visible_txn_ids):
         raise ValueError("private P1.5 truth metadata does not cover the observed transaction snapshot")
     fraud_outcomes = [outcome for outcome in outcomes if outcome["true_label"] == "fraud"]

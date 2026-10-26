@@ -366,13 +366,36 @@ class EpisodeProtocol(StrictModel):
         return self
 
 
+class EpisodeAssignment(StrictModel):
+    episode_id: str = Field(pattern=r"^ep-[0-9]{4}$")
+    role: EpisodeRole
+    template: Literal["clean", "data_pipeline", "seasonal"]
+
+
+class DataPipelineTemplateConfig(StrictModel):
+    mode: ConfigValue[Literal["multiply_100", "null"]]
+
+
+class SeasonalTemplateConfig(StrictModel):
+    date_offset_days: ConfigValue[PositiveInt]
+    event_name: ConfigValue[str]
+    additional_transaction_count: ConfigValue[PositiveInt]
+    expected_relative_change: ConfigValue[PositiveFloat]
+
+
+class EpisodeTemplateConfig(StrictModel):
+    data_pipeline: DataPipelineTemplateConfig
+    seasonal: SeasonalTemplateConfig
+
+
 class EpisodeProfile(StrictModel):
     role_episode_counts: dict[EpisodeRole, ConfigValue[PositiveInt]]
     clean_episode_counts: dict[EpisodeRole, ConfigValue[NonNegativeInt]]
     multi_cause_episode_count: ConfigValue[NonNegativeInt]
+    assignments: list[EpisodeAssignment] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def enforce_pilot_proportions(self) -> EpisodeProfile:
+    def validate_allocations(self) -> EpisodeProfile:
         roles = {"development", "calibration", "test"}
         if set(self.role_episode_counts) != roles or set(self.clean_episode_counts) != roles:
             raise ValueError("each episode profile must define development, calibration, and test roles")
@@ -385,20 +408,13 @@ class EpisodeProfile(StrictModel):
             raise ValueError("episode profile must contain at least one episode")
         if any(clean_counts[role] > episode_counts[role] for role in roles):
             raise ValueError("clean episode count cannot exceed the role's episode count")
-        if episode_counts["development"] * 5 != total:
-            raise ValueError("development episodes must be one fifth of each profile")
-        if episode_counts["calibration"] * 5 != total * 2:
-            raise ValueError("calibration episodes must be two fifths of each profile")
-        if episode_counts["test"] * 5 != total * 2:
-            raise ValueError("test episodes must be two fifths of each profile")
-        if clean_total * 3 != total:
-            raise ValueError("clean episodes must remain one third of each profile")
-        if any(clean_counts[role] * 3 != episode_counts[role] for role in roles):
-            raise ValueError("each role must retain the pilot clean share")
-        if self.multi_cause_episode_count.value * 15 != total:
-            raise ValueError("multi-cause episodes must retain the pilot proportion of one per 15")
         if self.multi_cause_episode_count.value > total - clean_total:
             raise ValueError("multi-cause episodes must be included among injected episodes")
+        episode_ids = [assignment.episode_id for assignment in self.assignments]
+        if len(episode_ids) != len(set(episode_ids)):
+            raise ValueError("episode assignment IDs must be unique within a profile")
+        if self.assignments and len(self.assignments) != total:
+            raise ValueError("episode assignment count must match role_episode_counts")
         return self
 
     @property
@@ -410,6 +426,7 @@ class EpisodeConfig(StrictModel):
     schema_version: Literal[1]
     seed: ConfigValue[NonNegativeInt]
     protocol: EpisodeProtocol
+    templates: EpisodeTemplateConfig
     profiles: dict[ProfileName, EpisodeProfile]
 
     @model_validator(mode="after")
@@ -426,10 +443,34 @@ class EpisodeConfig(StrictModel):
             raise ValueError("pilot clean role counts must match the locked 4/8/8 allocation")
         if pilot.multi_cause_episode_count.value != 4:
             raise ValueError("pilot must contain the four locked multi-cause episodes")
-        if smoke.total_episode_count >= pilot.total_episode_count:
-            raise ValueError("smoke episode count must be lower than pilot episode count")
-        if smoke.total_episode_count * 4 != pilot.total_episode_count:
-            raise ValueError("smoke episode profile must be one quarter of pilot scale")
+        if pilot.total_episode_count != 60:
+            raise ValueError("pilot must remain the locked 60-episode profile")
+
+        if not 3 <= smoke.total_episode_count <= 6:
+            raise ValueError("round-one smoke profile must contain 3 through 6 episodes")
+        if not smoke.assignments:
+            raise ValueError("round-one smoke profile must declare locked episode assignments")
+        smoke_role_counts = {role: 0 for role in ("development", "calibration", "test")}
+        smoke_clean_counts = {role: 0 for role in smoke_role_counts}
+        for assignment in smoke.assignments:
+            smoke_role_counts[assignment.role] += 1
+            if assignment.template == "clean":
+                smoke_clean_counts[assignment.role] += 1
+        if smoke_role_counts != {
+            role: value.value for role, value in smoke.role_episode_counts.items()
+        }:
+            raise ValueError("smoke assignments must match role_episode_counts")
+        if smoke_clean_counts != {
+            role: value.value for role, value in smoke.clean_episode_counts.items()
+        }:
+            raise ValueError("smoke clean assignments must match clean_episode_counts")
+        if smoke.multi_cause_episode_count.value != 0:
+            raise ValueError("round-one smoke episodes support at most one incident each")
+        if self.templates.seasonal.date_offset_days.value >= self.protocol.duration_days.value:
+            raise ValueError("seasonal date_offset_days must fall inside an episode")
+        templates = {assignment.template for assignment in smoke.assignments}
+        if not {"clean", "data_pipeline", "seasonal"} <= templates:
+            raise ValueError("round-one smoke must include clean, data_pipeline, and seasonal episodes")
         return self
 
     def profile(self, profile: ProfileName) -> EpisodeProfile:

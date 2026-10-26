@@ -106,6 +106,29 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         CHECK (json_type(scope_json) = 'object')
     )
     """,
+    """
+    CREATE TRIGGER IF NOT EXISTS episodes_role_immutable
+    BEFORE UPDATE OF episode_id, role ON episodes
+    BEGIN
+        SELECT RAISE(ABORT, 'episode roles are locked and immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS episodes_no_replace
+    BEFORE INSERT ON episodes
+    WHEN NEW.episode_id <> 'base'
+     AND EXISTS (SELECT 1 FROM episodes WHERE episode_id = NEW.episode_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'episode roles are locked and immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS episodes_no_delete
+    BEFORE DELETE ON episodes
+    BEGIN
+        SELECT RAISE(ABORT, 'episode roles are locked and immutable');
+    END
+    """,
     f"""
     CREATE TRIGGER IF NOT EXISTS transaction_events_episode_boundary
     BEFORE INSERT ON transaction_events
@@ -223,6 +246,47 @@ PRIVATE_DDL: tuple[str, ...] = (
         value_json TEXT NOT NULL CHECK (json_valid(value_json))
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS episode_manifest (
+        episode_id TEXT NOT NULL PRIMARY KEY REFERENCES private_episodes(episode_id),
+        role TEXT NOT NULL CHECK (role IN ('development', 'calibration', 'test')),
+        seed INTEGER NOT NULL CHECK (typeof(seed) = 'integer' AND seed >= 0),
+        template TEXT NOT NULL CHECK (template IN ('clean', 'data_pipeline', 'seasonal')),
+        content_fingerprint TEXT NOT NULL CHECK (
+            length(content_fingerprint) = 64
+            AND content_fingerprint NOT GLOB '*[^0-9a-f]*'
+        ),
+        config_fingerprint TEXT NOT NULL CHECK (
+            length(config_fingerprint) = 64
+            AND config_fingerprint NOT GLOB '*[^0-9a-f]*'
+        ),
+        config_json TEXT NOT NULL CHECK (
+            json_valid(config_json) AND json_type(config_json) = 'object'
+        )
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS episode_manifest_no_update
+    BEFORE UPDATE ON episode_manifest
+    BEGIN
+        SELECT RAISE(ABORT, 'episode manifest is locked and immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS episode_manifest_no_replace
+    BEFORE INSERT ON episode_manifest
+    WHEN EXISTS (SELECT 1 FROM episode_manifest WHERE episode_id = NEW.episode_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'episode manifest is locked and immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS episode_manifest_no_delete
+    BEFORE DELETE ON episode_manifest
+    BEGIN
+        SELECT RAISE(ABORT, 'episode manifest is locked and immutable');
+    END
+    """,
     f"""
     CREATE TABLE IF NOT EXISTS incident_truth (
         incident_truth_id TEXT NOT NULL PRIMARY KEY CHECK (length(incident_truth_id) > 0),
@@ -274,7 +338,9 @@ AS_OF_TABLES: frozenset[str] = frozenset(
         "business_calendar",
     }
 )
-PRIVATE_TABLES: frozenset[str] = frozenset({"private_episodes", "run_metadata", "incident_truth"})
+PRIVATE_TABLES: frozenset[str] = frozenset(
+    {"private_episodes", "run_metadata", "episode_manifest", "incident_truth"}
+)
 
 OPERATIONAL_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "customers": frozenset({"event_at", "available_at"}),

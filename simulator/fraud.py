@@ -40,10 +40,11 @@ def _campaign_dates(start_date: date, t0_date: date, interval_days: int) -> list
 
 
 def _next_transaction_id(
-    business_date: date, customer_id: str, occupied: set[str]
+    business_date: date, customer_id: str, occupied: set[str], episode_id: str = "base"
 ) -> str:
-    """Use the same ordinary base transaction ID shape as the background stream."""
-    stem = f"txn-base-{business_date:%Y%m%d}-{customer_id}-d"
+    """Use a deterministic transaction ID scoped to its history or episode."""
+    scope = "base" if episode_id == "base" else episode_id
+    stem = f"txn-{scope}-{business_date:%Y%m%d}-{customer_id}-d"
     sequence = 1
     while f"{stem}{sequence:04d}" in occupied:
         sequence += 1
@@ -56,6 +57,7 @@ def _insert_transaction(
     operational: sqlite3.Connection,
     *,
     txn_id: str,
+    episode_id: str,
     event_ids: set[str],
     customer_id: str,
     merchant_id: str,
@@ -73,7 +75,7 @@ def _insert_transaction(
         "transactions",
         {
             "txn_id": txn_id,
-            "episode_id": "base",
+            "episode_id": episode_id,
             "customer_id": customer_id,
             "merchant_id": merchant_id,
             "created_at": created_at,
@@ -96,7 +98,7 @@ def _insert_transaction(
         {
             "event_id": authorization_event_id,
             "txn_id": txn_id,
-            "episode_id": "base",
+            "episode_id": episode_id,
             "event_type": authorization_type,
             "event_at": authorized_at,
             "available_at": authorized_at,
@@ -117,7 +119,7 @@ def _insert_transaction(
         {
             "event_id": settlement_event_id,
             "txn_id": txn_id,
-            "episode_id": "base",
+            "episode_id": episode_id,
             "event_type": "settled",
             "event_at": settled_at,
             "available_at": settled_at,
@@ -127,14 +129,23 @@ def _insert_transaction(
     return 2
 
 
+def card_testing_metadata_key(episode_id: str) -> str:
+    """Return the private metadata key for one history or episode stream."""
+    if episode_id == "base":
+        return CARD_TESTING_METADATA_KEY
+    return f"{CARD_TESTING_METADATA_KEY}:{episode_id}"
+
+
 def generate_card_testing(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
     config: SimulatorConfig,
     *,
     seed: int | None = None,
+    episode_id: str = "base",
+    duration_days: int = 30,
 ) -> FraudSummary:
-    """Append probabilistic card testing and similar benign traffic to base history.
+    """Append probabilistic card testing and similar benign traffic to one stream.
 
     Card attempts and their later larger transactions use channel ``card``. Each
     small attempt and larger follow-up has an independent keyed approval draw.
@@ -142,8 +153,8 @@ def generate_card_testing(
     all successfully authorized and settled, with no larger follow-up.
 
     Mechanism, role, seed, and entity-to-pattern membership are stored only in
-    the private ``run_metadata`` export. Operational IDs use the ordinary base
-    transaction format and do not encode a fraud mechanism or label.
+    the private ``run_metadata`` export. Operational IDs do not encode a fraud
+    mechanism or label; episode transaction IDs use an episode-specific prefix.
     """
     if operational is private:
         raise ValueError("fraud generation requires separate operational and private connections")
@@ -152,21 +163,41 @@ def generate_card_testing(
     run_seed = config.seed.value if seed is None else seed
     if isinstance(run_seed, bool) or not isinstance(run_seed, int) or run_seed < 0:
         raise ValueError("fraud seed must be a non-negative integer")
+    if not isinstance(episode_id, str) or not episode_id.strip():
+        raise ValueError("fraud generation requires a non-empty episode_id")
+    if isinstance(duration_days, bool) or not isinstance(duration_days, int) or duration_days <= 0:
+        raise ValueError("duration_days must be a positive integer")
+    if episode_id != "base":
+        if operational.execute(
+            "SELECT 1 FROM episodes WHERE episode_id = ? AND role <> 'base'", (episode_id,)
+        ).fetchone() is None:
+            raise ValueError("card-testing generation requires a registered episode")
+        if private.execute(
+            "SELECT 1 FROM private_episodes WHERE episode_id = ?", (episode_id,)
+        ).fetchone() is None:
+            raise ValueError("card-testing episode must be registered in private storage")
+    elif operational.execute(
+        "SELECT 1 FROM episodes WHERE episode_id = 'base' AND role = 'base'"
+    ).fetchone() is None:
+        raise ValueError("base episode must be registered before card-testing generation")
+    metadata_key = card_testing_metadata_key(episode_id)
     if private.execute(
-        "SELECT 1 FROM run_metadata WHERE key = ?", (CARD_TESTING_METADATA_KEY,)
+        "SELECT 1 FROM run_metadata WHERE key = ?", (metadata_key,)
     ).fetchone():
         raise ValueError("card-testing generation has already been recorded in this private export")
 
     customer_ids = [
         row[0]
         for row in operational.execute(
-            "SELECT customer_id FROM customers WHERE episode_id = 'base' ORDER BY customer_id"
+            "SELECT customer_id FROM customers WHERE episode_id IN ('base', ?) ORDER BY customer_id",
+            (episode_id,),
         )
     ]
     merchant_ids = [
         row[0]
         for row in operational.execute(
-            "SELECT merchant_id FROM merchants WHERE episode_id = 'base' ORDER BY merchant_id"
+            "SELECT merchant_id FROM merchants WHERE episode_id IN ('base', ?) ORDER BY merchant_id",
+            (episode_id,),
         )
     ]
     if not customer_ids:
@@ -186,18 +217,25 @@ def generate_card_testing(
     business_timezone = ZoneInfo(config.timeline.business_timezone.value)
     start_date = config.timeline.start_business_date.value
     t0 = config.timeline.t0_business_date.value
+    if episode_id == "base":
+        campaign_start = start_date
+        campaign_end = t0
+    else:
+        campaign_start = t0
+        campaign_end = t0 + timedelta(days=duration_days)
     campaign_dates = _campaign_dates(
-        start_date, t0, mechanism.campaign_interval_days.value
+        campaign_start, campaign_end, mechanism.campaign_interval_days.value
     )
     if not campaign_dates:
-        raise ValueError("card-testing generation requires at least one pre-T0 campaign date")
+        raise ValueError("card-testing generation requires at least one campaign date")
     campaign_count = len(campaign_dates)
-    control_date = t0 - timedelta(days=1)
+    control_date = t0 - timedelta(days=1) if episode_id == "base" else campaign_start
+    scope = () if episode_id == "base" else (episode_id,)
     control_customer = keyed_rng(
-        run_seed, "p1.fraud.benign_control.customer"
+        run_seed, "p1.fraud.benign_control.customer", *scope
     ).choice(customer_ids)
     control_merchant = keyed_rng(
-        run_seed, "p1.fraud.benign_control.merchant"
+        run_seed, "p1.fraud.benign_control.merchant", *scope
     ).choice(merchant_ids)
     window = timedelta(minutes=mechanism.window_minutes.value)
     followup_delay = timedelta(seconds=mechanism.followup_delay_seconds.value)
@@ -225,12 +263,14 @@ def generate_card_testing(
             victim_rng = keyed_rng(
                 run_seed,
                 "p1.fraud.card_testing.victim",
+                *scope,
                 campaign_date.isoformat(),
             )
             campaign_customer = victim_rng.choice(customer_ids)
             campaign_merchant = keyed_rng(
                 run_seed,
                 "p1.fraud.card_testing.merchant",
+                *scope,
                 campaign_date.isoformat(),
             ).choice(merchant_ids)
             for role in ("fraud", "benign_control"):
@@ -268,17 +308,23 @@ def generate_card_testing(
                         seconds=attempt_index * spacing_seconds
                     )
                     amount_rng = keyed_rng(
-                        run_seed, f"{component}.amount", pattern_index, "small", attempt_index
+                        run_seed,
+                        f"{component}.amount",
+                        *scope,
+                        pattern_index,
+                        "small",
+                        attempt_index,
                     )
                     amount = amount_rng.randint(
                         mechanism.minimum_attempt_amount.value,
                         mechanism.maximum_attempt_amount.value,
                     )
-                    txn_id = _next_transaction_id(group_date, customer_id, txn_ids)
+                    txn_id = _next_transaction_id(group_date, customer_id, txn_ids, episode_id)
                     if role == "fraud":
                         outcome_rng = keyed_rng(
                             run_seed,
                             "p1.fraud.card_testing.approval",
+                            *scope,
                             pattern_index,
                             attempt_index,
                         )
@@ -289,6 +335,7 @@ def generate_card_testing(
                     group_event_count += _insert_transaction(
                         operational,
                         txn_id=txn_id,
+                        episode_id=episode_id,
                         event_ids=event_ids,
                         customer_id=customer_id,
                         merchant_id=merchant_id,
@@ -336,17 +383,25 @@ def generate_card_testing(
                 if role == "fraud":
                     followup_created_at = group_start + window + followup_delay
                     followup_amount_rng = keyed_rng(
-                        run_seed, "p1.fraud.card_testing.amount", pattern_index, "followup"
+                        run_seed,
+                        "p1.fraud.card_testing.amount",
+                        *scope,
+                        pattern_index,
+                        "followup",
                     )
                     followup_amount = followup_amount_rng.randint(
                         mechanism.minimum_followup_amount.value,
                         mechanism.maximum_followup_amount.value,
                     )
                     followup_txn_id = _next_transaction_id(
-                        group_date, customer_id, txn_ids
+                        group_date, customer_id, txn_ids, episode_id
                     )
                     followup_outcome_rng = keyed_rng(
-                        run_seed, "p1.fraud.card_testing.approval", pattern_index, "followup"
+                        run_seed,
+                        "p1.fraud.card_testing.approval",
+                        *scope,
+                        pattern_index,
+                        "followup",
                     )
                     followup_approved = (
                         followup_outcome_rng.random()
@@ -355,6 +410,7 @@ def generate_card_testing(
                     followup_events = _insert_transaction(
                         operational,
                         txn_id=followup_txn_id,
+                        episode_id=episode_id,
                         event_ids=event_ids,
                         customer_id=customer_id,
                         merchant_id=merchant_id,
@@ -407,13 +463,15 @@ def generate_card_testing(
             private,
             "run_metadata",
             {
-                "key": CARD_TESTING_METADATA_KEY,
+                "key": metadata_key,
                 "value_json": {
                     "algorithm": "p1.4-card-testing-v2",
+                    "episode_id": episode_id,
                     "seed": run_seed,
                     "mechanism": "card_testing",
                     "channel": mechanism.channel.value,
                     "campaign_interval_days": mechanism.campaign_interval_days.value,
+                    "duration_days": duration_days if episode_id != "base" else None,
                     "summary": asdict(summary),
                     "groups": group_metadata,
                 },
