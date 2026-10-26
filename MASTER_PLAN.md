@@ -38,13 +38,13 @@
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; runtime P1–P4 chưa được triển khai |
 | P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1.1–P1.2, P1.3 vòng 1, P1.4 vòng 1, P1.5 vòng 1, P1.6 vòng 1 và P1.7 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3 vòng 2, P1.4 vòng 2, P1.6 vòng 2, P1.7 vòng 2 và P1.8 chưa triển khai; bản 24/10 đã rollback |
-| P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | 🔁 P2.1 vòng 1 ✅ đã bàn giao audit split; P2.2 vòng 1 ✅ đã bàn giao feature as-of; P2.3 vòng 1 ✅ đã bàn giao LightGBM + calibration; P2.4 vòng 1 ✅ đã bàn giao Mondrian conformal trên score thô; P2.5 chưa triển khai |
+| P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ⬜ |
 | P4 | Triage ([triage](docs/triage.md)) | ⬜ |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
-**Việc tiếp theo:** hai luồng song song — P1.8 CLI/validation smoke theo [sub-plan](docs/p1-implementation.md); P2.5 đánh giá và xuất `model_scores` theo [sub-plan](docs/p2-implementation.md). Sau luồng mỏng tới mốc ★: đo token trên 3 case cố định rồi khóa ngân sách benchmark và số episode (mục 5). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [18 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động và đơn vị rủi ro; chúng không kiểm tra implementation.
+**Việc tiếp theo:** hoàn tất P1.8 CLI/validation smoke theo [sub-plan](docs/p1-implementation.md), rồi tiếp tục P3.1 job metric hằng ngày dùng `model_scores` theo [sub-plan](docs/p3-implementation.md). Khi luồng mỏng tới mốc ★: đo token trên 3 case cố định rồi khóa ngân sách benchmark và số episode (mục 5). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [18 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động và đơn vị rủi ro; chúng không kiểm tra implementation.
 
 ---
 
