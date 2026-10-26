@@ -1,0 +1,49 @@
+schema_version: 1
+
+# Model identity was selected on 2026-10-26; see docs/rationale.md, section 3.
+model:
+  id: qwen/qwen3.7-flash
+  canonical_slug: qwen/qwen3.7-flash-20260727
+  provenance:
+    kind: user_decision
+    reference: docs/rationale.md, section 3.
+
+# The reasoning mode is explicit because the 2026-10-26 API trial exhausted the
+# completion budget when reasoning was implicit or set to low.
+sampling:
+  temperature: 0.0
+  max_tokens: 512
+  seed: 42
+  reasoning:
+    enabled: false
+  provenance:
+    kind: assumption
+    reference: docs/rationale.md, section 3; initial round-one SQL generation settings, untuned.
+
+request:
+  timeout_seconds: 30
+  retry_count: 1
+  retry_backoff_ms: 250
+  provenance:
+    kind: assumption
+    reference: Initial operational defaults for P4.4a, untuned.
+
+budget:
+  max_total_cost_usd: 1.0
+  provenance:
+    kind: user_decision
+    reference: docs/p4-implementation.md, "Câu hỏi cần người dùng chốt trước khi code", item 2.
+
+pricing:
+  input_usd_per_million: 0.03
+  output_usd_per_million: 0.13
+  provenance:
+    kind: source
+    reference: OpenRouter model listing recorded in docs/rationale.md, section 3, on 2026-10-26.
+
+tool:
+  max_result_rows: 1000
+  sql_timeout_seconds: 2
+  provenance:
+    kind: assumption
+    reference: Initial bounded read-only SQL defaults for P4.4a, untuned.
