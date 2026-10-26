@@ -1,6 +1,6 @@
 # P2 — Sub-plan triển khai fraud model
 
-> Trạng thái: **P2.1 round1-done (Vòng 1 đã bàn giao); P2.2–P2.5 chưa triển khai**. Hợp đồng model: [model.md](model.md); dữ liệu và snapshot nhãn: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P2; không chép hợp đồng.
+> Trạng thái: **P2.1 round1-done (Vòng 1 đã bàn giao); P2.2 round1-done (Vòng 1 đã bàn giao); P2.3–P2.5 chưa triển khai**. Hợp đồng model: [model.md](model.md); dữ liệu và snapshot nhãn: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P2; không chép hợp đồng.
 > Format task, trạng thái và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md).
 
 ## Thứ tự hai vòng
@@ -30,11 +30,13 @@ data/<run>/model/   model artifact, model_scores, reports/  (không đưa vào g
 - **Hoàn tất:** báo cáo audit split; test split xanh. Model KHÔNG đọc file trong `private/`.
 - **Trạng thái:** round1-done — Vòng 1 đã bàn giao. Smoke audit tại T0: fit `n=371`, positive `85`, negative `286`; validation `n=54`, positive `14`, negative `40`; calibration `n=152`, positive `24`, negative `128`.
 
-### P2.2 — Feature as-of (`todo`)
+### P2.2 — Feature as-of (`round1-done`, Vòng 1 đã bàn giao)
 - **Mục tiêu:** feature theo cửa sổ thời gian tính bằng SQL DuckDB, đúng as-of.
 - **Phụ thuộc:** P2.1.
 - **Kiểm tra:** thêm giao dịch khả dụng sau t không đổi feature tại t; cửa sổ chưa đủ quan sát được đánh dấu; không feature nào đến từ truth/metadata generator.
-- **Hoàn tất:** test as-of của feature xanh trên fixture và smoke.
+- **Vòng 1:** `txn_count` 1h/24h/7d, tổng/trung bình amount 7d, amount chia trung bình lịch sử customer; chưa có feature phía người nhận.
+- **Hoàn tất:** ma trận feature cho fit/validation/calibration; test as-of, cờ cửa sổ, nguồn dữ liệu và tính tất định xanh.
+- **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
 ### P2.3 — Model và calibration (`todo`)
 - **Mục tiêu:** LightGBM tất định trên tập fit; early stopping trên validation; isotonic trên tháng 10.

@@ -24,6 +24,8 @@ Mọi cohort có nhãn đã ≥ H = 90 ngày tại T0 = 1/2/2026 (tập trẻ nh
 
 - LightGBM + xử lý mất cân bằng; huấn luyện tất định để tái lập được.
 - Feature đúng as-of (SQL cửa sổ thời gian trên DuckDB): tần suất theo cửa sổ, số tiền so với thói quen, rủi ro terminal/merchant, feature phía người nhận ([data.md](data.md)).
+- **P2.2 vòng 1:** ma trận fit/validation/calibration dùng `txn_count_1h`, `txn_count_24h`, `txn_count_7d`, `amount_sum_7d`, `amount_avg_7d`, và `amount_to_customer_historical_avg`. Cửa sổ là `[created_at − độ_dài, created_at)`; giao dịch mục tiêu bị loại khỏi lịch sử. Tỷ lệ amount dùng trung bình các amount khác NULL của customer trước `created_at`, và là NULL nếu thiếu amount hiện tại, thiếu lịch sử, hoặc trung bình bằng 0.
+- Cờ `history_window_observed_{1h,24h,7d}` bằng 1 khi `max(customer.event_at, customer.available_at)` không muộn hơn đầu cửa sổ. Các tổng hợp vẫn phản ánh phần lịch sử quan sát được; cờ 0 đánh dấu phần đó bị censored. Mọi nguồn operational đi qua `read_as_of`; SQL DuckDB còn áp `available_at <= created_at` riêng cho từng giao dịch.
 - Target chính là nhãn theo policy; pending không dùng làm 0. *Mở rộng:* oracle-label ablation; khi có `disputed`, loại khỏi supervised fit và báo mức độ loại mẫu.
 - Calibration xác suất: isotonic (sigmoid nếu ít support) trên tháng 10, giữ nguyên tỉ lệ lớp của cohort. Reliability diagram trên observed-label và oracle truth ghi riêng.
 
