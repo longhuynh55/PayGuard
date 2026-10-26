@@ -52,6 +52,8 @@ data/<run>/model/   model artifact, model_scores, reports/  (không đưa vào g
 - **Kiểm tra:** conformal đọc score thô, không đọc output isotonic; tập rỗng/đa nhãn → review; coverage theo lớp trên dữ liệu calibration-style giữ riêng ≈ 1−α trong sai số mẫu. α là cấu hình.
 - **Vòng 1:** α theo lớp, quantile hữu hạn mẫu và cách ghi nhận thiếu support theo [model.md](model.md) mục 3; report kèm coverage theo lớp và các tỷ lệ hành động với mẫu số.
 - **Hoàn tất:** test conformal xanh; báo coverage theo lớp.
+- **Vòng 1 đã bàn giao — fixture holdout i.i.d. hiện có** (seed `20261026`; 50.000 mẫu calibration và 50.000 holdout): support calibration legit `40.031`, fraud `9.969`; support holdout legit `39.951`, fraud `10.049`. Coverage legit `0,994393` (`39.727/39.951`), fraud `0,803463` (`8.074/10.049`); false approval `0,054533` (`548/10.049 fraud`), false decline `0,000375` (`15/39.951 legit`), review `0,032720` (`1.636/50.000`). Đây là số từ fixture kiểm tra exchangeable giữ riêng, không dùng để tune α.
+- **Smoke calibration in-sample** (chỉ mô tả): support legit `128`, fraud `24`; coverage legit `1,000000` (`128/128`), fraud `0,833333` (`20/24`); false approval `0,166667` (`4/24 fraud`), false decline `0` (`0/128 legit`), review `0,177632` (`27/152`). Legit `n=128 < 199` cần cho `α_legit=0,005`, report đánh dấu `insufficient_support`; áp dụng chính sách tại [model.md](model.md) mục 1 trước khi dùng kết quả. Số in-sample này không phải coverage holdout hợp lệ.
 - **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
 ### P2.5 — Đánh giá và xuất `model_scores` (`todo`)

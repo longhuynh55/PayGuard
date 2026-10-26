@@ -276,6 +276,7 @@ def test_raw_and_calibrated_scores_are_separate_and_metadata_is_complete(tmp_pat
     assert metadata["conformal"]["thresholds"]["legit"]["status"] == (
         "infinite_small_support"
     )
+    assert metadata["conformal"]["thresholds"]["legit"]["insufficient_support"] is True
     assert (artifact_dir / "predictor.joblib").is_file()
     assert (artifact_dir / "calibrator.joblib").is_file()
     assert (artifact_dir / "conformal.joblib").is_file()

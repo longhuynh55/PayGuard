@@ -55,8 +55,12 @@ def test_finite_sample_rank_and_small_support_keep_alpha_unchanged() -> None:
     assert fitted.legit.quantile_rank == math.ceil((128 + 1) * (1 - 0.005)) == 129
     assert fitted.legit.sample_count == 128
     assert fitted.legit.threshold is None
+    assert fitted.legit.required_calibration_count == 199
+    assert fitted.legit.insufficient_support is True
     assert fitted.fraud.quantile_rank == math.ceil((24 + 1) * (1 - 0.20)) == 20
     assert fitted.fraud.sample_count == 24
+    assert fitted.fraud.required_calibration_count == 4
+    assert fitted.fraud.insufficient_support is False
     expected_fraud_nonconformity = sorted(1 - score for score in calibration_raw_scores[128:])
     assert fitted.fraud.threshold == pytest.approx(expected_fraud_nonconformity[19])
 
@@ -64,8 +68,10 @@ def test_finite_sample_rank_and_small_support_keep_alpha_unchanged() -> None:
     formatted = format_conformal_report(report)
     assert f"alpha provenance: {PROVENANCE}" in formatted
     assert "quantile rank 129 exceeds calibration n=128" in formatted
+    assert "minimum n=199, rank=129, insufficient_support=true" in formatted
     assert "class is included for every raw score" in formatted
     assert "configured alpha unchanged" in formatted
+    assert report.insufficient_support_by_class == {"legit": True, "fraud": False}
 
 
 def test_empty_and_multi_class_sets_map_to_review() -> None:

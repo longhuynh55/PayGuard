@@ -17,6 +17,14 @@ PredictionSet = tuple[ClassLabel, ...]
 Decision = Literal["legit", "fraud", "review"]
 
 
+def _minimum_calibration_support(alpha: float) -> int:
+    return int(
+        (Decimal("1") / Decimal(str(alpha)) - Decimal("1")).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+    )
+
+
 @dataclass(frozen=True)
 class ClassThreshold:
     """One class-conditional finite-sample quantile.
@@ -35,6 +43,14 @@ class ClassThreshold:
     @property
     def has_finite_threshold(self) -> bool:
         return self.threshold is not None
+
+    @property
+    def required_calibration_count(self) -> int:
+        return _minimum_calibration_support(self.alpha)
+
+    @property
+    def insufficient_support(self) -> bool:
+        return self.quantile_rank > self.sample_count
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,13 @@ class ConformalReport:
     legit_count: int
     review_count: int
     sample_count: int
+
+    @property
+    def insufficient_support_by_class(self) -> dict[ClassLabel, bool]:
+        return {
+            threshold.label: threshold.insufficient_support
+            for threshold in self.thresholds
+        }
 
     @property
     def false_approval_rate(self) -> float | None:
@@ -289,7 +312,9 @@ def format_conformal_report(report: ConformalReport) -> str:
             threshold_text = f"{threshold.threshold:.6f}"
         lines.append(
             f"{threshold.label}: alpha={threshold.alpha:g}, calibration n="
-            f"{threshold.sample_count}, rank={threshold.quantile_rank}, "
+            f"{threshold.sample_count}, minimum n={threshold.required_calibration_count}, "
+            f"rank={threshold.quantile_rank}, "
+            f"insufficient_support={str(threshold.insufficient_support).lower()}, "
             f"threshold={threshold_text}"
         )
 
@@ -328,6 +353,7 @@ def conformal_metadata(conformal: FittedMondrianConformal) -> dict[str, object]:
             "calibration_count": threshold.sample_count,
             "quantile_rank": threshold.quantile_rank,
             "threshold": threshold.threshold,
+            "insufficient_support": threshold.insufficient_support,
             "status": "finite" if threshold.threshold is not None else "infinite_small_support",
         }
     return {
