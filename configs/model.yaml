@@ -17,3 +17,31 @@ splits:
   calibration:
     start_inclusive: "2025-10-01"
     end_exclusive: "2025-11-01"
+
+training:
+  model_version: payguard-lgbm-isotonic-round1
+  seed: 42
+  early_stopping_rounds: 20
+  imbalance_strategy: scale_pos_weight
+  provenance: "default, untuned"
+  lightgbm:
+    n_estimators: 100
+    learning_rate: 0.1
+    num_leaves: 31
+    max_depth: -1
+    min_child_samples: 20
+    subsample: 1.0
+    colsample_bytree: 1.0
+    reg_alpha: 0.0
+    reg_lambda: 0.0
+    deterministic: true
+    force_col_wise: true
+    n_jobs: 1
+    verbosity: -1
+
+calibration:
+  method: isotonic
+  fallback_method: sigmoid
+  minimum_support: 25
+  support_basis: each_class
+  provenance: "assumption, untuned"
