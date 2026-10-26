@@ -216,3 +216,23 @@ Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phi
 P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
 
 Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. Bảng thuộc phía operational và không có dữ liệu truth.
+
+### `alerts`
+
+`alerts` là đầu ra signal operational của P3.2. Schema logic của từng alert:
+
+| Cột | Kiểu | Ý nghĩa |
+|---|---|---|
+| `alert_id` | `TEXT` | ID trung tính, tất định; SHA-256 rút gọn từ `episode_id`, `as_of_time`, `metric`, `feature`, `segment`, không chứa template hoặc truth. |
+| `episode_id` | `TEXT` | Episode của dòng metric đầu vào, khác `base`. |
+| `as_of_time` | `TEXT` UTC | Snapshot của `daily_metrics` đã sinh alert. |
+| `metric` | `TEXT` | `metric_id` của dòng `daily_metrics`; vòng 1 chỉ chấp nhận metric PSI. |
+| `feature` | `TEXT` | Feature P3.1 tương ứng. |
+| `segment` | `TEXT` | Segment P3.1 tương ứng. |
+| `value` | `REAL` | PSI đo được trên cửa sổ monitoring. |
+| `reference` | `TEXT` | `reference_window` của `daily_metrics`; đây là khoảng ngày nền, không phải một giá trị vô hướng riêng. |
+| `threshold` | `REAL` | Ngưỡng PSI tại lúc sinh alert; vòng 1 dùng `0.25` với điều kiện nghiêm ngặt `value > threshold`. |
+| `event_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric. |
+| `available_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric; alert được xem là khả dụng tại snapshot đó. |
+
+Khóa chính logic là `alert_id`; mỗi alert ứng với tối đa một dòng `(episode_id, as_of_time, metric, feature, segment)`. Schema này thuộc phía operational và không có truth. Trong vòng 1, `daily_metrics` và `alerts` là đầu vào/đầu ra in-memory hoặc CSV, chưa được lưu thành bảng SQLite đọc qua `read_as_of`; thời điểm lưu vào operational store và thêm allowlist as-of được ghi nhận là việc vòng 2 hoặc trước P4 trong [p3-implementation.md](p3-implementation.md).

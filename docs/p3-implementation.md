@@ -1,6 +1,6 @@
 # P3 — Sub-plan triển khai monitoring
 
-> Trạng thái: **P3.1 round1-done (Vòng 1 đã bàn giao); P3.2–P3.4 chưa triển khai**. Hợp đồng: [monitoring.md](monitoring.md); đối soát recall: [evaluation.md](evaluation.md). File này sở hữu thứ tự task và nghiệm thu P3; không chép hợp đồng.
+> Trạng thái: **P3.1–P3.2 round1-done (Vòng 1 đã bàn giao); P3.3–P3.4 chưa triển khai**. Hợp đồng: [monitoring.md](monitoring.md); đối soát recall: [evaluation.md](evaluation.md). File này sở hữu thứ tự task và nghiệm thu P3; không chép hợp đồng.
 > Format task và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md).
 
 ## Thứ tự hai vòng
@@ -29,11 +29,12 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Hoàn tất:** bảng metric theo ngày cho smoke.
 - **Vòng 1 đã bàn giao:** `model.review_rate` hiện chỉ là tỷ lệ thô vì `model_scores` chưa được chấm trên giai đoạn reference; metric này chưa dùng để sinh signal và phần reference được để sang vòng 2.
 
-### P3.2 — Signal và alert (`todo`)
+### P3.2 — Signal và alert (`round1-done`)
 - **Mục tiêu:** chuyển metric vượt ngưỡng thành `alerts` theo schema [monitoring.md](monitoring.md).
 - **Phụ thuộc:** P3.1.
 - **Kiểm tra:** episode clean smoke không bùng alert hàng loạt; kịch bản đổi đơn vị P1 sinh alert trên feature bị tác động. Ngưỡng KHÔNG tune trên episode test.
 - **Hoàn tất:** bảng `alerts` tái lập được.
+- **Vòng 1 đã bàn giao:** [`monitoring/signals.py`](../monitoring/signals.py) nhận các dòng P3.1 trong bộ nhớ theo đúng episode, chỉ xét snapshot `as_of_time <=` cutoff; PSI dùng phép so sánh nghiêm ngặt `> 0,25` theo config/provenance ở [`configs/monitoring.yaml`](../configs/monitoring.yaml). Metric censored, thiếu mẫu, cửa sổ chưa đủ hoặc thiếu reference bị chặn và ghi lý do trong report; `model.review_rate` không sinh signal vì chưa có reference. Smoke 30 ngày ghi số alert: `ep-0001` (clean) **1**, `ep-0002` (data_pipeline) **1**, `ep-0003` (seasonal) **5**, `ep-0004` (data_pipeline) **1**, `ep-0005` (seasonal) **5**; clean dưới giới hạn smoke 5 và data_pipeline có alert `amount_avg_7d` sau effect. `daily_metrics`/`alerts` chưa là bảng operational đọc qua `read_as_of`; lưu thành bảng operational và thêm allowlist as-of là việc vòng 2 hoặc trước P4.
 
 ### P3.3 — Incident và incident con (`todo`)
 - **Mục tiêu:** gộp alert vào incident đang mở; incident đã có quyết định cuối → incident con `parent_incident_id`.

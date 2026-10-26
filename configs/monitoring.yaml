@@ -64,3 +64,12 @@ features:
 model_review_rate:
   metric_id: model.review_rate
   feature: decision_region
+
+signals:
+  psi_threshold:
+    value: 0.25
+    unit: PSI
+    rationale: Round-one starting threshold for the PSI signal.
+    provenance:
+      kind: source
+      reference: "ngưỡng khởi đầu theo monitoring.md, chưa chỉnh"
