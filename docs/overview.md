@@ -23,7 +23,7 @@ PSI/KS phát hiện thay đổi phân phối; CBPE ước lượng performance k
 
 | Mục | Quyết định |
 |---|---|
-| LLM | DeepSeek V4 Flash (API) |
+| LLM | Qwen 3.7 Flash qua OpenRouter (`qwen/qwen3.7-flash`); lý do: [rationale.md](rationale.md) mục 3 |
 | Thế mạnh / yếu | Chưa vững ML cổ điển và data engineering → giữ đơn giản nhưng làm đúng |
 | Thời gian | Nhanh nhất có thể, nhưng phải end-to-end |
 | UQ của agent | Black-box trước (không phụ thuộc logprobs) |

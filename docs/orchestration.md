@@ -6,6 +6,8 @@
 
 **P1 → P2 → P3**, theo thứ tự hai vòng: vòng 1 cả ba stage tới mốc ★ luồng mỏng ([MASTER_PLAN.md](../MASTER_PLAN.md)), sau đó vòng 2. Chạy liên tục, không dừng giữa các task trừ khi gặp điều kiện dừng bên dưới.
 
+**Mở rộng 26/10/2026 (người dùng duyệt):** thêm **P3.5 + P4 vòng 1** tới mốc ★ theo [p4-implementation.md](p4-implementation.md). LLM Qwen 3.7 Flash qua OpenRouter; **trần chi phí API tạm 1 USD** cho toàn bộ P4 vòng 1 — vượt trần → DỪNG hỏi người dùng. Chỉ P4.6 gọi API thật; test dùng LLM giả lập.
+
 ## Vòng lặp mỗi task
 
 ```
@@ -40,6 +42,7 @@ Quyết định Claude tự chọn khi chạy không người (người dùng đ
 
 | Thời điểm | Task | Câu hỏi | Đã chọn | Lý do |
 |---|---|---|---|---|
+| 26/10 22:50 | P4 | `decision_at` bằng `as_of_time` hay cộng độ trễ xử lý? (người dùng: "tùy bạn") | `decision_at = as_of_time` của snapshot | Quyết định chỉ dùng dữ liệu khả dụng tới snapshot nên không lộ tương lai; cộng độ trễ giả định là một tham số chưa có căn cứ và làm lệch timely routing. Sensitivity D ∈ {3, 7, 14} đã có trong evaluation.md |
 | 26/10 22:30 | P3.5 | `daily_metrics` không có `available_at` nên chưa thể vào allowlist `read_as_of` | Thêm `event_at`/`available_at` bằng `as_of_time` (cùng quy ước `alerts`); KHÔNG đổi cách tính | Metric chỉ biết được tại snapshot của nó; thêm cột không đổi giá trị nào đã khóa |
 | 26/10 11:15 | P3.3 | (a) Mốc gộp ≤ 2 ngày tính từ đâu khi incident có nhiều alert? (b) Alert sau quyết định cuối luôn thành incident con, bất kể khoảng cách? | (a) Từ alert gần nhất của incident đang mở. (b) Chỉ thành con nếu cách alert gần nhất của cha ≤ 2 ngày; xa hơn → incident mới độc lập (coder đề xuất "bất kể khoảng cách") | (a) sự cố kéo dài giữ một incident thay vì tách mỗi 3 ngày. (b) thận trọng hơn: alert cách xa thường là sự cố mới; gắn nhầm làm con sẽ che nó vì incident con lặp không tính vào mục tiêu tuning |
 | 26/10 10:50 | P3.2 | Signal đọc daily_metrics thế nào khi đây chưa là bảng trong allowlist `read_as_of` và luồng B không được sửa `simulator/`? | Nhận các dòng daily_metrics P3.1 đã tính trong bộ nhớ (mỗi dòng đã đọc nguồn qua `read_as_of` tại `as_of_time` của nó); chỉ dùng dòng `as_of_time <=` ngày đang xét | Không đụng API as-of khi luồng song song; lưu `daily_metrics`/`alerts` thành bảng operational đọc qua `read_as_of` để vòng 2 hoặc trước P4 |
@@ -82,3 +85,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 11:30 | P3.3 | Coder hỏi 2 câu cửa sổ gộp → orchestrator chọn (Quyết định chờ duyệt). Smoke: seasonal 5 alert → 1 incident. 112 test → review vòng 1 PASS → merge. Giao P3.4 (B) |
 | 26/10 12:00 | P3.4 | Review vòng 1 CHANGES_REQUIRED (snapshot quyết định kéo dài khoảng phát hiện → recall bị thổi phồng) → sửa (122 test) → review vòng 2 PASS → merge. Smoke recall data_pipeline 2/2; 2 incident seasonal unmatched do hiệu ứng trễ cửa sổ 7 ngày (alert `amount_avg_7d` ngoài effect window) — matcher vòng 2 cần xử lý trước khi chấm benign ở P4/P5. **P2 + P3 vòng 1 xong; P1.8 chờ người dùng.** Không tự mở P4 (ngoài goal P1→P3) |
 | 26/10 22:30 | P1.8 + P3.5 | Người dùng duyệt vòng sửa 3 cho P1.8 và chạy song song: A = P1.8 sửa validate đối chiếu mốc truth (merge main mới vào nhánh, conflict CHỈ dòng Trạng thái MASTER); B = P3.5 lưu `daily_metrics`/`alerts`/`incidents` vào DB operational (trước P4). Orchestrator viết sub-plan P4 song song; P4 chỉ code sau khi người dùng duyệt |
+| 26/10 23:00 | P1.8 r3 | Coder sửa validate đối chiếu mốc truth với giao dịch bị tác động (131 test). Sub-agent QA (Claude, người dùng yêu cầu) xác nhận phản ví dụ +365 ngày: trước sửa passed 14/14, sau sửa failed 13/14 + CLI exit 1; thêm 4 biến thể đều bị bắt → review vòng 3 PASS, không finding → merge. **P1 vòng 1 xong (8/8).** Rule P4 vòng 1: GPT-6.1-sol cũng chọn `unit_or_null_change` |

@@ -77,7 +77,7 @@ Cả hai bước là tuning thực nghiệm trên vài chục ca, không phải 
 ### Tool `run_sql` có UQ
 - Sinh N = 3 SQL cố định, chạy, gom cụm theo kết quả; execution consistency là score.
 - **Cache key:** question/prompt, model/version, sampling config, schema, episode, `as_of_time`, data snapshot. Replay cache không tính là mẫu độc lập mới.
-- **Bộ câu hỏi:** 100–150 câu JSON (`question`, `category`, `interpretations`, `expected_behavior` ∈ answer/clarify/abstain); tỉ lệ rõ ràng 40 · mơ hồ 30 · không trả lời được 15 · bẫy thống kê 15. Xây: template → DeepSeek paraphrase kiểu người Việt hỏi → tự review.
+- **Bộ câu hỏi:** 100–150 câu JSON (`question`, `category`, `interpretations`, `expected_behavior` ∈ answer/clarify/abstain); tỉ lệ rõ ràng 40 · mơ hồ 30 · không trả lời được 15 · bẫy thống kê 15. Xây: template → LLM đã chốt ([rationale.md](rationale.md) mục 3) paraphrase kiểu người Việt hỏi → tự review.
 - **Chấm:** kết quả trên nhiều DB phản ví dụ (sai mẫu số/join, duplicate, NULL, ngày biên, pending label), tolerance ghi rõ theo metric; clarify/abstain chấm riêng. SQL cùng kết quả trên một DB chưa chứng minh đúng nghĩa. MVP: vài DB phản ví dụ; *mở rộng:* bộ đầy đủ, user simulator.
 - Baseline confidence: verbalized confidence · logprob (nếu API có) · self-consistency theo chuỗi SQL.
 

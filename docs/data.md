@@ -161,6 +161,7 @@ Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.
 | `mechanism`, `rule_covered` | Phục vụ tách known/unknown |
 | Phạm vi: entity, segment, feature bị tác động (trực tiếp và gián tiếp dự kiến), khoảng thời gian | Dùng cho ghép đáp án |
 | `effect_available_at` | `available_at` của giao dịch chèn đầu tiên |
+| Đối chiếu hiệu ứng ở P1 smoke | Injector lưu các `txn_id` bị tác động trong `run_metadata` private với key `p1.6.incident_effect.v1:<incident_truth_id>`. Validator đọc lại đúng các giao dịch operational đó, tính lại `effect_start_at = min(event_at)`, `effect_available_at = min(available_at)` và `effect_end_at = max(event_at)` nếu truth có mốc kết thúc; mọi dòng phải thuộc episode và nằm trong cửa sổ tương lai đã cấu hình. ID tham chiếu này chỉ có trong private store. |
 | `intervention_start_at` | = `effect_available_at` |
 | `deadline_at` | `intervention_start_at + D`; D = 7 ngày (MVP), sensitivity 3/14 |
 | `accepted_actions` | Theo bảng dưới |

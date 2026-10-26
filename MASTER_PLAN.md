@@ -37,14 +37,14 @@
 | Stage | Module | Trạng thái |
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; trạng thái runtime xem tại P1–P6 bên dưới |
-| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1.1–P1.2, P1.3 vòng 1, P1.4 vòng 1, P1.5 vòng 1, P1.6 vòng 1 và P1.7 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3 vòng 2, P1.4 vòng 2, P1.6 vòng 2, P1.7 vòng 2 và P1.8 chưa triển khai; bản 24/10 đã rollback |
+| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1 vòng 1 hoàn tất: P1.1–P1.2, P1.3–P1.8 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3, P1.4, P1.6, P1.7 và P1.8 vòng 2 chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ✅ P3 vòng 1 hoàn tất: P3.1–P3.4 và P3.5 `round1-done` (Vòng 1 đã bàn giao; chi tiết P3.4 và P3.5 tại [sub-plan](docs/p3-implementation.md)); phần vòng 2 chưa triển khai |
-| P4 | Triage ([triage](docs/triage.md)) | ⬜ |
+| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; vòng 1 đang triển khai |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
-**Việc tiếp theo:** xử lý tiếp P1.8 CLI/validation smoke theo [sub-plan](docs/p1-implementation.md). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 có thể đọc snapshot qua `read_as_of`. Khi luồng mỏng tới mốc ★: đo token trên 3 case cố định rồi khóa ngân sách benchmark và số episode (mục 5). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
+**Việc tiếp theo:** P4 vòng 1 theo [sub-plan](docs/p4-implementation.md) (đã duyệt 26/10). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Sau mốc ★, P1 vòng 2 với pilot 60 theo [sub-plan](docs/p1-implementation.md). Khi luồng mỏng tới mốc ★: đo token trên 3 case cố định rồi khóa ngân sách benchmark và số episode (mục 5). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
 
 ---
 
@@ -92,7 +92,7 @@ MVP là phần tối thiểu để trả lời câu hỏi chính. Phần "làm s
 Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của số episode là chi phí agent. 60 episode là **sàn**. Cần pipeline để đo nên chia hai mức: trần tạm cho pilot (không chặn P1–P3) và ngân sách benchmark khóa sau khi đo.
 
 - Ước lượng thô mỗi incident tới agent: 3 lượt × ~5 SQL × 3 mẫu ≈ 45 lần sinh SQL + ~15–20 bước suy luận ≈ **60 lần gọi**. Chi phí ≈ số incident tới agent × 60 × token/lần × giá. So sánh "giá trị vận hành" chạy thêm một lượt K = N = 1 trên mọi ca tới agent.
-- **Việc:** (1) tra giá DeepSeek V4 Flash trên trang chính thức, đặt trần tạm; (2) ở mốc ★, chạy 3 incident cố định đo token thật; (3) khóa trần USD cho toàn benchmark (gồm 4 baseline và ablation) → suy ra số episode; nếu vượt 60 thì tăng calibration/test theo tỉ lệ 1:2:2.
+- **Việc:** (1) LLM đã chốt Qwen 3.7 Flash qua OpenRouter (giá và lý do: [rationale.md](docs/rationale.md) mục 3), đặt trần tạm; (2) ở mốc ★, chạy 3 incident cố định đo token thật; (3) khóa trần USD cho toàn benchmark (gồm 4 baseline và ablation) → suy ra số episode; nếu vượt 60 thì tăng calibration/test theo tỉ lệ 1:2:2.
 
 ## 6. Tái lập
 
@@ -104,6 +104,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 26/10/2026 | Người dùng chốt LLM agent: Qwen 3.7 Flash qua OpenRouter (`qwen/qwen3.7-flash`, API key trong `.env`, không commit); thay DeepSeek V4 Flash. Rule P4 vòng 1 `unit_or_null_change` (planner và GPT-6.1-sol cùng đề xuất). `decision_at = as_of_time` |
 | 26/10/2026 | Làm rõ cửa sổ incident P3.3: mốc 2 ngày tính từ alert gần nhất; alert sau quyết định cuối chỉ tạo incident con trong 2 ngày, xa hơn là incident độc lập. Cập nhật kiểm chứng protocol và triển khai vòng 1. |
 | 25/10/2026 | Claude tự điều phối theo docs/orchestration.md: goal P1→P2→P3 (vòng 1 cả ba tới ★, rồi vòng 2), chạy liên tục; tự merge khi review PASS + test xanh; dừng hỏi người dùng theo bảng ranh giới |
 | 25/10/2026 | Flow agent: Claude Opus plan + điều phối qua herdr; Codex `gpt-6-luna` (max) code trong worktree theo task; Codex `gpt-6.1-sol` (high) review read-only qua `scripts/review_task.sh`, tối đa 2 vòng; người dùng merge. P1 làm hai vòng (vòng 1 tối thiểu tới mốc ★, vòng 2 làm sâu) — xem docs/p1-implementation.md |
@@ -120,7 +121,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 | 24/10/2026 | Định vị theo business problem (alert fatigue), không theo tính mới |
 | 24/10/2026 | Triage hybrid: rule trước, agent sau; rule-based là baseline chính |
 | 24/10/2026 | SQL 40/30/15/15 · user simulator để sau · ma trận chi phí (−5/−3/−1/0/+1) + độ nhạy · demo video + Docker + Streamlit chỉ đọc |
-| 24/10/2026 | LLM: DeepSeek V4 Flash; UQ black-box trước |
+| 24/10/2026 | LLM: DeepSeek V4 Flash; UQ black-box trước (thay bằng Qwen 3.7 Flash ngày 26/10) |
 | 24/10/2026 | Simulator v0: collusion chỉ trước mốc drift để giai đoạn drift có một nguyên nhân |
 | 24/10/2026 | Simulator: bản đầy đủ vai trò tài khoản (hộ kinh doanh, mule nội bộ có cash-out), thêm sự cố bẫy `legit_business_spike` |
 | 24/10/2026 | Chốt chia dữ liệu theo độ chín của nhãn (T0 = 1/2/2026); 60 episode "thế giới song song" + `business_calendar`; alert 4 tầng, chấm theo incident |
