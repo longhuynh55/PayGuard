@@ -64,7 +64,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 
 ## Câu hỏi cần người dùng chốt trước khi code
 
-1. **`decision_at`:** vòng 1 đặt `decision_at = as_of_time` của snapshot (bỏ qua độ trễ xử lý), hay cộng độ trễ giả định? Ảnh hưởng timely routing recall.
+1. **`decision_at` — đã chốt (người dùng giao planner chọn, 26/10):** vòng 1 đặt `decision_at = as_of_time` của snapshot, không cộng độ trễ xử lý giả định. Độ trễ thật (gồm thời gian gọi LLM) ghi riêng trong cột token/chi phí, không đổi `decision_at`.
 2. **LLM cho agent:** DeepSeek V4 Flash theo nhật ký 24/10 — có API key chưa, đặt trần chi phí tạm bao nhiêu cho P4.6?
 3. **Rule vòng 1:** chọn `unit_or_null_change` (smoke có 2 sự cố `data_pipeline` được phát hiện) thay vì `seasonal_calendar` (2 incident seasonal hiện unmatched do hiệu ứng trễ cửa sổ — cần matcher vòng 2 trước).
 
