@@ -1,0 +1,19 @@
+schema_version: 1
+
+# Split dates are local business dates, with inclusive starts and exclusive ends.
+business_timezone: Asia/Ho_Chi_Minh
+boundary_convention: start_inclusive_end_exclusive
+provenance:
+  kind: contract
+  reference: docs/model.md, section 1.
+
+splits:
+  fit:
+    start_inclusive: "2025-07-01"
+    end_exclusive: "2025-09-22"
+  validation:
+    start_inclusive: "2025-09-22"
+    end_exclusive: "2025-10-01"
+  calibration:
+    start_inclusive: "2025-10-01"
+    end_exclusive: "2025-11-01"

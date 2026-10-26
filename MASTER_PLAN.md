@@ -38,7 +38,7 @@
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; runtime P1–P4 chưa được triển khai |
 | P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1.1–P1.2, P1.3 vòng 1, P1.4 vòng 1 và P1.5 vòng 1 ✅ (config/provenance; schema/storage/as-of; entity và giao dịch nền smoke; card testing và ca benign đối chứng; label events, snapshot bốn trạng thái và label tail); P1.3 vòng 2, P1.4 vòng 2 và P1.6–P1.8 chưa triển khai; bản 24/10 đã rollback |
-| P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | 🔁 Làm lại |
+| P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | 🔁 P2.1 vòng 1 ✅ đã bàn giao audit split; P2.2–P2.5 chưa triển khai |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ⬜ |
 | P4 | Triage ([triage](docs/triage.md)) | ⬜ |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
