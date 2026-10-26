@@ -16,6 +16,8 @@
 
 - Alert mới trùng feature/segment, cách ≤ 2 ngày với một incident **đang mở** (chưa có quyết định cuối, hoặc đang recheck) → gộp vào incident đó.
 - Incident đã có quyết định cuối (close / data_ticket / fraud_ops / human_review) mà có alert mới → tạo **incident con** có `parent_incident_id`. Không mở lại, không sửa quyết định cũ.
+- Làm rõ mốc thời gian: với incident đang mở, khoảng cách ≤ 2 ngày được tính từ alert gần nhất đã gộp vào incident.
+- Làm rõ incident con: alert cùng feature/segment sau quyết định cuối chỉ thành incident con nếu cách alert gần nhất của incident cha ≤ 2 ngày; xa hơn thì tạo incident mới độc lập với `parent_incident_id = NULL`.
 - Chấm theo incident, báo cáo kèm số alert. Cách chấm từng quyết định theo thời điểm: [evaluation.md](evaluation.md).
 - Số incident con có thể khác giữa các policy vì thời điểm quyết định cuối khác nhau. Giữ nguyên alert và truth đầu vào khi so policy; báo số case con như workload. Metric rủi ro so sánh chính dùng tập truth/episode cố định theo [evaluation.md](evaluation.md), không dùng số incident con làm mẫu số chính.
 
@@ -23,6 +25,8 @@
 |---|---|
 | `alerts` | `alert_id`, `episode_id`, `as_of_time`, metric, feature, segment, giá trị, reference, ngưỡng; chi tiết schema tại [data.md, mục 7](data.md) |
 | `incidents` | `incident_id`, `parent_incident_id`, `episode_id`, danh sách `alert_id`, feature/segment, `opened_at`, trạng thái |
+
+Schema chi tiết của `incidents`, gồm các cột thời gian `event_at`/`available_at`: [data.md, mục 7](data.md).
 
 ## 3. Thí nghiệm riêng của monitoring
 

@@ -236,3 +236,22 @@ Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi n
 | `available_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric; alert được xem là khả dụng tại snapshot đó. |
 
 Khóa chính logic là `alert_id`; mỗi alert ứng với tối đa một dòng `(episode_id, as_of_time, metric, feature, segment)`. Schema này thuộc phía operational và không có truth. Trong vòng 1, `daily_metrics` và `alerts` là đầu vào/đầu ra in-memory hoặc CSV, chưa được lưu thành bảng SQLite đọc qua `read_as_of`; thời điểm lưu vào operational store và thêm allowlist as-of được ghi nhận là việc vòng 2 hoặc trước P4 trong [p3-implementation.md](p3-implementation.md).
+
+### `incidents`
+
+`incidents` là các snapshot operational của trạng thái gộp alert cho một episode. Mỗi thay đổi trạng thái hoặc danh sách alert tạo một snapshot mới; dữ liệu truth, template và metadata injector không được đọc hoặc lưu ở đây. `incident_id` là ID trung tính, tất định, dẫn xuất từ episode, alert đầu tiên, feature/segment và parent nếu có; không mã hóa truth. `alert_ids_json` là JSON array theo thứ tự `as_of_time`, rồi `alert_id` để phân xử các thời điểm bằng nhau. Alert đầu vào thuộc đúng episode và chỉ khả dụng nếu `available_at <= as_of_time`.
+
+| Cột | Kiểu | Ý nghĩa / ràng buộc |
+|---|---|---|
+| `incident_id` | `TEXT` | ID ổn định cho một incident; không chứa template hoặc truth. |
+| `parent_incident_id` | `TEXT NULL` | ID incident cha cùng episode; NULL với incident độc lập. |
+| `episode_id` | `TEXT` | Episode operational, khác `base`. |
+| `alert_ids_json` | `TEXT` JSON array | Danh sách alert đã gộp vào snapshot này. |
+| `feature` | `TEXT` | Feature của alert/incident. |
+| `segment` | `TEXT` | Segment của alert/incident. |
+| `opened_at` | `TEXT` UTC | `as_of_time` của alert đầu tiên trong incident. |
+| `status` | `TEXT` | `open`, `recheck`, hoặc quyết định cuối `close`, `data_ticket`, `fraud_ops`, `human_review`. `recheck` không phải trạng thái cuối. |
+| `event_at` | `TEXT` UTC | Thời điểm sự kiện làm thay đổi snapshot: `as_of_time` của alert hoặc `decision_at` của quyết định. |
+| `available_at` | `TEXT` UTC | Thời điểm snapshot khả dụng; lấy từ alert khi alert làm thay đổi snapshot, hoặc bằng `decision_at` khi quyết định làm thay đổi trạng thái. |
+
+Khóa chính logic là `(incident_id, event_at)`; các cập nhật cùng incident tại cùng thời điểm được gộp thành một snapshot tất định. Bảng append-only để giữ trạng thái theo thời gian; truy vấn tại `as_of_time` chỉ đọc `available_at <= as_of_time` và đúng `episode_id`, rồi chọn snapshot mới nhất theo `event_at` cho mỗi `incident_id`. `parent_incident_id` tham chiếu ID ổn định trong cùng episode, không tham chiếu một phiên bản snapshot cụ thể. Bảng không chứa quyết định gốc hay thay đổi chúng; P4 cung cấp quyết định qua interface của monitoring.
