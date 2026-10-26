@@ -386,6 +386,9 @@ def test_fraud_metadata_is_private_and_operational_schema_has_no_truth(tmp_path:
         "label_events",
         "business_calendar",
         "model_scores",
+        "daily_metrics",
+        "alerts",
+        "incidents",
     }
     assert set(generated["schema"]) == expected_schema
     forbidden = ("truth", "mechanism", "cause", "accepted_actions", "generator", "seed", "injector")
