@@ -183,6 +183,29 @@ def _json_text_array(value: Any, *, field: str, truth_id: str) -> tuple[str, ...
     return tuple(value)
 
 
+def _snapshot_alert_ids(value: Any, *, incident_id: str) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise EvaluationMatcherError(
+            f"incident {incident_id!r} alert_ids_json must be JSON text"
+        )
+    try:
+        alert_ids = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise EvaluationMatcherError(
+            f"incident {incident_id!r} alert_ids_json must be valid JSON"
+        ) from exc
+    if (
+        not isinstance(alert_ids, list)
+        or not alert_ids
+        or any(not isinstance(alert_id, str) or not alert_id.strip() for alert_id in alert_ids)
+        or len(alert_ids) != len(set(alert_ids))
+    ):
+        raise EvaluationMatcherError(
+            f"incident {incident_id!r} alert_ids_json must be a non-empty unique ID array"
+        )
+    return tuple(alert_ids)
+
+
 def _truth_window(
     truth: Mapping[str, Any], *, episode_end_at: str
 ) -> tuple[datetime, datetime]:
@@ -338,12 +361,36 @@ def match_incidents(
 
     matches: list[dict[str, Any]] = []
     for incident_id in sorted(snapshots_by_id):
-        rows = snapshots_by_id[incident_id]
-        first = rows[0]
-        incident_window = (
-            _parse_timestamp(first["opened_at"], field="opened_at")[0],
-            max(_parse_timestamp(row["event_at"], field="event_at")[0] for row in rows),
+        rows = sorted(
+            snapshots_by_id[incident_id],
+            key=lambda row: (row["event_at"], row["available_at"]),
         )
+        first = rows[0]
+        previous_alert_ids: tuple[str, ...] = ()
+        alert_available_times: list[datetime] = []
+        for row in rows:
+            current_alert_ids = _snapshot_alert_ids(
+                row.get("alert_ids_json"), incident_id=incident_id
+            )
+            if current_alert_ids[: len(previous_alert_ids)] != previous_alert_ids:
+                raise EvaluationMatcherError(
+                    f"incident {incident_id!r} alert_ids_json is not append-only"
+                )
+            if len(current_alert_ids) > len(previous_alert_ids):
+                # P3.3 snapshots preserve cumulative alert IDs. A new ID means
+                # this snapshot contains an actual alert event; a decision-only
+                # snapshot leaves the list unchanged and cannot extend recall.
+                alert_available_times.append(
+                    _parse_timestamp(
+                        row["available_at"], field=f"incident {incident_id!r} alert available_at"
+                    )[0]
+                )
+            previous_alert_ids = current_alert_ids
+        if not alert_available_times:
+            raise EvaluationMatcherError(
+                f"incident {incident_id!r} has no visible alert snapshot"
+            )
+        incident_window = (min(alert_available_times), max(alert_available_times))
         matched_truth_ids: list[str] = []
         for truth in sorted(
             truth_by_episode.get(first["episode_id"], ()),
@@ -366,7 +413,7 @@ def match_incidents(
                 "episode_id": first["episode_id"],
                 "feature": first["feature"],
                 "segment": first["segment"],
-                "incident_start_at": first["opened_at"],
+                "incident_start_at": utc_timestamp(incident_window[0]),
                 "incident_end_at": utc_timestamp(incident_window[1]),
                 "status": "matched" if matched_truth_ids else "unmatched",
                 "matched_truth_ids": matched_truth_ids,

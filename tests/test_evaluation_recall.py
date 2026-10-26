@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from evaluation import evaluate_detection_recall
-from monitoring.incidents import compute_incidents
+from monitoring.incidents import InMemoryDecisionSource, compute_incidents
 from simulator.storage import create_export_stores, insert_private_record
 
 
@@ -236,6 +236,69 @@ def test_effect_available_at_is_the_earliest_matchable_truth_time(tmp_path: Path
 
         assert result.report["detection_recall"]["recall"] == 0.0
         assert result.report["incident_counts"]["unmatched"] == 1
+    finally:
+        store.close()
+
+
+def test_decision_only_snapshot_does_not_extend_detection_recall(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "decision-does-not-detect-run")
+    try:
+        _add_episode(store, "ep-decision-only", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-decision-only",
+            truth_id="truth-after-alert",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+        )
+        store.commit()
+        alert_rows = [
+            _alert(
+                episode_id="ep-decision-only",
+                alert_id="alert-before-effect",
+                feature="amount_avg_7d",
+                at="2026-02-04T12:00:00.000000Z",
+            )
+        ]
+        without_decision = compute_incidents(alert_rows, episode_id="ep-decision-only")
+        incident_id = without_decision.incidents[0]["incident_id"]
+        with_decision = compute_incidents(
+            alert_rows,
+            episode_id="ep-decision-only",
+            decision_source=InMemoryDecisionSource(
+                [
+                    {
+                        "decision_id": "decision-human-review",
+                        "incident_id": incident_id,
+                        "action": "human_review",
+                        "decision_at": "2026-02-05T12:00:00.000000Z",
+                    }
+                ]
+            ),
+        )
+        assert len(with_decision.incidents) == 2
+        assert with_decision.incidents[-1]["status"] == "human_review"
+        assert with_decision.incidents[-1]["alert_ids_json"] == (
+            without_decision.incidents[0]["alert_ids_json"]
+        )
+
+        before_result = _evaluate(store, without_decision.incidents, ["ep-decision-only"])
+        after_result = _evaluate(store, with_decision.incidents, ["ep-decision-only"])
+
+        assert before_result.report["detection_recall"] == {
+            "detected": 0,
+            "denominator": 1,
+            "recall": 0.0,
+            "missed_truth_ids": ["truth-after-alert"],
+        }
+        assert after_result.report["detection_recall"] == before_result.report[
+            "detection_recall"
+        ]
+        assert after_result.report["incident_matches"][0]["incident_end_at"] == (
+            "2026-02-04T12:00:00.000000Z"
+        )
     finally:
         store.close()
 
