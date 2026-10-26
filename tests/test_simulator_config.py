@@ -64,6 +64,16 @@ def test_invalid_timeline_schedule_is_rejected() -> None:
         validate_simulator_config(data)
 
 
+def test_episode_ids_must_not_encode_template_or_role() -> None:
+    data = _yaml_mapping(ROOT / "configs" / "episodes.yaml")
+    data["profiles"]["smoke"]["assignments"][1]["episode_id"] = (
+        "smoke-pipeline-calibration"
+    )
+
+    with pytest.raises(ConfigValidationError, match="episode_id"):
+        validate_episode_config(data)
+
+
 def test_transaction_hourly_weights_must_cover_a_local_day() -> None:
     data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
     data["transactions"]["hourly_transaction_weights"]["value"] = [1.0] * 23

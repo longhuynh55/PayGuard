@@ -377,18 +377,52 @@ def label_delay_report(
         },
     }
 
-    metadata_row = private.execute(
-        "SELECT value_json FROM run_metadata WHERE key = ?", (LABEL_TRUTH_METADATA_KEY,)
+    base_metadata_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?",
+        (label_truth_metadata_key("base"),),
     ).fetchone()
-    if metadata_row is None:
+    if base_metadata_row is None:
         raise ValueError("private P1.5 label truth metadata is required for oracle delay reporting")
-    metadata = json.loads(metadata_row[0])
+    base_metadata = json.loads(base_metadata_row[0])
+    metadata_records = [base_metadata]
+    episode_txn_ids = {
+        snapshot.txn_id for snapshot in snapshots if snapshot.episode_id == episode_id
+    }
+    if episode_id != "base":
+        episode_metadata_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?",
+            (label_truth_metadata_key(episode_id),),
+        ).fetchone()
+        if episode_metadata_row is None:
+            if episode_txn_ids:
+                raise ValueError(
+                    "private P1.5 label truth metadata is required for the observed episode snapshot"
+                )
+        else:
+            episode_metadata = json.loads(episode_metadata_row[0])
+            metadata_records.append(episode_metadata)
+
+    metadata = base_metadata
+    for metadata_record in metadata_records[1:]:
+        if any(
+            metadata_record[field] != metadata[field]
+            for field in (
+                "maturity_horizon_days",
+                "maximum_delay_days",
+            )
+        ):
+            raise ValueError("base and episode label truth metadata use different reporting policies")
     horizon_days = metadata["maturity_horizon_days"]
-    outcomes = [
-        outcome
-        for outcome in metadata["transactions"]
-        if outcome["txn_id"] in visible_txn_ids
-    ]
+    outcomes_by_txn: dict[str, dict[str, Any]] = {}
+    for metadata_record in metadata_records:
+        for outcome in metadata_record["transactions"]:
+            txn_id = outcome["txn_id"]
+            if txn_id not in visible_txn_ids:
+                continue
+            if txn_id in outcomes_by_txn:
+                raise ValueError(f"private label truth duplicates transaction {txn_id!r}")
+            outcomes_by_txn[txn_id] = outcome
+    outcomes = list(outcomes_by_txn.values())
     if len(outcomes) != len(visible_txn_ids):
         raise ValueError("private P1.5 truth metadata does not cover the observed transaction snapshot")
     fraud_outcomes = [outcome for outcome in outcomes if outcome["true_label"] == "fraud"]

@@ -367,7 +367,7 @@ class EpisodeProtocol(StrictModel):
 
 
 class EpisodeAssignment(StrictModel):
-    episode_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")
+    episode_id: str = Field(pattern=r"^ep-[0-9]{4}$")
     role: EpisodeRole
     template: Literal["clean", "data_pipeline", "seasonal"]
 

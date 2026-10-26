@@ -18,6 +18,7 @@ from simulator.config import (
     validate_episode_config,
 )
 from simulator.episodes import derive_episode_seed, generate_episodes
+from simulator.labels import label_delay_report
 from simulator.reproducibility import (
     canonical_episode_content,
     canonical_episode_fingerprint,
@@ -72,6 +73,47 @@ def _base_snapshot(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     return snapshot
 
 
+def _assert_operational_text_hides_episode_answers(connection: sqlite3.Connection) -> None:
+    hidden_terms = (
+        "data_pipeline",
+        "seasonal",
+        "clean",
+        "development",
+        "calibration",
+        "test",
+        "fraud_surge",
+        "legit_business_spike",
+        "legit_business_change",
+        "new_fraud",
+        "concept_drift",
+    )
+    schema = list_operational_schema(connection)
+    for table, columns in schema.items():
+        table_info = {
+            row[1]: row[2].upper()
+            for row in connection.execute(f'PRAGMA table_info("{table}")')
+        }
+        text_columns = {
+            column
+            for column in columns
+            if table_info[column] == "TEXT" or column.lower().endswith("_id")
+        }
+        for row in connection.execute(f'SELECT * FROM "{table}"'):
+            for column in text_columns:
+                if table == "episodes" and column == "role":
+                    assert row[column] in {"base", "development", "calibration", "test"}
+                    continue
+                value = row[column]
+                if not isinstance(value, str):
+                    continue
+                lowered = value.lower()
+                assert not any(term in lowered for term in hidden_terms), (
+                    table,
+                    column,
+                    value,
+                )
+
+
 def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
     tmp_path: Path,
 ) -> None:
@@ -110,6 +152,7 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
+        _assert_operational_text_hides_episode_answers(pair.operational)
 
         episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
         for episode_id, row in manifest.items():
@@ -135,15 +178,15 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
         with pytest.raises(sqlite3.IntegrityError, match="manifest is locked"):
             pair.private.execute(
                 "UPDATE episode_manifest SET role = 'test' WHERE episode_id = ?",
-                ("smoke-clean-dev",),
+                ("ep-0001",),
             )
         with pytest.raises(sqlite3.IntegrityError, match="episode roles are locked"):
             pair.operational.execute(
                 "UPDATE episodes SET role = 'test' WHERE episode_id = ?",
-                ("smoke-clean-dev",),
+                ("ep-0001",),
             )
         assert pair.private.execute(
-            "SELECT role FROM episode_manifest WHERE episode_id = 'smoke-clean-dev'"
+            "SELECT role FROM episode_manifest WHERE episode_id = 'ep-0001'"
         ).fetchone()[0] == "development"
     finally:
         pair.close()
@@ -155,6 +198,7 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
     pair, summary = _generate(tmp_path / "isolation")
     try:
         episode_ids = {episode.episode_id for episode in summary.episodes}
+        simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
         t0 = datetime.fromisoformat(T0.replace("Z", "+00:00"))
         episode_end = t0 + timedelta(days=30)
         base_snapshot = _base_snapshot(pair.operational)
@@ -172,8 +216,8 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
             )
         }
         assert calendar_episode_ids == {
-            "smoke-seasonal-calibration",
-            "smoke-seasonal-test",
+            "ep-0003",
+            "ep-0005",
         }
 
         for episode in summary.episodes:
@@ -212,6 +256,17 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
                 as_of_time="2026-03-10T00:00:00Z",
             )
             assert all(row["episode_id"] in {"base", episode.episode_id} for row in label_snapshot)
+            delay_report = label_delay_report(
+                pair.operational,
+                pair.private,
+                simulator_config,
+                episode_id=episode.episode_id,
+                as_of_time="2026-03-10T00:00:00Z",
+            )
+            assert delay_report["oracle"]["transaction_count"] == delay_report["observed"][
+                "transaction_count"
+            ]
+            assert delay_report["oracle"]["true_fraud_count"] > 0
             label_metadata = json.loads(
                 pair.private.execute(
                     "SELECT value_json FROM run_metadata WHERE key = ?",
@@ -242,10 +297,10 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
             )
         }
         assert truth_counts == {
-            "smoke-pipeline-calibration": 1,
-            "smoke-seasonal-calibration": 1,
-            "smoke-pipeline-test": 1,
-            "smoke-seasonal-test": 1,
+            "ep-0002": 1,
+            "ep-0003": 1,
+            "ep-0004": 1,
+            "ep-0005": 1,
         }
         assert all(
             pair.private.execute(
@@ -253,7 +308,7 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
             ).fetchone()
             is None
             for episode_id in episode_ids
-            if episode_id == "smoke-clean-dev"
+            if episode_id == "ep-0001"
         )
     finally:
         pair.close()
@@ -268,13 +323,13 @@ def test_episode_add_remove_and_reorder_preserve_existing_data_and_roles(
     reordered_pair, _ = _generate(
         tmp_path / "reordered", _episode_config_with_assignments(list(reversed(assignments)))
     )
-    removed_id = "smoke-pipeline-test"
+    removed_id = "ep-0004"
     reduced_assignments = [item for item in assignments if item["episode_id"] != removed_id]
     reduced_pair, _ = _generate(
         tmp_path / "reduced", _episode_config_with_assignments(reduced_assignments)
     )
     added_assignments = assignments + [
-        {"episode_id": "smoke-extra-test", "role": "test", "template": "seasonal"}
+        {"episode_id": "ep-0006", "role": "test", "template": "seasonal"}
     ]
     expanded_pair, _ = _generate(
         tmp_path / "expanded", _episode_config_with_assignments(added_assignments)
@@ -298,10 +353,10 @@ def test_episode_add_remove_and_reorder_preserve_existing_data_and_roles(
                         ),
                     )
                     for episode_id in (
-                        "smoke-clean-dev",
-                        "smoke-pipeline-calibration",
-                        "smoke-seasonal-calibration",
-                        "smoke-seasonal-test",
+                        "ep-0001",
+                        "ep-0002",
+                        "ep-0003",
+                        "ep-0005",
                     )
                 }
             )
@@ -318,7 +373,7 @@ def test_episode_add_remove_and_reorder_preserve_existing_data_and_roles(
             "SELECT 1 FROM episode_manifest WHERE episode_id = ?", (removed_id,)
         ).fetchone() is None
         assert expanded_pair.private.execute(
-            "SELECT 1 FROM episode_manifest WHERE episode_id = 'smoke-extra-test'"
+            "SELECT 1 FROM episode_manifest WHERE episode_id = 'ep-0006'"
         ).fetchone()
     finally:
         for pair in pairs:

@@ -49,7 +49,7 @@ templates:
         kind: assumption
         reference: P1.7 smoke injection schedule; no real calendar event is claimed.
     event_name:
-      value: "Synthetic seasonal promotion"
+      value: "Synthetic promotion event"
       unit: public business-calendar description
       rationale: Publish a neutral event description with the expected transaction-count effect.
       provenance:
@@ -124,19 +124,19 @@ profiles:
         kind: assumption
         reference: docs/p1-implementation.md, P1.7 round-one scope.
     assignments:
-      - episode_id: smoke-clean-dev
+      - episode_id: ep-0001
         role: development
         template: clean
-      - episode_id: smoke-pipeline-calibration
+      - episode_id: ep-0002
         role: calibration
         template: data_pipeline
-      - episode_id: smoke-seasonal-calibration
+      - episode_id: ep-0003
         role: calibration
         template: seasonal
-      - episode_id: smoke-pipeline-test
+      - episode_id: ep-0004
         role: test
         template: data_pipeline
-      - episode_id: smoke-seasonal-test
+      - episode_id: ep-0005
         role: test
         template: seasonal
   pilot:

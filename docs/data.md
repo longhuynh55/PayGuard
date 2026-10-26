@@ -49,6 +49,8 @@ Các cột không ghi nullable là `NOT NULL`; mọi cột `PRIMARY KEY` khai b�
 
 `event_at`, `available_at`, và các cột timestamp không NULL khác dùng định dạng UTC cố định ở trên. `authorized_at`/`settled_at` không phải cột trên `transactions`; trạng thái sau lúc tạo chỉ có thể đọc từ `transaction_events` đã khả dụng tại snapshot. Lifecycle event trước T0 thuộc lịch sử `base`; event từ T0 trở đi là tương lai riêng của episode, kể cả khi `txn_id` tham chiếu giao dịch nền `base`. Các FK được bật trên từng kết nối SQLite. SQLite operational không chứa FK sang database private.
 
+ID và giá trị text operational không được mã hóa template, nguyên nhân sự cố hoặc role thành phần của kịch bản. `episodes.role` là cột công khai duy nhất cho role của episode theo split; mapping template/cause nằm trong private manifest/truth. ID do generator tạo phải trung tính và ổn định theo episode, để không biến tên episode thành nhãn đáp án.
+
 ### Private tables
 
 Các bảng sau chỉ tạo trong database private; không có trong danh sách/DDL operational và không được cấp cho agent/tool. Danh sách này bổ sung kiểu vật lý cho các trường truth ở mục 5.
