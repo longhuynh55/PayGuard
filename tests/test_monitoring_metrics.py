@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from evaluation import evaluate_detection_recall
 from model.evaluate import score_monitoring_episodes, train_operational_model
 from monitoring.incidents import compute_incidents
 from monitoring.metrics import compute_daily_metrics, population_stability_index
@@ -409,6 +410,7 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         assert scores
         store.commit()
         operational_path = store.operational_path
+        private_path = store.private_path
     finally:
         store.close()
 
@@ -495,6 +497,28 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         "ep-0004": 1,
         "ep-0005": 1,
     }
+    evaluation_result = evaluate_detection_recall(
+        tuple(
+            incident
+            for result in incident_results.values()
+            for incident in result.incidents
+        ),
+        private_db_path=private_path,
+        episode_ids=[episode.episode_id for episode in generated.episodes],
+        as_of_time=as_of_time,
+    )
+    detection_recall = evaluation_result.report["detection_recall"]
+    print(f"P3.4 smoke detection recall: {detection_recall}")
+    print(
+        "P3.4 smoke recall by scenario: "
+        f"{evaluation_result.report['by_scenario']}"
+    )
+    assert detection_recall["detected"] == 2
+    assert detection_recall["denominator"] == 2
+    assert detection_recall["recall"] == 1.0
+    assert evaluation_result.report["incident_counts"]["benign_matched"] == 0
+    assert evaluation_result.report["incident_counts"]["unmatched"] == 3
+    assert evaluation_result.report_path.is_file()
     for episode_id in ("ep-0003", "ep-0005"):
         if alert_counts.get(episode_id) == 5:
             assert incident_counts[episode_id] < alert_counts[episode_id]
