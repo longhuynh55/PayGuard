@@ -13,6 +13,7 @@ from model.data import (
     load_model_config,
     target_for_label_state,
 )
+from model.features import FEATURE_NAMES, build_feature_splits
 from simulator.asof import read_as_of
 from simulator.config import load_simulator_config
 from simulator.fraud import generate_card_testing
@@ -167,6 +168,85 @@ def test_model_splits_are_non_overlapping_mature_and_match_smoke_audit(smoke_sto
     assert "fit [2025-07-01, 2025-09-22): n=" in splits.audit.format()
     assert "validation [2025-09-22, 2025-10-01): n=" in splits.audit.format()
     assert "calibration [2025-10-01, 2025-11-01): n=" in splits.audit.format()
+
+
+def test_smoke_split_to_feature_matrices_is_asof_and_deterministic(smoke_store) -> None:
+    pair, simulator_config = smoke_store
+    splits = build_splits(pair.operational, simulator_config, episode_id=EPISODE_ID)
+    before = build_feature_splits(pair.operational, splits)
+
+    split_examples = {
+        "fit": splits.fit,
+        "validation": splits.validation,
+        "calibration": splits.calibration,
+    }
+    matrices = {
+        "fit": before.fit,
+        "validation": before.validation,
+        "calibration": before.calibration,
+    }
+    for name, examples in split_examples.items():
+        matrix = matrices[name]
+        assert matrix.examples == examples
+        assert len(matrix.values) == len(examples)
+        assert matrix.feature_names == FEATURE_NAMES
+        assert all(len(row) == len(FEATURE_NAMES) for row in matrix.values)
+
+    latest_name, latest_example = max(
+        (
+            (name, example)
+            for name, examples in split_examples.items()
+            for example in examples
+        ),
+        key=lambda item: (item[1].event_at, item[1].txn_id),
+    )
+    source_transaction = next(
+        row
+        for row in read_as_of(
+            pair.operational,
+            "transactions",
+            episode_id=EPISODE_ID,
+            t0=T0,
+            as_of_time=T0,
+        )
+        if row["txn_id"] == latest_example.txn_id
+    )
+    decision_at = datetime.fromisoformat(latest_example.event_at.replace("Z", "+00:00"))
+    late_created_at = decision_at - timedelta(minutes=1)
+    late_available_at = decision_at + timedelta(seconds=1)
+    late_txn_id = "p2-smoke-late-arrival"
+    insert_operational_record(
+        pair.operational,
+        "transactions",
+        {
+            "txn_id": late_txn_id,
+            "episode_id": source_transaction["episode_id"],
+            "customer_id": source_transaction["customer_id"],
+            "merchant_id": source_transaction["merchant_id"],
+            "created_at": late_created_at,
+            "event_at": late_created_at,
+            "available_at": late_available_at,
+            "amount": 999999,
+            "channel": "qr",
+        },
+    )
+    pair.operational.commit()
+
+    available_transactions = read_as_of(
+        pair.operational,
+        "transactions",
+        episode_id=EPISODE_ID,
+        t0=T0,
+        as_of_time=T0,
+    )
+    assert any(row["txn_id"] == late_txn_id for row in available_transactions)
+
+    after = build_feature_splits(pair.operational, splits)
+    target_index = matrices[latest_name].txn_ids.index(latest_example.txn_id)
+    after_matrix = getattr(after, latest_name)
+    assert after_matrix.values[target_index] == matrices[latest_name].values[target_index]
+    assert after == before
+    assert build_feature_splits(pair.operational, splits) == after
 
 
 def test_pending_state_is_excluded_and_never_mapped_to_zero(smoke_store) -> None:

@@ -12,9 +12,20 @@ from .data import (
     load_model_config,
     target_for_label_state,
 )
+from .features import (
+    FEATURE_NAMES,
+    FeatureAsOfError,
+    FeatureMatrix,
+    FeatureSplits,
+    build_feature_splits,
+)
 
 __all__ = [
     "InsufficientSplitSupportError",
+    "FEATURE_NAMES",
+    "FeatureAsOfError",
+    "FeatureMatrix",
+    "FeatureSplits",
     "ModelConfig",
     "ModelExample",
     "ModelSplits",
@@ -22,6 +33,7 @@ __all__ = [
     "SplitAuditReport",
     "SplitWindow",
     "build_splits",
+    "build_feature_splits",
     "load_model_config",
     "target_for_label_state",
 ]
