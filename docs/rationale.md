@@ -40,6 +40,7 @@ Các tham số H = 90, K = N = 3, chia 12/24/24, D = 7 và ngưỡng 1% là **l�
 - Theo API `openrouter.ai/api/v1/models` ngày 26/10/2026: canonical slug `qwen/qwen3.7-flash-20260727`; giá 0,03 USD/1M token input, 0,13 USD/1M output; nhà cung cấp duy nhất Alibaba; hỗ trợ `tools`, `tool_choice`, `response_format`, `seed`, `logprobs`. **Không** có `structured_outputs` (JSON schema chặt) → code phải tự kiểm tra JSON, sai format → `human_review` ([triage.md](triage.md)).
 - `logprobs` có trên endpoint nên baseline confidence theo logprob ([triage.md](triage.md) mục 5) dùng được; plan vẫn không phụ thuộc nó.
 - Cache key và `policy_version` ghi canonical slug, không chỉ ID ngắn, vì ID ngắn có thể trỏ sang snapshot mới. Đổi snapshot = policy version mới.
+- **Thử API 26/10 (1 câu SQL đếm giao dịch theo ngày giờ VN):** mặc định model suy luận ẩn và dùng hết `max_tokens` = 300 vào reasoning, `content` rỗng; `reasoning.effort = low` vẫn tiêu hết 1500 token mà không trả lời. `reasoning.enabled = false` trả JSON đúng (`DATE(created_at, '+7 hours')`), 56 token vào / 34 token ra, khoảng 6e-6 USD. → Cấu hình reasoning phải khai báo tường minh trong sampling config (thuộc cache key/`policy_version`); `content` rỗng hoặc hết token → lỗi định dạng → `human_review`.
 - Chất lượng SQL tiếng Việt trên schema PayGuard chưa đo; đo ở P4.6 ([p4-implementation.md](p4-implementation.md)) trước khi khóa policy.
 
 ## 4. Điểm dừng research
