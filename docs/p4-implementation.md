@@ -9,7 +9,7 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 
 | Task | Vòng 1 — luồng mỏng tới ★ | Vòng 2 (P4a/P4b/P4c đầy đủ) |
 |---|---|---|
-| P4.1 `decisions` + gate | Schema `decisions`, gate phân nhánh theo hành động, `evidence_status` do code tính | Recheck tối đa 2 lần cách 1 ngày; xung đột nhiều rule |
+| P4.1 `decisions` + gate — vòng 1 hoàn tất ✅ | Schema `decisions`, gate phân nhánh theo hành động, `evidence_status` do code tính | Recheck tối đa 2 lần cách 1 ngày; xung đột nhiều rule |
 | P4.2 Rule | Một runbook: `unit_or_null_change` → `data_ticket` | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
 | P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`) | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
@@ -70,7 +70,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 3. **Rule vòng 1:** chọn `unit_or_null_change` (smoke có 2 sự cố `data_pipeline` được phát hiện) thay vì `seasonal_calendar` (2 incident seasonal hiện unmatched do hiệu ứng trễ cửa sổ — cần matcher vòng 2 trước).
 
 ## Nghiệm thu P4 vòng 1
-- [ ] Gate đúng từng nhánh của [triage.md](triage.md) mục 2; `evidence_status` do code tính.
+- [x] Gate đúng từng nhánh của [triage.md](triage.md) mục 2; `evidence_status` do code tính.
 - [ ] Một rule + agent một bước chạy end-to-end trên smoke; không tool nào đọc được truth.
 - [ ] Evaluator chấm `decisions` theo `decision_at`; bảng kết quả ★.
 - [ ] Token thật của 3 case ghi vào MASTER mục 5.
