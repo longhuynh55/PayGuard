@@ -34,11 +34,13 @@
 
 Các tham số H = 90, K = N = 3, chia 12/24/24, D = 7 và ngưỡng 1% là **lựa chọn thiết kế benchmark**, không phải chuẩn nghiệp vụ suy ra từ các nguồn trên.
 
-## 3. DeepSeek V4 Flash
+## 3. LLM: Qwen 3.7 Flash qua OpenRouter
 
-- Theo IT之家, API chính thức V4-Flash mở public beta 31/07/2026.
-- Một số nhà cung cấp trung gian liệt kê `logprobs`, **chưa xác nhận trên tài liệu chính thức**. Plan không phụ thuộc logprobs.
-- Giá chính thức: chưa tra — việc của mục Ngân sách trong [MASTER_PLAN.md](../MASTER_PLAN.md).
+- **Chốt 26/10/2026 (người dùng):** `qwen/qwen3.7-flash` trên OpenRouter, thay DeepSeek V4 Flash (chọn 24/10). Người dùng yêu cầu "DeepSeek V5 Flash" nhưng OpenRouter không có model này (bản Flash mới nhất là `deepseek/deepseek-v4.1-flash`).
+- Theo API `openrouter.ai/api/v1/models` ngày 26/10/2026: canonical slug `qwen/qwen3.7-flash-20260727`; giá 0,03 USD/1M token input, 0,13 USD/1M output; nhà cung cấp duy nhất Alibaba; hỗ trợ `tools`, `tool_choice`, `response_format`, `seed`, `logprobs`. **Không** có `structured_outputs` (JSON schema chặt) → code phải tự kiểm tra JSON, sai format → `human_review` ([triage.md](triage.md)).
+- `logprobs` có trên endpoint nên baseline confidence theo logprob ([triage.md](triage.md) mục 5) dùng được; plan vẫn không phụ thuộc nó.
+- Cache key và `policy_version` ghi canonical slug, không chỉ ID ngắn, vì ID ngắn có thể trỏ sang snapshot mới. Đổi snapshot = policy version mới.
+- Chất lượng SQL tiếng Việt trên schema PayGuard chưa đo; đo ở P4.6 ([p4-implementation.md](p4-implementation.md)) trước khi khóa policy.
 
 ## 4. Điểm dừng research
 
