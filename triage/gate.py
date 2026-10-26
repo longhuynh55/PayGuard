@@ -298,6 +298,7 @@ def _mandatory_runbook_reasons(
         for name in ("seasonal_calendar", "unit_or_null_change")
         if name in checklist_results
         and checklist_results[name]["status"] != "not_applicable"
+        and checklist_results[name].get("scope_match") is True
     }
     if runbook in {"seasonal_calendar", "unit_or_null_change"}:
         applicable_runbooks.add(runbook)

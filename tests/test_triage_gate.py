@@ -340,7 +340,7 @@ def test_review_r2_runbook_escalation_precedes_other_action_branches(
             cause="fraud_surge",
             runbook=None,
             checklist_results={
-                runbook: {"status": "pass"},
+                runbook: {"status": "pass", "scope_match": True},
                 "fraud_signal": {
                     "status": "pass",
                     "scope_match": True,
@@ -354,6 +354,33 @@ def test_review_r2_runbook_escalation_precedes_other_action_branches(
 
     assert result["action"] == "human_review"
     assert f"{runbook!r}" in result["reason"]
+
+
+@pytest.mark.parametrize("source", ["rule", "agent"])
+@pytest.mark.parametrize("runbook", ["seasonal_calendar", "unit_or_null_change"])
+@pytest.mark.parametrize("status", ["fail", "not_applicable"])
+def test_review_r2_fix_unselected_out_of_scope_runbook_does_not_block_fraud_ops(
+    source: str, runbook: str, status: str
+) -> None:
+    result = _gate(
+        _proposal(
+            "fraud_ops",
+            cause="fraud_surge",
+            runbook=None,
+            checklist_results={
+                runbook: {"status": status, "scope_match": False},
+                "fraud_signal": {
+                    "status": "pass",
+                    "scope_match": True,
+                    "window_complete": True,
+                },
+            },
+        ),
+        source=source,
+    )
+
+    assert result["action"] == "fraud_ops"
+    assert result["evidence_status"] == "sufficient"
 
 
 def test_fraud_ops_routes_with_structured_in_scope_signal_and_complete_window() -> None:
