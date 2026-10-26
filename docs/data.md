@@ -192,3 +192,27 @@ D là giả định nghiệp vụ khai báo trước, không tune. Cách evaluat
 | `label_policy_version` | `TEXT` | Không | Phiên bản chính sách nhãn dùng khi huấn luyện |
 
 Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phiên bản score khác nhau; P2.5 smoke xuất một dòng cho mỗi giao dịch. Bảng có chỉ mục `(episode_id, event_at, available_at)` để P3 đọc theo episode và snapshot.
+
+## 7. Đầu ra monitoring (`daily_metrics`)
+
+`daily_metrics` là bảng kết quả operational của job P3.1; smoke CLI xuất CSV theo schema này. Bảng không đọc hoặc chứa truth, template, cơ chế injector hay metadata private. Mỗi dòng là một metric của một episode tại một snapshot ngày nghiệp vụ.
+
+| Cột | Kiểu | Ý nghĩa |
+|---|---|---|
+| `metric_id` | `TEXT` | ID metric ổn định, khai báo trong cấu hình monitoring. |
+| `episode_id` | `TEXT` | Episode đang được theo dõi; không phải `base`. |
+| `as_of_time` | `TEXT` UTC | Thời điểm chụp dữ liệu, cuối ngày nghiệp vụ Việt Nam. |
+| `business_date` | `TEXT` | Ngày nghiệp vụ `Asia/Ho_Chi_Minh`, dạng `YYYY-MM-DD`. |
+| `feature` | `TEXT` | Feature P2.2 hoặc `decision_region` đối với tỉ lệ review. |
+| `segment` | `TEXT` | `all` ở P3.1; metric review ghi `model_version=<id>` để không gộp các phiên bản model. |
+| `value` | `REAL NULL` | PSI cho feature hoặc tỉ lệ review trên số model score trong cửa sổ. NULL khi không có mẫu để tính. |
+| `reference_window` | `TEXT` | Khoảng ngày nền cố định cho PSI (`YYYY-MM-DD/YYYY-MM-DD`, hai đầu gồm); `not_applicable` cho tỉ lệ review thô vì P2.5 không lưu score của base. |
+| `window_start` | `TEXT` | Ngày đầu cửa sổ nghiệp vụ 7 ngày, gồm cả ngày này. |
+| `window_end` | `TEXT` | Ngày cuối cửa sổ nghiệp vụ, gồm cả ngày này. |
+| `n_window` | `INTEGER` | Số feature value hữu hạn hoặc số model score trong cửa sổ, tùy metric. |
+| `n_reference` | `INTEGER` | Số feature value hữu hạn của base reference; bằng 0 với tỉ lệ review. |
+| `flags` | `TEXT` JSON array | Cờ chất lượng như `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
+
+P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
+
+Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. Bảng thuộc phía operational và không có dữ liệu truth.

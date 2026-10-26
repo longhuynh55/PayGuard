@@ -1,0 +1,66 @@
+schema_version: 1
+
+reference:
+  start_business_date:
+    value: "2025-11-01"
+    unit: inclusive local business date
+    rationale: Fixed reference start for round-one feature PSI.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/model.md, section 1.
+  end_business_date_exclusive:
+    value: "2026-02-01"
+    unit: exclusive local business date
+    rationale: Fixed reference covers November 2025 through January 2026.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/model.md, section 1.
+  as_of_business_date:
+    value: "2026-02-01"
+    unit: local business date at start of day
+    rationale: Freeze reference availability at T0 so late data cannot revise the baseline.
+    provenance:
+      kind: contract
+      reference: docs/data.md, section 2; docs/model.md, section 1.
+
+window_days:
+  value: 7
+  unit: inclusive local business dates
+  rationale: Monitoring window length in the locked MVP contract.
+  provenance:
+    kind: contract
+    reference: docs/monitoring.md, section 1.
+
+minimum_sample_count:
+  value: 30
+  unit: observations
+  rationale: Initial support floor; mark small samples instead of treating them as reliable.
+  provenance:
+    kind: assumption
+    reference: Assumption, not tuned; no benchmark result is claimed.
+
+psi:
+  number_of_bins:
+    value: 10
+    unit: quantile bins
+    rationale: Initial reference quantile bin count for PSI.
+    provenance:
+      kind: assumption
+      reference: Assumption, not tuned; no benchmark result is claimed.
+  epsilon:
+    value: 0.000001
+    unit: pseudocount per bin
+    rationale: Smooth empty bins when calculating PSI.
+    provenance:
+      kind: assumption
+      reference: Assumption, not tuned; no benchmark result is claimed.
+
+features:
+  - metric_id: psi.txn_count_24h
+    feature: txn_count_24h
+  - metric_id: psi.amount_avg_7d
+    feature: amount_avg_7d
+
+model_review_rate:
+  metric_id: model.review_rate
+  feature: decision_region
