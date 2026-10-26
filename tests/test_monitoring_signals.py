@@ -23,6 +23,8 @@ def _metric_row(
         "metric_id": metric_id,
         "episode_id": episode_id,
         "as_of_time": as_of_time,
+        "event_at": as_of_time,
+        "available_at": as_of_time,
         "business_date": "2026-02-10",
         "feature": feature,
         "segment": segment,

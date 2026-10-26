@@ -71,6 +71,44 @@ _PUBLIC_FORBIDDEN_KEYS = {
     "requires_intervention",
     "rule_covered",
 }
+_DOWNSTREAM_OUTPUT_TABLES = ("model_scores", "daily_metrics", "alerts", "incidents")
+_MONITORING_PRIVATE_MARKERS = _RESERVED_ID_TOKENS
+_MONITORING_PRIVATE_FIELD_MARKERS = _PUBLIC_FORBIDDEN_KEYS | {
+    "accepted_actions_json",
+    "affected_entities_json",
+    "affected_features_json",
+    "affected_segments_json",
+    "config_fingerprint",
+    "config_json",
+    "content_fingerprint",
+    "deadline_at",
+    "effect_end_at",
+    "effect_start_at",
+    "incident_effect",
+    "incident_truth",
+    "intervention_start_at",
+    "p1.6.incident_effect.v1",
+    "seed",
+    "template",
+    "txn_ids",
+}
+_MONITORING_PRIVATE_FIELD_PATTERNS = tuple(
+    re.compile(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])")
+    for marker in sorted(_MONITORING_PRIVATE_FIELD_MARKERS, key=len, reverse=True)
+)
+_MONITORING_QUALITY_FLAGS = frozenset(
+    {
+        "window_incomplete",
+        "small_window_sample",
+        "small_reference_sample",
+        "no_window_samples",
+        "no_reference_samples",
+    }
+)
+_MONITORING_COUNT_FLAG = re.compile(
+    r"^(?:window_censored_samples|reference_censored_samples|"
+    r"target_unavailable_at_decision|reference_targets_unavailable_at_decision)=[1-9][0-9]*$"
+)
 
 
 class ValidationError(ValueError):
@@ -238,7 +276,10 @@ def _validate_metadata(
         _fail("recorded episode seed differs from resolved config")
 
     stored_fingerprint = metadata.get("canonical_content_fingerprint")
-    computed_fingerprint = canonical_run_fingerprint(operational)
+    computed_fingerprint = canonical_run_fingerprint(
+        operational,
+        empty_tables=_DOWNSTREAM_OUTPUT_TABLES,
+    )
     if stored_fingerprint != computed_fingerprint:
         _fail(
             "canonical operational fingerprint differs "
@@ -677,6 +718,218 @@ def _collect_contract_violations(operational: sqlite3.Connection) -> str:
     )
 
 
+def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
+    """Validate P3 rows against their P3 source rows without reading private truth."""
+    violations: list[str] = []
+    registered = {
+        row[0] for row in operational.execute("SELECT episode_id FROM episodes")
+    }
+    metrics_by_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    alerts_by_id: dict[str, dict[str, Any]] = {}
+    incidents_by_key: set[tuple[str, str]] = set()
+
+    def check_neutral_text(table: str, row_id: str, values: tuple[Any, ...]) -> None:
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            tokens = set(re.split(r"[^a-z0-9]+", value.lower()))
+            if tokens & _MONITORING_PRIVATE_MARKERS:
+                violations.append(
+                    f"{table} row {row_id} encodes private scenario or truth content"
+                )
+                return
+
+    def check_private_fields(table: str, row_id: str, values: tuple[Any, ...]) -> None:
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            text = value.casefold()
+            if any(pattern.search(text) for pattern in _MONITORING_PRIVATE_FIELD_PATTERNS):
+                violations.append(
+                    f"{table} row {row_id} contains a private truth or injector field name"
+                )
+                return
+
+    metrics = operational.execute("SELECT * FROM daily_metrics").fetchall()
+    for source in metrics:
+        row = dict(source)
+        metric_id = str(row["metric_id"])
+        episode_id = str(row["episode_id"])
+        as_of_time = str(row["as_of_time"])
+        if episode_id == "base" or episode_id not in registered:
+            violations.append(f"daily_metrics row {metric_id} has an invalid episode")
+        if row["event_at"] != as_of_time or row["available_at"] != as_of_time:
+            violations.append(
+                f"daily_metrics row {metric_id} event_at and available_at must equal as_of_time"
+            )
+        try:
+            flags = json.loads(row["flags"])
+        except (TypeError, json.JSONDecodeError):
+            flags = None
+        if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
+            violations.append(f"daily_metrics row {metric_id} flags must be a JSON string array")
+        elif any(
+            flag not in _MONITORING_QUALITY_FLAGS
+            and _MONITORING_COUNT_FLAG.fullmatch(flag) is None
+            for flag in flags
+        ):
+            violations.append(
+                f"daily_metrics row {metric_id} flags contain unsupported quality flags"
+            )
+        check_neutral_text(
+            "daily_metrics",
+            metric_id,
+            (metric_id, row["feature"], row["segment"], row["reference_window"], row["flags"]),
+        )
+        check_private_fields("daily_metrics", metric_id, tuple(row.values()))
+        key = (
+            episode_id,
+            as_of_time,
+            metric_id,
+            str(row["feature"]),
+            str(row["segment"]),
+        )
+        metrics_by_key[key] = row
+
+    alerts = operational.execute("SELECT * FROM alerts").fetchall()
+    for source in alerts:
+        row = dict(source)
+        alert_id = str(row["alert_id"])
+        episode_id = str(row["episode_id"])
+        as_of_time = str(row["as_of_time"])
+        if episode_id == "base" or episode_id not in registered:
+            violations.append(f"alert {alert_id} has an invalid episode")
+        if row["event_at"] != as_of_time or row["available_at"] != as_of_time:
+            violations.append(
+                f"alert {alert_id} event_at and available_at must equal as_of_time"
+            )
+        identity = {
+            "schema_version": 1,
+            "episode_id": episode_id,
+            "as_of_time": as_of_time,
+            "metric": row["metric"],
+            "feature": row["feature"],
+            "segment": row["segment"],
+        }
+        expected_id = "alert-" + _canonical_json_hash(identity)[:24]
+        if alert_id != expected_id:
+            violations.append(f"alert {alert_id} is not the neutral ID for its episode and scope")
+        metric_key = (
+            episode_id,
+            as_of_time,
+            str(row["metric"]),
+            str(row["feature"]),
+            str(row["segment"]),
+        )
+        metric = metrics_by_key.get(metric_key)
+        if metric is None:
+            violations.append(f"alert {alert_id} has no same-episode daily_metrics source")
+        elif (
+            metric["value"] != row["value"]
+            or metric["reference_window"] != row["reference"]
+        ):
+            violations.append(f"alert {alert_id} differs from its daily_metrics source")
+        check_neutral_text(
+            "alerts",
+            alert_id,
+            (row["metric"], row["feature"], row["segment"], row["reference"]),
+        )
+        check_private_fields("alerts", alert_id, tuple(row.values()))
+        alerts_by_id[alert_id] = row
+
+    incidents = operational.execute("SELECT * FROM incidents").fetchall()
+    for source in incidents:
+        row = dict(source)
+        incident_id = str(row["incident_id"])
+        episode_id = str(row["episode_id"])
+        opened_at = str(row["opened_at"])
+        event_at = str(row["event_at"])
+        available_at = str(row["available_at"])
+        if episode_id == "base" or episode_id not in registered:
+            violations.append(f"incident {incident_id} has an invalid episode")
+        if not opened_at <= event_at <= available_at:
+            violations.append(
+                f"incident {incident_id} must satisfy opened_at <= event_at <= available_at"
+            )
+        incidents_by_key.add((incident_id, episode_id))
+        try:
+            alert_ids = json.loads(row["alert_ids_json"])
+        except (TypeError, json.JSONDecodeError):
+            alert_ids = None
+        if (
+            not isinstance(alert_ids, list)
+            or not alert_ids
+            or any(not isinstance(alert_id, str) for alert_id in alert_ids)
+            or len(alert_ids) != len(set(alert_ids))
+        ):
+            violations.append(f"incident {incident_id} alert_ids_json must be a unique nonempty string array")
+            continue
+
+        known_alerts = [alerts_by_id[alert_id] for alert_id in alert_ids if alert_id in alerts_by_id]
+        expected_alert_order = [
+            alert["alert_id"]
+            for alert in sorted(
+                known_alerts,
+                key=lambda alert: (alert["as_of_time"], alert["alert_id"]),
+            )
+        ]
+        if len(known_alerts) == len(alert_ids) and alert_ids != expected_alert_order:
+            violations.append(
+                f"incident {incident_id} alert_ids_json is not ordered by as_of_time then alert_id"
+            )
+
+        first_alert = alerts_by_id.get(alert_ids[0])
+        for alert_id in alert_ids:
+            alert = alerts_by_id.get(alert_id)
+            if alert is None:
+                violations.append(f"incident {incident_id} references missing alert {alert_id}")
+                continue
+            if alert["episode_id"] != episode_id:
+                violations.append(f"incident {incident_id} references an alert from another episode")
+            if alert["feature"] != row["feature"] or alert["segment"] != row["segment"]:
+                violations.append(f"incident {incident_id} references an alert from another scope")
+            if alert["available_at"] > available_at:
+                violations.append(
+                    f"incident {incident_id} snapshot is available before alert {alert_id}"
+                )
+        if first_alert is not None:
+            if first_alert["episode_id"] != episode_id:
+                violations.append(f"incident {incident_id} first alert belongs to another episode")
+            if row["opened_at"] != first_alert["as_of_time"]:
+                violations.append(f"incident {incident_id} opened_at differs from its first alert")
+            identity = {
+                "schema_version": 1,
+                "episode_id": episode_id,
+                "first_alert_id": alert_ids[0],
+                "feature": row["feature"],
+                "segment": row["segment"],
+                "parent_incident_id": row["parent_incident_id"],
+            }
+            expected_id = "incident-" + _canonical_json_hash(identity)[:24]
+            if incident_id != expected_id:
+                violations.append(f"incident {incident_id} is not the neutral ID for its scope")
+        if row["parent_incident_id"] is not None:
+            parent_key = (str(row["parent_incident_id"]), episode_id)
+            if parent_key not in incidents_by_key and not operational.execute(
+                "SELECT 1 FROM incidents WHERE incident_id = ? AND episode_id = ? LIMIT 1",
+                parent_key,
+            ).fetchone():
+                violations.append(f"incident {incident_id} references a parent from another episode or no parent")
+        check_neutral_text(
+            "incidents",
+            incident_id,
+            (row["feature"], row["segment"]),
+        )
+        check_private_fields("incidents", incident_id, tuple(row.values()))
+
+    if violations:
+        _fail("; ".join(violations[:20]))
+    return (
+        f"{len(metrics)} daily metrics, {len(alerts)} alerts, and {len(incidents)} incidents "
+        "have matching same-episode sources, as-of timestamps, neutral IDs, and no truth content"
+    )
+
+
 def _validate_asof(operational: sqlite3.Connection) -> str:
     episodes = [
         row[0]
@@ -978,6 +1231,7 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         _evaluate(checks, "operational_schema", lambda: _check_schema(operational, operational=True))
         _evaluate(checks, "operational_integrity_and_foreign_keys", lambda: _integrity_check(operational, "operational"))
         _evaluate(checks, "as_of_episode_contract", lambda: _collect_contract_violations(operational))
+        _evaluate(checks, "monitoring_output_contract", lambda: _validate_monitoring_outputs(operational))
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))

@@ -141,6 +141,77 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         )
     )
     """,
+    f"""
+    CREATE TABLE IF NOT EXISTS daily_metrics (
+        metric_id TEXT NOT NULL CHECK (length(metric_id) > 0),
+        episode_id TEXT NOT NULL REFERENCES episodes(episode_id) CHECK (episode_id <> 'base'),
+        as_of_time TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='as_of_time')}),
+        event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
+        available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        business_date TEXT NOT NULL CHECK (
+            length(business_date) = 10 AND business_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        ),
+        feature TEXT NOT NULL CHECK (length(feature) > 0),
+        segment TEXT NOT NULL CHECK (length(segment) > 0),
+        value REAL NULL CHECK (value IS NULL OR typeof(value) IN ('integer', 'real')),
+        reference_window TEXT NOT NULL CHECK (length(reference_window) > 0),
+        window_start TEXT NOT NULL CHECK (
+            length(window_start) = 10 AND window_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        ),
+        window_end TEXT NOT NULL CHECK (
+            length(window_end) = 10 AND window_end GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+        ),
+        n_window INTEGER NOT NULL CHECK (typeof(n_window) = 'integer' AND n_window >= 0),
+        n_reference INTEGER NOT NULL CHECK (typeof(n_reference) = 'integer' AND n_reference >= 0),
+        flags TEXT NOT NULL CHECK (json_valid(flags) AND json_type(flags) = 'array'),
+        PRIMARY KEY (metric_id, episode_id, as_of_time, feature, segment),
+        CHECK (event_at = as_of_time),
+        CHECK (available_at = as_of_time)
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS alerts (
+        alert_id TEXT NOT NULL PRIMARY KEY CHECK (length(alert_id) > 0),
+        episode_id TEXT NOT NULL REFERENCES episodes(episode_id) CHECK (episode_id <> 'base'),
+        as_of_time TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='as_of_time')}),
+        metric TEXT NOT NULL CHECK (length(metric) > 0),
+        feature TEXT NOT NULL CHECK (length(feature) > 0),
+        segment TEXT NOT NULL CHECK (length(segment) > 0),
+        value REAL NOT NULL CHECK (typeof(value) IN ('integer', 'real')),
+        reference TEXT NOT NULL CHECK (length(reference) > 0),
+        threshold REAL NOT NULL CHECK (typeof(threshold) IN ('integer', 'real')),
+        event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
+        available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        UNIQUE (episode_id, as_of_time, metric, feature, segment),
+        FOREIGN KEY (metric, episode_id, as_of_time, feature, segment)
+            REFERENCES daily_metrics (metric_id, episode_id, as_of_time, feature, segment),
+        CHECK (event_at = as_of_time),
+        CHECK (available_at = as_of_time)
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS incidents (
+        incident_id TEXT NOT NULL CHECK (length(incident_id) > 0),
+        parent_incident_id TEXT NULL,
+        episode_id TEXT NOT NULL REFERENCES episodes(episode_id) CHECK (episode_id <> 'base'),
+        alert_ids_json TEXT NOT NULL CHECK (
+            json_valid(alert_ids_json) AND json_type(alert_ids_json) = 'array'
+        ),
+        feature TEXT NOT NULL CHECK (length(feature) > 0),
+        segment TEXT NOT NULL CHECK (length(segment) > 0),
+        opened_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='opened_at')}),
+        status TEXT NOT NULL CHECK (
+            status IN ('open', 'recheck', 'close', 'data_ticket', 'fraud_ops', 'human_review')
+        ),
+        event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
+        available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        PRIMARY KEY (incident_id, event_at),
+        CHECK (parent_incident_id IS NULL OR parent_incident_id <> incident_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS daily_metrics_episode_asof ON daily_metrics (episode_id, event_at, available_at)",
+    "CREATE INDEX IF NOT EXISTS alerts_episode_asof ON alerts (episode_id, event_at, available_at)",
+    "CREATE INDEX IF NOT EXISTS incidents_episode_asof ON incidents (episode_id, event_at, available_at)",
     """
     CREATE INDEX IF NOT EXISTS model_scores_episode_asof
     ON model_scores (episode_id, event_at, available_at)
@@ -154,6 +225,77 @@ OPERATIONAL_DDL: tuple[str, ...] = (
           WHERE txn_id = NEW.txn_id AND episode_id = NEW.episode_id) <> NEW.decision_at
     BEGIN
         SELECT RAISE(ABORT, 'model score decision_at must match transaction created_at');
+    END
+    """,
+    *(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {table}_no_update
+        BEFORE UPDATE ON {table}
+        BEGIN
+            SELECT RAISE(ABORT, '{table} is append-only');
+        END
+        """
+        for table in ("daily_metrics", "alerts", "incidents")
+    ),
+    *(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {table}_no_replace
+        BEFORE INSERT ON {table}
+        WHEN EXISTS (SELECT 1 FROM {table} WHERE {key_predicate})
+        BEGIN
+            SELECT RAISE(ABORT, '{table} is append-only; keys cannot be replaced');
+        END
+        """
+        for table, key_predicate in (
+            (
+                "daily_metrics",
+                "metric_id = NEW.metric_id AND episode_id = NEW.episode_id "
+                "AND as_of_time = NEW.as_of_time AND feature = NEW.feature AND segment = NEW.segment",
+            ),
+            (
+                "alerts",
+                "alert_id = NEW.alert_id OR "
+                "(episode_id = NEW.episode_id AND as_of_time = NEW.as_of_time "
+                "AND metric = NEW.metric AND feature = NEW.feature AND segment = NEW.segment)",
+            ),
+            ("incidents", "incident_id = NEW.incident_id AND event_at = NEW.event_at"),
+        )
+    ),
+    *(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {table}_no_delete
+        BEFORE DELETE ON {table}
+        BEGIN
+            SELECT RAISE(ABORT, '{table} is append-only');
+        END
+        """
+        for table in ("daily_metrics", "alerts", "incidents")
+    ),
+    """
+    CREATE TRIGGER IF NOT EXISTS incidents_parent_episode_insert
+    BEFORE INSERT ON incidents
+    WHEN NEW.parent_incident_id IS NOT NULL
+     AND EXISTS (
+         SELECT 1 FROM incidents
+         WHERE incident_id = NEW.parent_incident_id AND episode_id <> NEW.episode_id
+     )
+    BEGIN
+        SELECT RAISE(ABORT, 'incident parent must belong to the same episode');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS incidents_alert_episode_insert
+    BEFORE INSERT ON incidents
+    WHEN EXISTS (
+        SELECT 1
+        FROM json_each(NEW.alert_ids_json) AS incident_alert_id
+        LEFT JOIN alerts AS alert
+          ON alert.alert_id = incident_alert_id.value
+         AND alert.episode_id = NEW.episode_id
+        WHERE alert.alert_id IS NULL
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'incident alerts must exist in the same episode');
     END
     """,
     """
@@ -377,6 +519,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "label_events",
         "business_calendar",
         "model_scores",
+        "daily_metrics",
+        "alerts",
+        "incidents",
     }
 )
 AS_OF_TABLES: frozenset[str] = frozenset(
@@ -388,6 +533,9 @@ AS_OF_TABLES: frozenset[str] = frozenset(
         "label_events",
         "business_calendar",
         "model_scores",
+        "daily_metrics",
+        "alerts",
+        "incidents",
     }
 )
 PRIVATE_TABLES: frozenset[str] = frozenset(
@@ -404,6 +552,9 @@ OPERATIONAL_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "label_events": frozenset({"event_at", "reported_at", "available_at"}),
     "business_calendar": frozenset({"event_at", "available_at"}),
     "model_scores": frozenset({"decision_at", "event_at", "available_at"}),
+    "daily_metrics": frozenset({"as_of_time", "event_at", "available_at"}),
+    "alerts": frozenset({"as_of_time", "event_at", "available_at"}),
+    "incidents": frozenset({"opened_at", "event_at", "available_at"}),
 }
 PRIVATE_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "incident_truth": frozenset(

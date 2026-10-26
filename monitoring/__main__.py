@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from monitoring.incidents import (
     InMemoryDecisionSource,
@@ -17,6 +18,7 @@ from monitoring.incidents import (
 )
 from monitoring.metrics import compute_daily_metrics, write_metrics_csv
 from monitoring.signals import ALERT_COLUMNS, compute_alerts, write_alerts_csv
+from monitoring.store import persist_monitoring_rows
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
     incidents_parser = subparsers.add_parser(
         "incidents", help="group one episode's P3.2 alert CSV into incidents"
     )
+    incidents_parser.add_argument("--operational-db", required=True)
     incidents_parser.add_argument("--episode-id", required=True)
     incidents_parser.add_argument("--alerts-csv", required=True)
     incidents_parser.add_argument(
@@ -63,13 +66,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _read_only_connection(path: str | Path) -> sqlite3.Connection:
+@contextmanager
+def _operational_connection(path: str | Path) -> Iterator[sqlite3.Connection]:
     resolved = Path(path).expanduser().resolve()
     if not resolved.is_file():
         raise ValueError(f"operational database does not exist: {resolved}")
-    connection = sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True)
+    connection = sqlite3.connect(resolved)
     connection.row_factory = sqlite3.Row
-    return connection
+    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _read_alerts_csv(path: str | Path) -> list[dict[str, object]]:
@@ -100,11 +112,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "incidents":
         alerts = _read_alerts_csv(args.alerts_csv)
         decision_source = InMemoryDecisionSource(_read_decisions_json(args.decisions_json))
-        result = compute_incidents(
-            alerts,
-            episode_id=args.episode_id,
-            decision_source=decision_source,
-        )
+        with _operational_connection(args.operational_db) as operational:
+            persist_monitoring_rows(operational, "alerts", alerts)
+            result = compute_incidents(
+                alerts,
+                episode_id=args.episode_id,
+                decision_source=decision_source,
+            )
+            persist_monitoring_rows(operational, "incidents", result.incidents)
         if args.output:
             write_incidents_csv(result.incidents, args.output)
             print(
@@ -118,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command not in {"metrics", "signals"}:
         raise ValueError(f"unsupported monitoring command: {args.command}")
-    with _read_only_connection(args.operational_db) as operational:
+    with _operational_connection(args.operational_db) as operational:
         rows = compute_daily_metrics(
             operational,
             simulator_config_path=args.simulator_config,
@@ -128,6 +143,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "signals"
             else tuple(args.episode_id) if args.episode_id else None,
         )
+        persist_monitoring_rows(operational, "daily_metrics", rows)
     if args.command == "signals":
         result = compute_alerts(
             rows,
@@ -135,6 +151,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             as_of_time=args.as_of_time,
             monitoring_config_path=args.monitoring_config,
         )
+        with _operational_connection(args.operational_db) as operational:
+            persist_monitoring_rows(operational, "alerts", result.alerts)
         if args.output:
             write_alerts_csv(result.alerts, args.output)
             print(f"alert_count={len(result.alerts)} output={Path(args.output)}", file=sys.stderr)

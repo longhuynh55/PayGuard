@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 from zoneinfo import ZoneInfo
@@ -16,6 +17,8 @@ from model.evaluate import score_monitoring_episodes, train_operational_model
 from monitoring.incidents import compute_incidents
 from monitoring.metrics import compute_daily_metrics, population_stability_index
 from monitoring.signals import compute_alerts
+from monitoring.store import persist_monitoring_rows
+from simulator.asof import read_as_of
 from simulator.config import load_episode_config, load_simulator_config
 from simulator.episodes import generate_episodes
 from simulator.storage import StorePair, create_export_stores, insert_operational_record
@@ -497,12 +500,65 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         "ep-0004": 1,
         "ep-0005": 1,
     }
+    stored_metrics = []
+    stored_alerts = []
+    stored_incidents = []
+    with sqlite3.connect(operational_path) as operational:
+        operational.row_factory = sqlite3.Row
+        operational.execute("PRAGMA foreign_keys = ON")
+        assert persist_monitoring_rows(operational, "daily_metrics", daily_metrics) == 0
+        for episode_id, result in alert_results.items():
+            persist_monitoring_rows(operational, "alerts", result.alerts)
+        for episode_id, result in incident_results.items():
+            persist_monitoring_rows(operational, "incidents", result.incidents)
+        for episode in generated.episodes:
+            stored_metrics.extend(
+                read_as_of(
+                    operational,
+                    "daily_metrics",
+                    episode_id=episode.episode_id,
+                    t0="2026-01-31T17:00:00.000000Z",
+                    as_of_time=as_of_time,
+                )
+            )
+            stored_alerts.extend(
+                read_as_of(
+                    operational,
+                    "alerts",
+                    episode_id=episode.episode_id,
+                    t0="2026-01-31T17:00:00.000000Z",
+                    as_of_time=as_of_time,
+                )
+            )
+            stored_incidents.extend(
+                read_as_of(
+                    operational,
+                    "incidents",
+                    episode_id=episode.episode_id,
+                    t0="2026-01-31T17:00:00.000000Z",
+                    as_of_time=as_of_time,
+                )
+            )
+    for row in stored_metrics:
+        row["flags"] = json.loads(row["flags"])
+    metric_sort_key = lambda row: (
+        row["episode_id"], row["metric_id"], row["as_of_time"], row["feature"], row["segment"]
+    )
+    assert sorted(stored_metrics, key=metric_sort_key) == sorted(daily_metrics, key=metric_sort_key)
+    expected_alerts = [
+        alert for result in alert_results.values() for alert in result.alerts
+    ]
+    assert sorted(stored_alerts, key=lambda row: row["alert_id"]) == sorted(
+        expected_alerts, key=lambda row: row["alert_id"]
+    )
+    expected_incidents = [
+        incident for result in incident_results.values() for incident in result.incidents
+    ]
+    assert sorted(stored_incidents, key=lambda row: (row["incident_id"], row["event_at"])) == sorted(
+        expected_incidents, key=lambda row: (row["incident_id"], row["event_at"])
+    )
     evaluation_result = evaluate_detection_recall(
-        tuple(
-            incident
-            for result in incident_results.values()
-            for incident in result.incidents
-        ),
+        tuple(stored_incidents),
         private_db_path=private_path,
         episode_ids=[episode.episode_id for episode in generated.episodes],
         as_of_time=as_of_time,
@@ -579,3 +635,15 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert signals_cli.stderr.startswith("alert_count=")
     assert len(cli_alerts) == len(pipeline_result.alerts)
     assert signal_report["alert_count"] == len(cli_alerts)
+    with sqlite3.connect(operational_path) as operational:
+        operational.row_factory = sqlite3.Row
+        stored_pipeline_alerts = read_as_of(
+            operational,
+            "alerts",
+            episode_id=pipeline_episode.episode_id,
+            t0="2026-01-31T17:00:00.000000Z",
+            as_of_time=as_of_time,
+        )
+    assert sorted(stored_pipeline_alerts, key=lambda row: row["alert_id"]) == sorted(
+        pipeline_result.alerts, key=lambda row: row["alert_id"]
+    )

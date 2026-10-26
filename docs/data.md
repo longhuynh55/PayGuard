@@ -35,7 +35,7 @@ P1 lưu operational và private trong **hai SQLite database độc lập**; đư
 
 ### Operational tables
 
-Các cột không ghi nullable là `NOT NULL`; mọi cột `PRIMARY KEY` khai báo `NOT NULL` tường minh (SQLite cho phép NULL trong một số khóa chính TEXT nếu không ghi rõ). `PRIMARY KEY` và `UNIQUE` là ràng buộc duy nhất. Không bảng operational nào có cột sự cố, cơ chế fraud ẩn, đáp án injector, seed hay metadata cấu hình generator.
+Các cột không ghi nullable là `NOT NULL`; mọi cột `PRIMARY KEY` khai báo `NOT NULL` tường minh (SQLite cho phép NULL trong một số khóa chính TEXT nếu không ghi rõ). `PRIMARY KEY` và `UNIQUE` là ràng buộc duy nhất. Không bảng operational nào có dữ liệu truth sự cố, cơ chế fraud ẩn, đáp án injector, seed hay metadata cấu hình generator.
 
 | Bảng | Cột và kiểu | Khóa / ràng buộc |
 |---|---|---|
@@ -46,6 +46,9 @@ Các cột không ghi nullable là `NOT NULL`; mọi cột `PRIMARY KEY` khai b�
 | `transaction_events` | `event_id TEXT`, `txn_id TEXT`, `episode_id TEXT`, `event_type TEXT`, `event_at TEXT`, `available_at TEXT`, `response_code TEXT NULL` | PK `event_id`; FK `txn_id → transactions.txn_id` và `episode_id → episodes.episode_id`. `event_type` thuộc `authorized`, `settled`, `declined`, `refunded`, `reversed`; `available_at >= event_at`. Event có `event_at < T0` phải mang `episode_id='base'`; event từ T0 trở đi mang episode riêng. FK parent cho phép event `base` trỏ giao dịch base; event của `e` trỏ giao dịch base hoặc giao dịch của `e`, không giao dịch episode khác. Bảng append-only: UPDATE/DELETE bị từ chối; hiệu chỉnh bằng event mới. |
 | `label_events` | `event_id TEXT`, `txn_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `label TEXT`, `label_status TEXT`, `reported_at TEXT`, `available_at TEXT`, `source TEXT`, `supersedes_event_id TEXT NULL` | PK `event_id`; UNIQUE `txn_id` trong MVP (tối đa một kết luận/giao dịch); FK `(txn_id, episode_id) → transactions(txn_id, episode_id)` và FK tự tham chiếu `supersedes_event_id`. `label` là `fraud` hoặc `legit`; `label_status` là `confirmed`; `source` là `chargeback`, `investigator` hoặc `customer_report`; `available_at >= reported_at`; `event_at` phải khớp giao dịch; `supersedes_event_id` phải NULL trong MVP. Sự kiện nhãn chỉ lưu kết luận đã có, không lưu dòng `pending` hay `matured_negative`. |
 | `business_calendar` | `calendar_event_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `available_at TEXT`, `business_date TEXT`, `event_name TEXT`, `lag_days INTEGER`, `expected_effect_json TEXT`, `scope_json TEXT` | PK `calendar_event_id`; FK episode. `business_date` theo ngày VN; `event_at` là đầu ngày nghiệp vụ đó đổi sang UTC. `expected_effect_json` là object theo `metric_id`; `scope_json` là object mô tả phạm vi. |
+| `daily_metrics` | `metric_id TEXT`, `episode_id TEXT`, `as_of_time TEXT`, `event_at TEXT`, `available_at TEXT`, `business_date TEXT`, `feature TEXT`, `segment TEXT`, `value REAL NULL`, `reference_window TEXT`, `window_start TEXT`, `window_end TEXT`, `n_window INTEGER`, `n_reference INTEGER`, `flags TEXT` JSON array | PK `(metric_id, episode_id, as_of_time, feature, segment)`; FK episode; `event_at = available_at = as_of_time`; snapshot append-only. |
+| `alerts` | `alert_id TEXT`, `episode_id TEXT`, `as_of_time TEXT`, `metric TEXT`, `feature TEXT`, `segment TEXT`, `value REAL`, `reference TEXT`, `threshold REAL`, `event_at TEXT`, `available_at TEXT` | PK `alert_id`; UNIQUE `(episode_id, as_of_time, metric, feature, segment)`; FK episode và `(metric, episode_id, as_of_time, feature, segment) → daily_metrics(metric_id, episode_id, as_of_time, feature, segment)`; `event_at = available_at = as_of_time`; snapshot append-only. |
+| `incidents` | `incident_id TEXT`, `parent_incident_id TEXT NULL`, `episode_id TEXT`, `alert_ids_json TEXT` JSON array, `feature TEXT`, `segment TEXT`, `opened_at TEXT`, `status TEXT`, `event_at TEXT`, `available_at TEXT` | PK `(incident_id, event_at)`; FK episode; mỗi alert trong `alert_ids_json` phải thuộc cùng episode; `parent_incident_id`, nếu có, chỉ đến incident cùng episode; snapshot append-only. |
 
 `event_at`, `available_at`, và các cột timestamp không NULL khác dùng định dạng UTC cố định ở trên. `authorized_at`/`settled_at` không phải cột trên `transactions`; trạng thái sau lúc tạo chỉ có thể đọc từ `transaction_events` đã khả dụng tại snapshot. Lifecycle event trước T0 thuộc lịch sử `base`; event từ T0 trở đi là tương lai riêng của episode, kể cả khi `txn_id` tham chiếu giao dịch nền `base`. Các FK được bật trên từng kết nối SQLite. SQLite operational không chứa FK sang database private.
 
@@ -203,6 +206,8 @@ Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phi
 | `metric_id` | `TEXT` | ID metric ổn định, khai báo trong cấu hình monitoring. |
 | `episode_id` | `TEXT` | Episode đang được theo dõi; không phải `base`. |
 | `as_of_time` | `TEXT` UTC | Thời điểm chụp dữ liệu, cuối ngày nghiệp vụ Việt Nam. |
+| `event_at` | `TEXT` UTC | Bằng `as_of_time`; thời điểm nghiệp vụ của snapshot metric. |
+| `available_at` | `TEXT` UTC | Bằng `as_of_time`; thời điểm snapshot metric được đọc. |
 | `business_date` | `TEXT` | Ngày nghiệp vụ `Asia/Ho_Chi_Minh`, dạng `YYYY-MM-DD`. |
 | `feature` | `TEXT` | Feature P2.2 hoặc `decision_region` đối với tỉ lệ review. |
 | `segment` | `TEXT` | `all` ở P3.1; metric review ghi `model_version=<id>` để không gộp các phiên bản model. |
@@ -212,11 +217,11 @@ Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phi
 | `window_end` | `TEXT` | Ngày cuối cửa sổ nghiệp vụ, gồm cả ngày này. |
 | `n_window` | `INTEGER` | Số feature value hữu hạn hoặc số model score trong cửa sổ, tùy metric. |
 | `n_reference` | `INTEGER` | Số feature value hữu hạn của base reference; bằng 0 với tỉ lệ review. |
-| `flags` | `TEXT` JSON array | Cờ chất lượng như `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
+| `flags` | `TEXT` JSON array | Bộ cờ chất lượng vòng 1: `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`, `reference_targets_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
 
 P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
 
-Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. Bảng thuộc phía operational và không có dữ liệu truth.
+Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)` và cũng là khóa chính SQLite. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. `daily_metrics` thuộc allowlist `read_as_of`, append-only, operational và không có dữ liệu truth.
 
 ### `alerts`
 
@@ -236,7 +241,7 @@ Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi n
 | `event_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric. |
 | `available_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric; alert được xem là khả dụng tại snapshot đó. |
 
-Khóa chính logic là `alert_id`; mỗi alert ứng với tối đa một dòng `(episode_id, as_of_time, metric, feature, segment)`. Schema này thuộc phía operational và không có truth. Trong vòng 1, `daily_metrics` và `alerts` là đầu vào/đầu ra in-memory hoặc CSV, chưa được lưu thành bảng SQLite đọc qua `read_as_of`; thời điểm lưu vào operational store và thêm allowlist as-of được ghi nhận là việc vòng 2 hoặc trước P4 trong [p3-implementation.md](p3-implementation.md).
+Khóa chính SQLite là `alert_id`; mỗi alert ứng với tối đa một dòng `(episode_id, as_of_time, metric, feature, segment)`. `alerts` thuộc allowlist `read_as_of`, append-only, operational và không có truth. CSV vẫn là đầu ra của CLI; cùng các dòng này được lưu trong DB operational để P4 đọc qua `read_as_of`.
 
 ### `incidents`
 
@@ -255,7 +260,7 @@ Khóa chính logic là `alert_id`; mỗi alert ứng với tối đa một dòng
 | `event_at` | `TEXT` UTC | Thời điểm sự kiện làm thay đổi snapshot: `as_of_time` của alert hoặc `decision_at` của quyết định. |
 | `available_at` | `TEXT` UTC | Thời điểm snapshot khả dụng; lấy từ alert khi alert làm thay đổi snapshot, hoặc bằng `decision_at` khi quyết định làm thay đổi trạng thái. |
 
-Khóa chính logic là `(incident_id, event_at)`; các cập nhật cùng incident tại cùng thời điểm được gộp thành một snapshot tất định. Bảng append-only để giữ trạng thái theo thời gian; truy vấn tại `as_of_time` chỉ đọc `available_at <= as_of_time` và đúng `episode_id`, rồi chọn snapshot mới nhất theo `event_at` cho mỗi `incident_id`. `parent_incident_id` tham chiếu ID ổn định trong cùng episode, không tham chiếu một phiên bản snapshot cụ thể. Bảng không chứa quyết định gốc hay thay đổi chúng; P4 cung cấp quyết định qua interface của monitoring.
+Khóa chính SQLite là `(incident_id, event_at)`; các cập nhật cùng incident tại cùng thời điểm được gộp thành một snapshot tất định. Bảng append-only và thuộc allowlist `read_as_of` để giữ trạng thái theo thời gian; truy vấn tại `as_of_time` chỉ đọc `available_at <= as_of_time` và đúng `episode_id`, rồi chọn snapshot mới nhất theo `event_at` cho mỗi `incident_id`. `parent_incident_id` tham chiếu ID ổn định trong cùng episode, không tham chiếu một phiên bản snapshot cụ thể. Bảng không chứa quyết định gốc hay thay đổi chúng; P4 cung cấp quyết định qua interface của monitoring.
 
 ### Báo cáo evaluator P3.4 (private)
 

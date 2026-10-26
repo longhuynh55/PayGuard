@@ -4,6 +4,7 @@ import csv
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -14,6 +15,7 @@ from monitoring.incidents import (
     compute_incidents,
 )
 from monitoring.signals import ALERT_COLUMNS, alerts_csv, compute_alerts
+from simulator.storage import create_export_stores, insert_operational_record
 
 
 _BASE = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
@@ -290,6 +292,8 @@ def _daily_metric(
         "metric_id": f"psi.{feature}",
         "episode_id": episode_id,
         "as_of_time": as_of,
+        "event_at": as_of,
+        "available_at": as_of,
         "business_date": business_date,
         "feature": feature,
         "segment": "all",
@@ -341,10 +345,26 @@ def test_incidents_cli_reads_alerts_csv_and_writes_output(tmp_path: Path, capsys
     alerts_path = tmp_path / "alerts.csv"
     alerts_path.write_text(alerts_csv([_alert("alert-a")]), encoding="utf-8")
     output_path = tmp_path / "incidents.csv"
+    store = create_export_stores(tmp_path / "monitoring-store")
+    insert_operational_record(
+        store.operational,
+        "episodes",
+        {"episode_id": "ep-a", "role": "development"},
+    )
+    insert_operational_record(
+        store.operational,
+        "daily_metrics",
+        _daily_metric("ep-a", 0),
+    )
+    store.commit()
+    operational_path = store.operational_path
+    store.close()
 
     exit_code = main(
         [
             "incidents",
+            "--operational-db",
+            str(operational_path),
             "--episode-id",
             "ep-a",
             "--alerts-csv",
@@ -361,6 +381,35 @@ def test_incidents_cli_reads_alerts_csv_and_writes_output(tmp_path: Path, capsys
     assert len(rows) == 1
     assert rows[0]["status"] == "open"
     assert rows[0]["alert_ids_json"] == '["alert-a"]'
+
+    with sqlite3.connect(operational_path) as connection:
+        before = {
+            table: connection.execute(f'SELECT * FROM "{table}" ORDER BY 1').fetchall()
+            for table in ("alerts", "incidents")
+        }
+    assert len(before["alerts"]) == 1
+    assert len(before["incidents"]) == 1
+
+    repeated = main(
+        [
+            "incidents",
+            "--operational-db",
+            str(operational_path),
+            "--episode-id",
+            "ep-a",
+            "--alerts-csv",
+            str(alerts_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+    assert repeated == 0
+    with sqlite3.connect(operational_path) as connection:
+        after = {
+            table: connection.execute(f'SELECT * FROM "{table}" ORDER BY 1').fetchall()
+            for table in ("alerts", "incidents")
+        }
+    assert after == before
 
 
 def test_decisions_for_another_episode_are_rejected() -> None:

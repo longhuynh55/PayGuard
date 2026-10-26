@@ -180,6 +180,8 @@ def _insert(
         "affected_features_json",
         "accepted_actions_json",
         "conformal_set",
+        "flags",
+        "alert_ids_json",
     }
     for key in keys:
         value = record[key]
