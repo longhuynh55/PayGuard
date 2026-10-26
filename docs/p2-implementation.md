@@ -35,7 +35,8 @@ data/<run>/model/   model artifact, model_scores, reports/  (không đưa vào g
 - **Phụ thuộc:** P2.1.
 - **Kiểm tra:** thêm giao dịch khả dụng sau t không đổi feature tại t; cửa sổ chưa đủ quan sát được đánh dấu; không feature nào đến từ truth/metadata generator.
 - **Vòng 1:** `txn_count` 1h/24h/7d, tổng/trung bình amount 7d, amount chia trung bình lịch sử customer; chưa có feature phía người nhận.
-- **Hoàn tất:** ma trận feature cho fit/validation/calibration; test as-of, cờ cửa sổ, nguồn dữ liệu và tính tất định xanh.
+- **Hoàn tất:** test as-of của feature xanh trên fixture và smoke.
+- **Ma trận vòng 1:** fit/validation/calibration có số dòng khớp split; test cờ cửa sổ, nguồn dữ liệu và tính tất định xanh.
 - **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
 ### P2.3 — Model và calibration (`todo`)
