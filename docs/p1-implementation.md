@@ -161,31 +161,30 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Hoàn tất:** manifest có fingerprint và cấu hình đủ để tái tạo. P1 không dùng test để chỉnh tham số cho P2/P3/P4; xem lại test để tune khiến seed đó không còn held-out và phải sinh seed mới theo protocol.
 - **Vòng 1 đã bàn giao:** [`simulator/episodes.py`](../simulator/episodes.py) sinh một lần lịch sử base, rồi 5 episode smoke có role 1/2/2, seed riêng dẫn xuất từ root seed + `episode_id`, giao dịch 30 ngày, card testing P1.4, label P1.5 và tối đa một template P1.6. Manifest có role/seed/template, fingerprint nội dung canonical và config hash; manifest/truth/template ở private, operational `episodes` chỉ có ID + role. Smoke có clean, `data_pipeline` và `seasonal`; chưa sinh pilot 60.
 
-### P1.8 — CLI, validation và bàn giao P2/P3 (`todo`)
+### P1.8 — CLI, validation và bàn giao P2/P3 (`round1-done`; vòng 2 chưa làm)
 
 - **Mục tiêu:** sinh và kiểm tra dữ liệu từ CLI, trả mã lỗi khi vi phạm hợp đồng; bàn giao đủ thông tin để P2/P3 dùng được.
 - **Phụ thuộc:** P1.1–P1.7.
-- **File:** `simulator/__main__.py`, `validate.py`; test reproducibility; báo cáo trong artifact run.
+- **File:** [`simulator/__main__.py`](../simulator/__main__.py), [`simulator/validate.py`](../simulator/validate.py), [`simulator/reports.py`](../simulator/reports.py), test [`tests/test_simulator_cli.py`](../tests/test_simulator_cli.py); báo cáo trong artifact run.
 - **Triển khai:** CLI generate/validate; lưu config đã resolve, seed, phiên bản schema/code, fingerprint, thời gian chạy và kết quả kiểm tra. Tạo báo cáo support cho các cohort của P2, phân phối theo kênh/thời gian, nhãn trễ và độ đầy đủ cửa sổ. Báo cáo có dùng truth là private, không cấp cho tools.
 - **Kiểm tra:** chạy toàn bộ smoke tests, sinh lại cùng config để đối chiếu canonical data; chạy pilot scale và kiểm tra support của các tập P2. Khi thiếu positive/reference, dừng bàn giao tập đó và ghi rõ nguyên nhân; không tự đổi split hoặc dùng oracle label để làm kết quả đẹp.
 - **Hoàn tất:** CLI và các test runtime thực sự chạy đạt; P2/P3 nhận được artifact đúng contract và các giới hạn đã ghi. Cập nhật trạng thái MASTER và lệnh kiểm tra module trong AGENTS khi runtime tồn tại.
+- **Vòng 1 đã bàn giao:** `generate --profile smoke --out ...` tạo SQLite operational/private tách riêng; `validate --run ...` kiểm tra schema, khóa/FK, as-of/episode, truth boundary, ID, pending và fingerprint, trả mã lỗi khi sai. Báo cáo operational ghi support theo split đã khóa, kênh/thời gian, nhãn trễ và độ đầy đủ cửa sổ; oracle/support dùng truth ở `private/reports/smoke_truth.json`. Thiếu positive/negative bắt buộc hoặc reference sẽ chặn bàn giao; smoke calibration có 24 positive vận hành, dưới ngưỡng isotonic 25 nên ghi cảnh báo và dùng fallback sigmoid. Không đổi split hay dùng truth để bù. Pilot 60 và báo cáo support vòng 2 còn hoãn sau ★.
 
 ## 5. Lệnh mục tiêu và cách chạy theo từng mốc
 
-Các lệnh dưới là **interface dự kiến sau khi implement**, hiện chưa chạy được vì chưa có package simulator. Khi CLI hoàn thành, sửa mục này theo lệnh thực tế.
+Lệnh smoke thực tế cho vòng 1:
 
 ```bash
-python3 -m simulator generate --config configs/simulator.yaml --profile smoke --output data/p1-smoke
-python3 -m simulator validate --dataset data/p1-smoke
-python3 -m pytest tests/test_simulator_integrity.py tests/test_simulator_asof.py tests/test_simulator_labels.py
-python3 -m pytest tests/test_simulator_incidents.py tests/test_simulator_episodes.py tests/test_simulator_reproducibility.py
-python3 -m simulator generate --config configs/simulator.yaml --profile pilot --output data/p1-pilot
-python3 -m simulator validate --dataset data/p1-pilot
+uv run python -m simulator generate --profile smoke --out data/p1-smoke
+uv run python -m simulator validate --run data/p1-smoke
+uv run pytest
 ```
 
 - Mốc đầu: P1.1–P1.2, config + fixture nhỏ và kiểm tra as-of, chưa cần volume lớn.
 - Mốc tiếp: P1.3–P1.6, kiểm tra từng cơ chế trên smoke trước khi ghép thành benchmark.
-- Mốc bàn giao: P1.7–P1.8, manifest và pilot export có báo cáo đầy đủ.
+- Mốc bàn giao vòng 1: P1.7–P1.8, smoke manifest và export có kiểm định/báo cáo operational-private.
+- Sau ★, vòng 2 mới chạy pilot 60 và báo cáo support đầy đủ.
 - Sau thay đổi tài liệu/protocol: chạy hai lệnh hiện có trong [AGENTS.md](../AGENTS.md). Các ví dụ `review/` không thay thế test runtime P1.
 
 ## 6. Checklist nghiệm thu P1
@@ -202,4 +201,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.8 — CLI, validation và bàn giao P2/P3.** P1.7 vòng 1 đã bàn giao smoke manifest; pilot 60 và vòng 2 của P1.3, P1.4, P1.6 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
+**Sau ★ — P1 vòng 2.** Mở rộng P1.3, P1.4, P1.6 và P1.7 theo bảng hai vòng; P1.8 chạy pilot 60 và hoàn thiện báo cáo support. P1.8 vòng 1 smoke đã bàn giao.
