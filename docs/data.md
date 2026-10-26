@@ -106,6 +106,7 @@ Kỳ vọng là giả định nghiệp vụ khai báo trước, không lấy t�
 | `disputed` | Kết luận mâu thuẫn chưa phân xử | Loại khỏi supervised fit, báo số lượng | *Mở rộng* |
 
 - **MVP:** mỗi giao dịch tối đa một sự kiện kết luận; H = 90 ngày cho mọi kênh. Cột `supersedes_event_id` để sẵn (NULL).
+- Simulator rút độc lập khả năng một giao dịch có kết luận theo `probability_reported`; nếu có, số ngày từ giao dịch tới lúc báo được lấy theo phân phối đều rời rạc trên khoảng đóng `minimum_delay_days`–`maximum_delay_days` (`delay_distribution: uniform_integer`). Giả định dùng chung cho hai lớp truth; giao dịch không được báo không có dòng operational. Tham số và provenance nằm trong [`configs/simulator.yaml`](../configs/simulator.yaml). Generator MVP đặt `available_at = reported_at`; hợp đồng as-of vẫn cho phép dữ liệu fixture có `available_at` muộn hơn `reported_at`.
 - *Mở rộng:* sửa nhãn append-only qua `supersedes_event_id` (không ghi đè lịch sử), `disputed`, H theo kênh, sensitivity H = 30/60.
 - **Cohort đủ tuổi:** tập fit/calibration có nhãn chỉ gồm giao dịch tuổi ≥ H tại T0, lấy cả positive và negative của cohort. Feedback sớm vẫn hiển thị cho điều tra, nhưng đưa cohort non vào train là ablation riêng.
 - Mọi báo cáo ghi `as_of_time`, `label_policy_version`, `model_version`.

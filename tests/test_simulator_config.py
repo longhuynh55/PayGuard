@@ -111,6 +111,16 @@ def test_expansion_label_horizons_are_rejected(horizon_days: int) -> None:
         validate_simulator_config(data)
 
 
+def test_label_delay_distribution_is_explicit_and_supported() -> None:
+    simulator = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+    assert simulator.label_reporting.delay_distribution.value == "uniform_integer"
+
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["label_reporting"]["delay_distribution"]["value"] = "normal"
+    with pytest.raises(ConfigValidationError, match="delay_distribution.value"):
+        validate_simulator_config(data)
+
+
 @pytest.mark.parametrize(
     ("timezone_field", "invalid_value"),
     [

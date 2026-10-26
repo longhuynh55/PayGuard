@@ -289,24 +289,31 @@ label_reporting:
   minimum_delay_days:
     value: 0
     unit: days after event
-    rationale: Allows a reported label to be available on the event date when the chosen source supports it.
+    rationale: Inclusive lower bound for the configured discrete uniform report-delay distribution.
     provenance:
       kind: assumption
-      reference: Simulator reporting-delay assumption; no source-specific distribution is claimed.
+      reference: Simulator label-delay assumption; no source-specific distribution is claimed.
   maximum_delay_days:
     value: 120
     unit: days after event
-    rationale: Allows late reports beyond the 90-day maturity horizon for tail auditing.
+    rationale: Inclusive upper bound for the configured discrete uniform report-delay distribution; supports late reports beyond H.
     provenance:
       kind: assumption
-      reference: Simulator reporting-delay assumption; no source-specific distribution is claimed.
+      reference: Simulator label-delay assumption; no source-specific distribution is claimed.
+  delay_distribution:
+    value: uniform_integer
+    unit: distribution code
+    rationale: Use the same source-agnostic discrete uniform delay for each reported transaction label.
+    provenance:
+      kind: assumption
+      reference: Simulator label-delay assumption; no source-specific distribution is claimed.
   probability_reported:
     value: 0.8
     unit: probability in [0, 1]
-    rationale: Represents that some fraud may never be reported.
+    rationale: Per-transaction chance of ever receiving a label conclusion; some true fraud therefore remains unreported.
     provenance:
       kind: assumption
-      reference: Simulator reporting assumption; not an empirical estimate.
+      reference: Simulator label-reporting assumption; not an empirical estimate.
 
 profiles:
   smoke:
