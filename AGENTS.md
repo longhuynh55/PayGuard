@@ -24,7 +24,7 @@ Trả lời người dùng bằng tiếng Việt; code và commit bằng tiếng
 |---|---|---|
 | Planner + orchestrator | **Claude Opus** (Claude Code) | `MASTER_PLAN.md`, `docs/`, task spec |
 | Implementer | **Codex `gpt-6-luna`, reasoning max**, `-s workspace-write`, trong worktree của task | Code, test, `docs/` khi hợp đồng đổi |
-| Reviewer | **Codex `gpt-6.1-sol`, reasoning high**, `scripts/review_task.sh` (read-only, ephemeral) | KHÔNG sửa gì; findings vào `review/findings/` |
+| Reviewer | **Codex `gpt-6.1-sol`, reasoning high** — từ 26/10 là phiên **supervisor** trong herdr (giám sát + review, xem [orchestration](docs/orchestration.md)); `scripts/review_task.sh` (read-only, ephemeral) là phương án dự phòng | KHÔNG sửa gì trong repo; findings orchestrator chép vào `review/findings/` |
 
 - **Planner/orchestrator:** viết task có tiêu chí nghiệm thu kiểm tra được; giao việc và chờ qua `herdr`; KHÔNG viết code runtime. Agent ở trạng thái `blocked` → BÁO NGƯỜI DÙNG, KHÔNG tự trả lời hay tự duyệt quyền.
 - **Implementer:** CHỈ làm MVP; phần *Mở rộng* PHẢI hỏi người dùng. Spec mơ hồ → HỎI trước khi code, KHÔNG tự đoán. KHÔNG sửa/xóa/nới test nghiệm thu hay tiêu chí nghiệm thu để cho qua. KHÔNG XÓA/ĐỔI ngưỡng, giá trị hay quy tắc đã khóa trong `docs/` — hoãn triển khai sang vòng 2 thì CHỈ THÊM ghi chú, không xóa. Code đổi hợp đồng (schema, bảng, ngưỡng) → PHẢI sửa `docs/` TRONG CÙNG THAY ĐỔI. Implementer KHÔNG commit — orchestrator commit sau test. Sửa protocol → cập nhật `review/verify_plan_claims.py` + nhật ký quyết định trong MASTER. Xong việc → cập nhật Trạng thái trong MASTER.

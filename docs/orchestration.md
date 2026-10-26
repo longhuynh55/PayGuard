@@ -8,7 +8,7 @@
 
 **Mở rộng 26/10/2026 (người dùng duyệt):** thêm **P3.5 + P4 vòng 1** tới mốc ★ theo [p4-implementation.md](p4-implementation.md). LLM Qwen 3.7 Flash qua OpenRouter; **trần chi phí API tạm 1 USD** cho toàn bộ P4 vòng 1 — vượt trần → DỪNG hỏi người dùng. Chỉ P4.6 gọi API thật; test dùng LLM giả lập.
 
-**Supervisor (người dùng yêu cầu 26/10/2026):** khi có ≥ 2 coder chạy song song, một phiên Codex `gpt-6.1-sol` (reasoning high) trong herdr giám sát các pane coder theo brief của orchestrator: soi diff `docs/`/`tests/`, ranh giới file của lane, câu hỏi bị treo. Được gửi nhắc chỉnh hướng khi coder vi phạm luật rõ ràng (AGENTS.md hoặc prompt task); KHÔNG sửa file, KHÔNG commit/merge, KHÔNG trả lời câu hỏi spec/protocol hay duyệt quyền — các việc đó leo thang về orchestrator/người dùng bằng `SUPERVISOR ALERT`. Review chính thức vẫn qua `scripts/review_task.sh`.
+**Supervisor (người dùng yêu cầu 26/10/2026):** khi có ≥ 2 coder chạy song song, một phiên Codex `gpt-6.1-sol` (reasoning high) trong herdr giám sát các pane coder theo brief của orchestrator: soi diff `docs/`/`tests/`, ranh giới file của lane, câu hỏi bị treo. Được gửi nhắc chỉnh hướng khi coder vi phạm luật rõ ràng (AGENTS.md hoặc prompt task); KHÔNG sửa file, KHÔNG commit/merge, KHÔNG trả lời câu hỏi spec/protocol hay duyệt quyền — các việc đó leo thang về orchestrator/người dùng bằng `SUPERVISOR ALERT`. **Từ 26/10 (người dùng giao) supervisor cũng là Reviewer:** khi lane in token xong, supervisor review theo vai Reviewer trong AGENTS.md (đọc lại code từ đầu, tự chạy test, phản ví dụ bằng lệnh thật), ghi findings vào thư mục của nó và in `SUPERVISOR REVIEW <task> r<n>: PASS|CHANGES_REQUIRED`; orchestrator chép findings vào `review/findings/`, gửi finding cho coder và merge. Vẫn tối đa 2 vòng. Đánh đổi: supervisor đã theo dõi quá trình code nên kém độc lập hơn reviewer ephemeral; `scripts/review_task.sh` giữ làm dự phòng khi supervisor không chạy.
 
 ## Vòng lặp mỗi task
 
@@ -21,7 +21,7 @@ GIAO (prompt theo sub-plan) → CHỜ (herdr agent wait) → TEST → REVIEW (gp
 1. **Giao:** `herdr worktree create --branch slice/<task> --base main`; khởi động coder bằng `codex -m gpt-6-luna -c 'model_reasoning_effort="max"' -s workspace-write -a never -c 'sandbox_workspace_write.network_access=true'` (không bao giờ hỏi; lệnh bị sandbox chặn trả lỗi về cho model; có mạng cho uv; CHỈ ghi trong worktree); prompt gồm task ID, vòng, luật Implementer, lệnh kiểm tra và dòng kết thúc `TASK <id> ROUND<n> DONE`. CHỈ gửi prompt khi coder `idle`/`done` — gửi lúc `blocked` sẽ mất.
    Coder **KHÔNG commit** (thư mục `.git` của worktree nằm ngoài sandbox); để nguyên thay đổi.
 2. **Test:** trong worktree chạy `uv run pytest`, `python3 review/verify_plan_claims.py`, `python3 review/check_links.py`; lưu vào `review/findings/<task>-tests.txt`. Đỏ → gửi coder sửa (không tính là vòng review).
-3. **Commit + review:** orchestrator commit thay đổi trong worktree, rồi `scripts/review_task.sh <task> <vòng>`. Sửa sau review → commit mới trên cùng nhánh.
+3. **Commit + review:** orchestrator commit thay đổi trong worktree, rồi supervisor review (dự phòng: `scripts/review_task.sh <task> <vòng>`). Sửa sau review → commit mới trên cùng nhánh.
 4. **Merge** khi verdict `PASS` và test xanh: `git merge --no-ff slice/<task>` trên `main`, chạy lại test trên `main`, xóa worktree. Conflict hoặc test đỏ sau merge → DỪNG.
 5. **Ghi nhận:** dòng trạng thái task trong sub-plan + bảng Trạng thái MASTER khi xong stage.
 
