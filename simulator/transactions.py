@@ -182,3 +182,142 @@ def generate_transactions(
                 transaction_count += 1
 
     return TransactionSummary(transaction_count, transaction_count * 2)
+
+
+def generate_episode_transactions(
+    connection: sqlite3.Connection,
+    config: SimulatorConfig,
+    profile: ProfileName,
+    *,
+    episode_id: str,
+    seed: int,
+    duration_days: int,
+) -> TransactionSummary:
+    """Generate ordinary transactions for one post-T0 parallel episode."""
+    if not episode_id or episode_id == "base":
+        raise ValueError("episode transaction generation requires a non-base episode_id")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("episode transaction seed must be a non-negative integer")
+    if isinstance(duration_days, bool) or not isinstance(duration_days, int) or duration_days <= 0:
+        raise ValueError("duration_days must be a positive integer")
+    if connection.execute(
+        "SELECT 1 FROM episodes WHERE episode_id = ? AND role <> 'base'", (episode_id,)
+    ).fetchone() is None:
+        raise ValueError("episode transaction generation requires a registered episode")
+    if connection.execute(
+        "SELECT 1 FROM transactions WHERE episode_id = ? LIMIT 1", (episode_id,)
+    ).fetchone():
+        raise ValueError("episode transaction generation requires an empty episode transaction stream")
+
+    expected_scale = config.scale_for(profile)
+    customer_ids = tuple(
+        row[0]
+        for row in connection.execute(
+            "SELECT customer_id FROM customers WHERE episode_id = 'base' ORDER BY customer_id"
+        )
+    )
+    merchant_ids = tuple(
+        row[0]
+        for row in connection.execute(
+            "SELECT merchant_id FROM merchants WHERE episode_id = 'base' ORDER BY merchant_id"
+        )
+    )
+    if len(customer_ids) != expected_scale.customer_count.value:
+        raise ValueError("base customer count does not match the selected profile")
+    if len(merchant_ids) != expected_scale.merchant_count.value:
+        raise ValueError("base merchant count does not match the selected profile")
+
+    business_tz = ZoneInfo(config.timeline.business_timezone.value)
+    t0_date = config.timeline.t0_business_date.value
+    end_date = t0_date + timedelta(days=duration_days)
+    end_utc = datetime.combine(end_date, time.min).replace(tzinfo=business_tz).astimezone(UTC)
+    lifecycle_tail = timedelta(
+        seconds=config.transactions.authorization_delay_seconds.value,
+        minutes=config.transactions.settlement_delay_minutes.value,
+    )
+    latest_creation_utc = end_utc - lifecycle_tail - timedelta(microseconds=1)
+    daily_mean = config.world.expected_transactions_per_customer_local_day.value
+    hourly_weights = config.transactions.hourly_transaction_weights.value
+    authorization_delay = timedelta(seconds=config.transactions.authorization_delay_seconds.value)
+    settlement_delay = timedelta(minutes=config.transactions.settlement_delay_minutes.value)
+    transaction_count = 0
+
+    for business_date in _local_dates(t0_date, end_date):
+        for customer_id in customer_ids:
+            count_rng = keyed_rng(
+                seed,
+                "p1.7.transactions.daily_count",
+                episode_id,
+                business_date.isoformat(),
+                customer_id,
+            )
+            count = _poisson_count(daily_mean, count_rng)
+            for daily_index in range(1, count + 1):
+                txn_id = (
+                    f"txn-{episode_id}-{business_date:%Y%m%d}-{customer_id}-d{daily_index:04d}"
+                )
+                time_rng = keyed_rng(seed, "p1.7.transactions.time", episode_id, txn_id)
+                hour = time_rng.choices(range(24), weights=hourly_weights, k=1)[0]
+                local_created_at = datetime.combine(
+                    business_date,
+                    time(hour, time_rng.randrange(60), time_rng.randrange(60)),
+                ).replace(tzinfo=business_tz)
+                created_at = local_created_at.astimezone(UTC)
+                if created_at > latest_creation_utc:
+                    continue
+
+                merchant_id = keyed_rng(
+                    seed, "p1.7.transactions.merchant", episode_id, txn_id
+                ).choice(merchant_ids)
+                amount = keyed_rng(
+                    seed, "p1.7.transactions.amount", episode_id, txn_id
+                ).randint(
+                    config.transactions.minimum_amount.value,
+                    config.transactions.maximum_amount.value,
+                )
+                insert_operational_record(
+                    connection,
+                    "transactions",
+                    {
+                        "txn_id": txn_id,
+                        "episode_id": episode_id,
+                        "customer_id": customer_id,
+                        "merchant_id": merchant_id,
+                        "created_at": created_at,
+                        "event_at": created_at,
+                        "available_at": created_at,
+                        "amount": amount,
+                        "channel": config.transactions.channel.value,
+                    },
+                )
+                authorized_at = created_at + authorization_delay
+                settled_at = authorized_at + settlement_delay
+                insert_operational_record(
+                    connection,
+                    "transaction_events",
+                    {
+                        "event_id": f"{txn_id}:authorized",
+                        "txn_id": txn_id,
+                        "episode_id": episode_id,
+                        "event_type": "authorized",
+                        "event_at": authorized_at,
+                        "available_at": authorized_at,
+                        "response_code": config.transactions.authorization_response_code.value,
+                    },
+                )
+                insert_operational_record(
+                    connection,
+                    "transaction_events",
+                    {
+                        "event_id": f"{txn_id}:settled",
+                        "txn_id": txn_id,
+                        "episode_id": episode_id,
+                        "event_type": "settled",
+                        "event_at": settled_at,
+                        "available_at": settled_at,
+                        "response_code": None,
+                    },
+                )
+                transaction_count += 1
+
+    return TransactionSummary(transaction_count, transaction_count * 2)

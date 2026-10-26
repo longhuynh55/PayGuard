@@ -31,59 +31,114 @@ protocol:
       kind: contract
       reference: docs/data.md, section 4.
 
+templates:
+  data_pipeline:
+    mode:
+      value: multiply_100
+      unit: pipeline fault mode
+      rationale: Round-one smoke uses the contracted amount unit-change fault.
+      provenance:
+        kind: contract
+        reference: docs/data.md, section 4.
+  seasonal:
+    date_offset_days:
+      value: 4
+      unit: local calendar days after T0
+      rationale: Place the one-day public seasonal event inside every 30-day episode.
+      provenance:
+        kind: assumption
+        reference: P1.7 smoke injection schedule; no real calendar event is claimed.
+    event_name:
+      value: "Synthetic seasonal promotion"
+      unit: public business-calendar description
+      rationale: Publish a neutral event description with the expected transaction-count effect.
+      provenance:
+        kind: assumption
+        reference: P1.7 smoke calendar description.
+    additional_transaction_count:
+      value: 20
+      unit: valid transactions
+      rationale: Add observable one-day traffic at smoke scale.
+      provenance:
+        kind: assumption
+        reference: P1.7 smoke seasonal template; not a prevalence estimate.
+    expected_relative_change:
+      value: 5.0
+      unit: relative change
+      rationale: Declare an assumed large one-day count increase for the smoke fixture.
+      provenance:
+        kind: assumption
+        reference: P1.7 smoke seasonal template; not estimated from episode truth.
+
 profiles:
   smoke:
     role_episode_counts:
       development:
-        value: 3
+        value: 1
         unit: episodes
-        rationale: Smoke retains all split roles at one quarter of pilot scale.
+        rationale: Keep one development episode in the five-episode round-one smoke manifest.
         provenance:
           kind: assumption
-          reference: P1.1 smoke profile scale; role proportions follow docs/evaluation.md.
+          reference: P1.7 round-one smoke allocation; roles follow docs/evaluation.md.
       calibration:
-        value: 6
+        value: 2
         unit: episodes
-        rationale: Smoke retains all split roles at one quarter of pilot scale.
+        rationale: Keep two calibration episodes in the five-episode round-one smoke manifest.
         provenance:
           kind: assumption
-          reference: P1.1 smoke profile scale; role proportions follow docs/evaluation.md.
+          reference: P1.7 round-one smoke allocation; roles follow docs/evaluation.md.
       test:
-        value: 6
+        value: 2
         unit: episodes
-        rationale: Smoke retains all split roles at one quarter of pilot scale.
+        rationale: Keep two test episodes in the five-episode round-one smoke manifest.
         provenance:
           kind: assumption
-          reference: P1.1 smoke profile scale; role proportions follow docs/evaluation.md.
+          reference: P1.7 round-one smoke allocation; roles follow docs/evaluation.md.
     clean_episode_counts:
       development:
         value: 1
         unit: clean episodes
-        rationale: Retain the pilot clean share in the smoke profile.
+        rationale: Include one episode with no P1.6 incident injection.
         provenance:
           kind: assumption
-          reference: P1.1 smoke profile scale; role proportions follow docs/evaluation.md.
+          reference: P1.7 round-one smoke coverage.
       calibration:
-        value: 2
+        value: 0
         unit: clean episodes
-        rationale: Retain the pilot clean share in the smoke profile.
+        rationale: Use both calibration episodes to cover the two incident templates.
         provenance:
           kind: assumption
-          reference: P1.1 smoke profile scale; role proportions follow docs/evaluation.md.
+          reference: P1.7 round-one smoke coverage.
       test:
-        value: 2
+        value: 0
         unit: clean episodes
-        rationale: Retain the pilot clean share in the smoke profile.
+        rationale: Use both test episodes to repeat the two incident templates on held-out seeds.
         provenance:
           kind: assumption
-          reference: P1.1 smoke profile scale; role proportions follow docs/evaluation.md.
+          reference: P1.7 round-one smoke coverage.
     multi_cause_episode_count:
-      value: 1
+      value: 0
       unit: episodes
-      rationale: Preserve the pilot rate of multi-cause episodes at smoke scale.
+      rationale: Round-one smoke limits every episode to zero or one incident.
       provenance:
         kind: assumption
-        reference: P1.1 smoke profile scale; ratio follows docs/data.md.
+        reference: docs/p1-implementation.md, P1.7 round-one scope.
+    assignments:
+      - episode_id: smoke-clean-dev
+        role: development
+        template: clean
+      - episode_id: smoke-pipeline-calibration
+        role: calibration
+        template: data_pipeline
+      - episode_id: smoke-seasonal-calibration
+        role: calibration
+        template: seasonal
+      - episode_id: smoke-pipeline-test
+        role: test
+        template: data_pipeline
+      - episode_id: smoke-seasonal-test
+        role: test
+        template: seasonal
   pilot:
     role_episode_counts:
       development:
@@ -136,3 +191,4 @@ profiles:
       provenance:
         kind: contract
         reference: docs/data.md, section 4.
+    assignments: []

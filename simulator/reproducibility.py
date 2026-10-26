@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from simulator.schema import OPERATIONAL_TABLES
-from simulator.storage import insert_private_record
+from simulator.storage import insert_private_record, utc_timestamp
 
 
 P1_3_FINGERPRINT_TABLES = (
@@ -19,6 +19,14 @@ P1_3_FINGERPRINT_TABLES = (
     "transaction_events",
 )
 FINGERPRINT_METADATA_KEY = "p1.3.canonical_fingerprint.v1"
+EPISODE_FINGERPRINT_TABLES = (
+    "customers",
+    "merchants",
+    "transactions",
+    "transaction_events",
+    "label_events",
+    "business_calendar",
+)
 
 
 def canonical_content(
@@ -59,6 +67,60 @@ def canonical_fingerprint(
     """Return SHA-256 of canonical row content, never the SQLite file bytes."""
     payload = json.dumps(
         canonical_content(connection, tables),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_episode_content(
+    operational: sqlite3.Connection,
+    *,
+    episode_id: str,
+    t0: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return canonical shared-history plus one episode's operational rows."""
+    if not episode_id or episode_id == "base":
+        raise ValueError("episode fingerprint requires a non-base episode_id")
+    t0_utc = utc_timestamp(t0)
+    if operational.execute(
+        "SELECT 1 FROM episodes WHERE episode_id = ? AND role <> 'base'", (episode_id,)
+    ).fetchone() is None:
+        raise ValueError(f"episode is not registered: {episode_id!r}")
+
+    operational_content: dict[str, list[dict[str, Any]]] = {}
+    for table in sorted(EPISODE_FINGERPRINT_TABLES):
+        column_info = operational.execute(f'PRAGMA table_info("{table}")').fetchall()
+        columns = [row[1] for row in column_info]
+        primary_key = [row[1] for row in sorted(column_info, key=lambda row: row[5]) if row[5]]
+        if not columns or not primary_key:
+            raise ValueError(f"operational table is missing or has no primary key: {table}")
+        order_sql = ", ".join(f'"{column}"' for column in primary_key)
+        rows = operational.execute(
+            f'SELECT * FROM "{table}" '
+            "WHERE (episode_id = 'base' AND event_at < ?) OR episode_id = ? "
+            f"ORDER BY {order_sql}",
+            (t0_utc, episode_id),
+        ).fetchall()
+        operational_content[table] = [
+            {column: row[column] for column in columns} for row in rows
+        ]
+
+    return operational_content
+
+
+def canonical_episode_fingerprint(
+    operational: sqlite3.Connection,
+    *,
+    episode_id: str,
+    t0: str,
+) -> str:
+    """Return SHA-256 for one canonical operational episode view."""
+    payload = json.dumps(
+        canonical_episode_content(
+            operational, episode_id=episode_id, t0=t0
+        ),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

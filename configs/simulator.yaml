@@ -195,8 +195,8 @@ fraud:
         reference: P1.4 round 1 scope; channel code selected for this simulator mechanism.
     campaign_interval_days:
       value: 7
-      unit: base business days between card-testing campaigns
-      rationale: One campaign every seven base business days distributes smoke fraud examples across the pre-T0 history; this is not a benchmark prevalence estimate.
+      unit: local calendar days between card-testing campaigns
+      rationale: One campaign every seven local calendar dates distributes smoke fraud examples across generated base history and episode futures; this is not a benchmark prevalence estimate.
       provenance:
         kind: assumption
         reference: P1.4 round 1 support assumption; no population rate is claimed.

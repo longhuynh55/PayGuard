@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -22,18 +21,6 @@ ROOT = Path(__file__).resolve().parents[1]
 def _yaml_mapping(path: Path) -> dict:
     with path.open(encoding="utf-8") as stream:
         return yaml.safe_load(stream)
-
-
-def _mix(profile) -> tuple:
-    counts = {role: item.value for role, item in profile.role_episode_counts.items()}
-    clean = {role: item.value for role, item in profile.clean_episode_counts.items()}
-    total = sum(counts.values())
-    return (
-        tuple((role, Fraction(counts[role], total)) for role in sorted(counts)),
-        Fraction(sum(clean.values()), total),
-        tuple((role, Fraction(clean[role], counts[role])) for role in sorted(counts)),
-        Fraction(profile.multi_cause_episode_count.value, total),
-    )
 
 
 def test_checked_in_configs_load_and_validate() -> None:
@@ -158,7 +145,7 @@ def test_parameter_without_unit_or_provenance_is_rejected(missing_key: str) -> N
         validate_simulator_config(data)
 
 
-def test_smoke_reduces_scale_without_changing_protocol_mix() -> None:
+def test_smoke_is_five_locked_episodes_and_pilot_allocation_stays_unchanged() -> None:
     simulator = load_simulator_config(ROOT / "configs" / "simulator.yaml")
     episodes = load_episode_config(ROOT / "configs" / "episodes.yaml")
     smoke_episodes = episodes.profile("smoke")
@@ -167,8 +154,25 @@ def test_smoke_reduces_scale_without_changing_protocol_mix() -> None:
     assert simulator.scale_for("smoke").customer_count.value < simulator.scale_for("pilot").customer_count.value
     assert simulator.scale_for("smoke").merchant_count.value < simulator.scale_for("pilot").merchant_count.value
     assert smoke_episodes.total_episode_count < pilot_episodes.total_episode_count
-    assert smoke_episodes.total_episode_count * 4 == pilot_episodes.total_episode_count
-    assert _mix(smoke_episodes) == _mix(pilot_episodes)
+    assert smoke_episodes.total_episode_count == 5
+    assert pilot_episodes.total_episode_count == 60
+    assert {role: item.value for role, item in smoke_episodes.role_episode_counts.items()} == {
+        "development": 1,
+        "calibration": 2,
+        "test": 2,
+    }
+    assert {role: item.value for role, item in pilot_episodes.role_episode_counts.items()} == {
+        "development": 12,
+        "calibration": 24,
+        "test": 24,
+    }
+    assert sum(item.value for item in smoke_episodes.clean_episode_counts.values()) == 1
+    assert smoke_episodes.multi_cause_episode_count.value == 0
+    assert {item.template for item in smoke_episodes.assignments} == {
+        "clean",
+        "data_pipeline",
+        "seasonal",
+    }
     assert episodes.protocol.duration_days.value == 30
     assert episodes.protocol.minimum_incidents.value == 0
     assert episodes.protocol.maximum_incidents.value == 2
@@ -177,6 +181,7 @@ def test_smoke_reduces_scale_without_changing_protocol_mix() -> None:
         "role_episode_counts",
         "clean_episode_counts",
         "multi_cause_episode_count",
+        "assignments",
     }
 
 

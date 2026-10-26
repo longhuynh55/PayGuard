@@ -151,7 +151,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Hoàn tất:** mọi template có fixture chứng minh tác động và truth đúng. Test chỉ khẳng định dữ liệu thay đổi đúng cơ chế; việc monitoring bắt được hay không thuộc P3, không ép mọi ca phải tạo alert ở P1.
 - **Vòng 1 đã bàn giao:** [`simulator/incidents.py`](../simulator/incidents.py) triển khai `data_pipeline` nhân 100 hoặc NULL và `seasonal` tăng giao dịch hợp lệ trong một ngày, cùng business calendar công khai kỳ vọng `txn_count`; truth đủ cột chỉ ghi vào private. [`tests/test_simulator_incidents.py`](../tests/test_simulator_incidents.py) đối chiếu control cùng dữ liệu nền, kiểm tra phạm vi tác động, thời gian khả dụng thực tế và cách ly truth. Chưa triển khai template vòng 2.
 
-### P1.7 — Episode và manifest (`todo`)
+### P1.7 — Episode và manifest (`round1-done`)
 
 - **Mục tiêu:** sinh được bộ episode dùng chung cho mọi baseline, khóa vai trò trước tuning.
 - **Phụ thuộc:** P1.6.
@@ -159,6 +159,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Triển khai:** cùng thế giới/lịch sử trước T0, các tương lai riêng theo seed. Cách xuất/đọc lịch sử chung phải tuân theo biểu diễn đã chốt ở P1.1–P1.2; không cần mỗi episode có một bản vật lý riêng nếu snapshot vẫn cách ly đúng. Sinh manifest với vai trò theo `evaluation.md`; bản tối thiểu theo MASTER, cỡ benchmark cuối khóa sau pilot chi phí. Nhãn lịch mặc định của dòng demo không tự lọt vào episode danh nghĩa.
 - **Kiểm tra:** thêm/bỏ/reorder episode không đổi dữ liệu của episode có cùng seed/config; role và seed tái lập được; các tập tách ở cấp episode; episode hai nguyên nhân vẫn là một đơn vị chia tập; không có giao dịch từ episode khác trong truy vấn.
 - **Hoàn tất:** manifest có fingerprint và cấu hình đủ để tái tạo. P1 không dùng test để chỉnh tham số cho P2/P3/P4; xem lại test để tune khiến seed đó không còn held-out và phải sinh seed mới theo protocol.
+- **Vòng 1 đã bàn giao:** [`simulator/episodes.py`](../simulator/episodes.py) sinh một lần lịch sử base, rồi 5 episode smoke có role 1/2/2, seed riêng dẫn xuất từ root seed + `episode_id`, giao dịch 30 ngày, card testing P1.4, label P1.5 và tối đa một template P1.6. Manifest có role/seed/template, fingerprint nội dung canonical và config hash; manifest/truth/template ở private, operational `episodes` chỉ có ID + role. Smoke có clean, `data_pipeline` và `seasonal`; chưa sinh pilot 60.
 
 ### P1.8 — CLI, validation và bàn giao P2/P3 (`todo`)
 
@@ -201,4 +202,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.7 — episode và manifest.** P1.6 vòng 1 đã bàn giao hai template tối thiểu; vòng 2 của P1.3, P1.4 và P1.6 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
+**P1.8 — CLI, validation và bàn giao P2/P3.** P1.7 vòng 1 đã bàn giao smoke manifest; pilot 60 và vòng 2 của P1.3, P1.4, P1.6 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.

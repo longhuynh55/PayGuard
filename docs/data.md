@@ -39,7 +39,7 @@ Các cột không ghi nullable là `NOT NULL`; mọi cột `PRIMARY KEY` khai b�
 
 | Bảng | Cột và kiểu | Khóa / ràng buộc |
 |---|---|---|
-| `episodes` | `episode_id TEXT`, `role TEXT` | PK `episode_id`; `role` thuộc `base`, `development`, `calibration`, `test`; chỉ `episode_id='base'` được có `role='base'`, và ngược lại. Có đúng một hàng sentinel `base`; mỗi episode khác dùng một role đã khóa trong manifest. Không temporal/as-of table. |
+| `episodes` | `episode_id TEXT`, `role TEXT` | PK `episode_id`; `role` thuộc `base`, `development`, `calibration`, `test`; chỉ `episode_id='base'` được có `role='base'`, và ngược lại. Có đúng một hàng sentinel `base`; mỗi episode khác dùng một role đã khóa trong manifest. UPDATE/DELETE bị từ chối sau khi tạo. Không temporal/as-of table. |
 | `customers` | `customer_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `available_at TEXT`, `segment TEXT`, `province TEXT`, `age_band TEXT NULL` | PK `customer_id`; FK `episode_id → episodes.episode_id`. ID khách hàng duy nhất toàn database; thông tin nền dùng chung thuộc `base`, thông tin mới của episode thuộc episode đó. Sau insert không được đổi `customer_id` hoặc `episode_id`. |
 | `merchants` | `merchant_id TEXT`, `episode_id TEXT`, `event_at TEXT`, `available_at TEXT`, `mcc TEXT`, `province TEXT` | PK `merchant_id`; FK `episode_id → episodes.episode_id`. ID merchant duy nhất toàn database; giữ MCC dạng text để giữ số 0 đầu. Sau insert không được đổi `merchant_id` hoặc `episode_id`. |
 | `transactions` | `txn_id TEXT`, `episode_id TEXT`, `customer_id TEXT`, `merchant_id TEXT`, `created_at TEXT`, `event_at TEXT`, `available_at TEXT`, `amount INTEGER NULL`, `channel TEXT` | PK `txn_id`; UNIQUE `(txn_id, episode_id)`; FK episode/customer/merchant. Customer và merchant được tham chiếu phải thuộc `base` hoặc cùng episode với giao dịch. `event_at = created_at`; cột này chỉ chứa thông tin đã biết lúc tạo. `amount`, nếu có, là số nguyên VND. Sau insert không được đổi `txn_id`, `episode_id`, `customer_id` hoặc `merchant_id`. |
@@ -56,6 +56,7 @@ Các bảng sau chỉ tạo trong database private; không có trong danh sách/
 | Bảng private | Cột và kiểu | Khóa / ràng buộc |
 |---|---|---|
 | `private_episodes` | `episode_id TEXT` | PK `episode_id NOT NULL`; danh mục episode riêng để kiểm tra FK trong database private. |
+| `episode_manifest` | `episode_id TEXT`, `role TEXT`, `seed INTEGER`, `template TEXT`, `content_fingerprint TEXT`, `config_fingerprint TEXT`, `config_json TEXT` | PK/FK `episode_id → private_episodes.episode_id`; role thuộc `development`, `calibration`, `test`; template thuộc `clean`, `data_pipeline`, `seasonal`; hai fingerprint là SHA-256 dạng 64 ký tự hex. `content_fingerprint` băm nội dung operational canonical của base + episode; `config_fingerprint` băm object cấu hình trong `config_json`, object này đủ thông tin tái tạo episode. INSERT một lần; UPDATE/DELETE/REPLACE bị từ chối để khóa role và cấu hình sau khi tạo. Bảng chỉ ở private. |
 | `run_metadata` | `key TEXT`, `value_json TEXT` | PK `key NOT NULL`; `value_json` là JSON hợp lệ. Seed/config/version generator nằm ở đây, không operational. |
 | `incident_truth` | `incident_truth_id TEXT`, `episode_id TEXT`, `cause TEXT`, `requires_intervention INTEGER`, `mechanism TEXT`, `rule_covered INTEGER`, `affected_entities_json TEXT`, `affected_segments_json TEXT`, `affected_features_json TEXT`, `effect_start_at TEXT`, `effect_end_at TEXT NULL`, `effect_available_at TEXT`, `intervention_start_at TEXT`, `deadline_at TEXT`, `accepted_actions_json TEXT`, `parent_scenario TEXT NULL` | PK `incident_truth_id NOT NULL`; FK episode tới `private_episodes.episode_id`; `requires_intervention` và `rule_covered` là boolean 0/1; các cột `_json` là JSON (ba trường phạm vi là array, `accepted_actions` là array); thời gian theo UTC. `parent_scenario` là ID nhóm cha, NULL nếu không có. |
 
@@ -126,6 +127,7 @@ Sinh sự kiện nhãn tới ít nhất `last_transaction_at + H` để đánh g
 
 - Giữ nguyên thế giới (khách hàng, merchant, hành vi, mạng người nhận) và lịch sử trước T0; **sinh lại 30 ngày sau T0** cho mỗi episode với seed riêng và 0–2 sự cố chèn vào.
 - **Pilot 60 episode:** 20 clean + 40 injected, trong đó 4 episode hai nguyên nhân. Số episode cuối cùng do ngân sách LLM quyết định, 60 là sàn ([MASTER_PLAN.md](../MASTER_PLAN.md) mục Ngân sách). Chia vai trò development/calibration/test: [evaluation.md](evaluation.md).
+- Episode smoke đều sinh nền giao dịch và card-testing P1.4 sau T0 cùng nhãn trễ; template `clean` nghĩa là không có sự cố P1.6 được chèn, không hàm ý mọi giao dịch đều hợp lệ. Template, seed, manifest và truth chỉ nằm trong private; operational `episodes` chỉ giữ ID + role.
 - Ngày tháng trong episode là danh nghĩa: không có lịch cố định (không có Tết); sự kiện mùa vụ được chèn và ghi vào `business_calendar` — trừ biến thể "trend không có trong lịch".
 
 ### Kịch bản sự cố
