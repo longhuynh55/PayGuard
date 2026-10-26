@@ -32,7 +32,9 @@ Mọi cohort có nhãn đã ≥ H = 90 ngày tại T0 = 1/2/2026 (tập trẻ nh
 ## 3. Conformal giao dịch
 
 - Ba vùng: singleton legit / singleton fraud / review; tập rỗng và đa nhãn đều review.
-- Mondrian alpha theo lớp là cấu hình thực nghiệm. Bản 24/10 dùng α bất đối xứng (α_legit 0,005, α_fraud 0,20) vì α bằng nhau chặn ~10% giao dịch hợp lệ và α_fraud 0,10 đẩy ~9% vào review — cần đo lại trên split mới.
+- Mondrian alpha theo lớp là cấu hình thực nghiệm; giá trị khởi đầu α_legit = 0,005 và α_fraud = 0,20, theo giả định bản 24/10 cần đo lại trên split mới, chưa tune.
+- Với score thô `s = P(fraud)`, nonconformity là `s` cho lớp legit và `1 − s` cho lớp fraud. Ngưỡng lớp là order statistic hạng `ceil((n + 1)(1 − α))` trên các mẫu calibration đúng lớp. Nếu hạng vượt `n`, phép tính dùng ngưỡng vô hạn và đưa lớp đó vào tập dự đoán; report phải đánh dấu `insufficient_support` theo lớp. Đây là tín hiệu áp dụng chính sách ở mục 1 trước khi dùng kết quả, không phải kết quả hợp lệ để bàn giao.
+- Coverage theo lớp là số mẫu mà nhãn thật nằm trong tập dự đoán chia số mẫu thật của lớp đó. False approval là fraud được quyết định legit chia tổng fraud; false decline là legit được quyết định fraud chia tổng legit; review là tập rỗng hoặc đa nhãn chia tổng số mẫu.
 - Báo coverage theo lớp, false approval / false decline / review, trước và sau drift. Không gọi singleton là chắc chắn đúng; undercoverage sau drift là kết quả cần công khai, không chỉnh test để ép đạt 1−α.
 - Bảo đảm theo lớp của conformal giao dịch **không** chuyển thành bảo đảm cho triage incident.
 

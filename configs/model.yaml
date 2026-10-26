@@ -45,3 +45,8 @@ calibration:
   minimum_support: 25
   support_basis: each_class
   provenance: "assumption, untuned"
+
+conformal:
+  alpha_legit: 0.005
+  alpha_fraud: 0.20
+  provenance: "bản 24/10, giả định cần đo lại trên split mới, chưa tune"
