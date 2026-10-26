@@ -172,3 +172,23 @@ Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.
 | Hai nguyên nhân | Mỗi sự cố thành phần theo bảng trên | `human_review` thỏa cả hai |
 
 D là giả định nghiệp vụ khai báo trước, không tune. Cách evaluator dùng các cột này: [evaluation.md](evaluation.md).
+
+## 6. Đầu ra model (`model_scores`)
+
+`model_scores` là bảng operational, mỗi dòng là score của một giao dịch trong một phiên bản model. `event_at` bằng `decision_at`; trong replay P2.5, score được xem là sẵn có ngay tại thời điểm quyết định (`available_at = decision_at`). Bảng chỉ chứa dự đoán và phiên bản policy/model, không chứa nhãn quan sát, truth, template hay metadata injector.
+
+| Cột | Kiểu | Null? | Khóa / ràng buộc |
+|---|---|---|---|
+| `txn_id` | `TEXT` | Không | Thành phần PK; FK cùng `episode_id` tới `transactions(txn_id, episode_id)` |
+| `episode_id` | `TEXT` | Không | Thành phần PK; FK cùng `txn_id`; khác `base` |
+| `decision_at` | `TEXT` UTC | Không | Thời điểm quyết định, bằng `transactions.created_at` |
+| `event_at` | `TEXT` UTC | Không | Bằng `decision_at`, dùng bởi hợp đồng as-of |
+| `available_at` | `TEXT` UTC | Không | Lúc score đọc được; ≥ `decision_at` |
+| `raw_score` | `REAL` | Không | Xác suất fraud thô trong `[0, 1]` |
+| `calibrated_prob` | `REAL` | Không | Xác suất fraud sau calibration trong `[0, 1]` |
+| `conformal_set` | `TEXT` JSON array | Không | Tập con của `legit`, `fraud`; `[]` hợp lệ |
+| `decision_region` | `TEXT` | Không | Một trong `legit`, `fraud`, `review`; tập rỗng/đa nhãn ánh xạ thành `review` |
+| `model_version` | `TEXT` | Không | Thành phần PK |
+| `label_policy_version` | `TEXT` | Không | Phiên bản chính sách nhãn dùng khi huấn luyện |
+
+Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phiên bản score khác nhau; P2.5 smoke xuất một dòng cho mỗi giao dịch. Bảng có chỉ mục `(episode_id, event_at, available_at)` để P3 đọc theo episode và snapshot.

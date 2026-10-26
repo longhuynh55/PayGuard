@@ -106,6 +106,56 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         CHECK (json_type(scope_json) = 'object')
     )
     """,
+    f"""
+    CREATE TABLE IF NOT EXISTS model_scores (
+        txn_id TEXT NOT NULL,
+        episode_id TEXT NOT NULL CHECK (episode_id <> 'base'),
+        decision_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='decision_at')}),
+        event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
+        available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        raw_score REAL NOT NULL CHECK (raw_score >= 0.0 AND raw_score <= 1.0),
+        calibrated_prob REAL NOT NULL CHECK (
+            calibrated_prob >= 0.0 AND calibrated_prob <= 1.0
+        ),
+        conformal_set TEXT NOT NULL CHECK (
+            json_valid(conformal_set)
+            AND json_type(conformal_set) = 'array'
+            AND json(conformal_set) IN ('[]', '["legit"]', '["fraud"]', '["legit","fraud"]')
+        ),
+        decision_region TEXT NOT NULL CHECK (
+            decision_region IN ('legit', 'fraud', 'review')
+        ),
+        model_version TEXT NOT NULL CHECK (length(model_version) > 0),
+        label_policy_version TEXT NOT NULL CHECK (length(label_policy_version) > 0),
+        PRIMARY KEY (txn_id, episode_id, model_version),
+        FOREIGN KEY (txn_id, episode_id) REFERENCES transactions(txn_id, episode_id),
+        CHECK (event_at = decision_at),
+        CHECK (available_at >= decision_at),
+        CHECK (
+            (json(conformal_set) = '["legit"]' AND decision_region = 'legit')
+            OR (json(conformal_set) = '["fraud"]' AND decision_region = 'fraud')
+            OR (
+                json(conformal_set) IN ('[]', '["legit","fraud"]')
+                AND decision_region = 'review'
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS model_scores_episode_asof
+    ON model_scores (episode_id, event_at, available_at)
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS model_scores_decision_matches_transaction
+    BEFORE INSERT ON model_scores
+    WHEN (SELECT created_at FROM transactions
+          WHERE txn_id = NEW.txn_id AND episode_id = NEW.episode_id) IS NULL
+      OR (SELECT created_at FROM transactions
+          WHERE txn_id = NEW.txn_id AND episode_id = NEW.episode_id) <> NEW.decision_at
+    BEGIN
+        SELECT RAISE(ABORT, 'model score decision_at must match transaction created_at');
+    END
+    """,
     """
     CREATE TRIGGER IF NOT EXISTS episodes_role_immutable
     BEFORE UPDATE OF episode_id, role ON episodes
@@ -326,6 +376,7 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "transaction_events",
         "label_events",
         "business_calendar",
+        "model_scores",
     }
 )
 AS_OF_TABLES: frozenset[str] = frozenset(
@@ -336,6 +387,7 @@ AS_OF_TABLES: frozenset[str] = frozenset(
         "transaction_events",
         "label_events",
         "business_calendar",
+        "model_scores",
     }
 )
 PRIVATE_TABLES: frozenset[str] = frozenset(
@@ -351,6 +403,7 @@ OPERATIONAL_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "transaction_events": frozenset({"event_at", "available_at"}),
     "label_events": frozenset({"event_at", "reported_at", "available_at"}),
     "business_calendar": frozenset({"event_at", "available_at"}),
+    "model_scores": frozenset({"decision_at", "event_at", "available_at"}),
 }
 PRIVATE_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "incident_truth": frozenset(

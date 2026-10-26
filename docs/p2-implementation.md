@@ -1,6 +1,6 @@
 # P2 — Sub-plan triển khai fraud model
 
-> Trạng thái: **P2.1 round1-done (Vòng 1 đã bàn giao); P2.2 round1-done (Vòng 1 đã bàn giao); P2.3 round1-done (Vòng 1 đã bàn giao); P2.4 round1-done (Vòng 1 đã bàn giao); P2.5 chưa triển khai**. Hợp đồng model: [model.md](model.md); dữ liệu và snapshot nhãn: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P2; không chép hợp đồng.
+> Trạng thái: **P2.1 round1-done (Vòng 1 đã bàn giao); P2.2 round1-done (Vòng 1 đã bàn giao); P2.3 round1-done (Vòng 1 đã bàn giao); P2.4 round1-done (Vòng 1 đã bàn giao); P2.5 round1-done (Vòng 1 đã bàn giao)**. Hợp đồng model: [model.md](model.md); dữ liệu và snapshot nhãn: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P2; không chép hợp đồng.
 > Format task, trạng thái và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md).
 
 ## Thứ tự hai vòng
@@ -56,14 +56,16 @@ data/<run>/model/   model artifact, model_scores, reports/  (không đưa vào g
 - **Smoke calibration in-sample** (chỉ mô tả): support legit `128`, fraud `24`; coverage legit `1,000000` (`128/128`), fraud `0,833333` (`20/24`); false approval `0,166667` (`4/24 fraud`), false decline `0` (`0/128 legit`), review `0,177632` (`27/152`). Legit `n=128 < 199` cần cho `α_legit=0,005`, report đánh dấu `insufficient_support`; áp dụng chính sách tại [model.md](model.md) mục 1 trước khi dùng kết quả. Số in-sample này không phải coverage holdout hợp lệ.
 - **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
-### P2.5 — Đánh giá và xuất `model_scores` (`todo`)
+### P2.5 — Đánh giá và xuất `model_scores` (`round1-done`, Vòng 1 đã bàn giao)
 - **Mục tiêu:** chấm điểm giai đoạn monitoring của từng episode, xuất `model_scores` cho P3.
 - **Phụ thuộc:** P2.4; episode của P1.
 - **Kiểm tra:** score theo đúng episode và as-of; metric đánh giá dùng truth CHỈ trong report evaluator, không ghi vào `model_scores`.
 - **Hoàn tất:** `model_scores` + report; CLI `python -m model train|score|evaluate`; cập nhật Trạng thái MASTER.
+- **Vòng 1 đã bàn giao — smoke:** 721 giao dịch; PR-AUC `0,841224`; coverage legit `496/496 = 1,000000`; coverage fraud `129/225 = 0,573333`. Đây là kiểm tra smoke tổng hợp trên episode tổng hợp, không phải kết quả model hay benchmark.
+- **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
 ## Nghiệm thu P2
 - [x] Split đúng protocol, có audit support.
-- [ ] Feature và score đúng as-of, không chạm truth.
+- [x] Feature và score đúng as-of, không chạm truth.
 - [x] Conformal trên score thô, coverage theo lớp được báo.
-- [ ] `model_scores` đủ cho P3; test runtime xanh.
+- [x] `model_scores` đủ cho P3; test runtime xanh.

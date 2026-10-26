@@ -371,7 +371,7 @@ def test_card_testing_supports_each_locked_p2_cohort(tmp_path: Path) -> None:
         )
 
 
-def test_fraud_metadata_is_private_and_operational_schema_stays_unchanged(tmp_path: Path) -> None:
+def test_fraud_metadata_is_private_and_operational_schema_has_no_truth(tmp_path: Path) -> None:
     config = load_simulator_config("configs/simulator.yaml")
     generated = _generate(
         tmp_path / "private-metadata", config, include_fraud=True
@@ -385,6 +385,7 @@ def test_fraud_metadata_is_private_and_operational_schema_stays_unchanged(tmp_pa
         "transaction_events",
         "label_events",
         "business_calendar",
+        "model_scores",
     }
     assert set(generated["schema"]) == expected_schema
     forbidden = ("truth", "mechanism", "cause", "accepted_actions", "generator", "seed", "injector")
