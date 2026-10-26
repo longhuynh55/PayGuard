@@ -1,6 +1,6 @@
 # P1 — Sub-plan triển khai simulator và incident injector
 
-> Trạng thái: **đang triển khai; P1.1–P1.3 vòng 1 đã có runtime**. Phạm vi và mốc P1: [MASTER_PLAN.md](../MASTER_PLAN.md).
+> Trạng thái: **đang triển khai; P1.1–P1.6 vòng 1 đã có runtime**. Phạm vi và mốc P1: [MASTER_PLAN.md](../MASTER_PLAN.md).
 > File này sở hữu **thứ tự công việc, artifact và điều kiện nghiệm thu P1**. Schema/chính sách dữ liệu vẫn chỉ định nghĩa trong [data.md](data.md); không chép schema vào đây.
 
 ## 1. Kết quả cần bàn giao
@@ -141,7 +141,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Hoàn tất:** bảng snapshot và báo cáo độ trễ đúng trên fixture và smoke; tách số quan sát được khỏi số do oracle evaluator biết. Không triển khai sửa nhãn/disputed thuộc phần mở rộng.
 - **Vòng 1 đã bàn giao:** `simulator/labels.py` sinh kết luận cho giao dịch nền P1.3/P1.4 bằng RNG riêng; delay đều rời rạc theo cấu hình; truth và trạng thái không báo chỉ nằm trong private `run_metadata`. Snapshot dùng `read_as_of`, trả bốn trạng thái H = 90; `label_delay_report` tách snapshot quan sát, oracle private và censoring. Label tail kết thúc sau giao dịch cuối ít nhất H (và đủ cận độ trễ cấu hình), không thêm giao dịch. Không mô phỏng feedback điều tra viên vì cần alert model P2/P3.
 
-### P1.6 — Injector, calendar và truth sự cố (`todo`)
+### P1.6 — Injector, calendar và truth sự cố (`round1-done`)
 
 - **Mục tiêu:** mỗi sự cố có tác động kiểm tra được và đáp án phục vụ evaluator, không tự quyết định alert/agent phải kết luận gì.
 - **Phụ thuộc:** P1.4–P1.5.
@@ -149,6 +149,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Triển khai:** các template và ca kết hợp theo `data.md`; ghi truth vào nguồn private. Calendar ghi kỳ vọng nghiệp vụ theo hợp đồng metric. Giữ nguyên lịch sử trước T0. Các mốc can thiệp, deadline và hành động chấp nhận được lấy từ hợp đồng nguồn, không tự tạo taxonomy khác trong code.
 - **Kiểm tra:** seasonal một ngày trên nền không đều; pipeline đổi đơn vị/NULL; fraud surge/new fraud; đối chứng hợp lệ; hai nguyên nhân. So với bản đối chứng cùng seed để xác nhận phần bị tác động, giữ nguyên phần được yêu cầu không đổi. `effect_available_at` xuất phát từ bản ghi tác động thực tế, không chỉ từ timestamp ghi trong config; sửa một bản ghi sẵn có cũng phải phản ánh lúc thay đổi trở nên khả dụng.
 - **Hoàn tất:** mọi template có fixture chứng minh tác động và truth đúng. Test chỉ khẳng định dữ liệu thay đổi đúng cơ chế; việc monitoring bắt được hay không thuộc P3, không ép mọi ca phải tạo alert ở P1.
+- **Vòng 1 đã bàn giao:** [`simulator/incidents.py`](../simulator/incidents.py) triển khai `data_pipeline` nhân 100 hoặc NULL và `seasonal` tăng giao dịch hợp lệ trong một ngày, cùng business calendar công khai kỳ vọng `txn_count`; truth đủ cột chỉ ghi vào private. [`tests/test_simulator_incidents.py`](../tests/test_simulator_incidents.py) đối chiếu control cùng dữ liệu nền, kiểm tra phạm vi tác động, thời gian khả dụng thực tế và cách ly truth. Chưa triển khai template vòng 2.
 
 ### P1.7 — Episode và manifest (`todo`)
 
@@ -200,4 +201,4 @@ python3 -m simulator validate --dataset data/p1-pilot
 
 ## 7. Task tiếp theo
 
-**P1.6 — injector, calendar và truth sự cố.** P1.5 vòng 1 đã bàn giao nhãn, snapshot và label tail; vòng 2 của P1.3 và P1.4 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
+**P1.7 — episode và manifest.** P1.6 vòng 1 đã bàn giao hai template tối thiểu; vòng 2 của P1.3, P1.4 và P1.6 vẫn hoãn tới sau mốc ★ theo bảng thứ tự hai vòng.
