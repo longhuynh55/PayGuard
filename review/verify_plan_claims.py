@@ -390,6 +390,29 @@ def decision_time_scoring():
     }
 
 
+def incident_grouping_window_boundaries():
+    window_days = 2
+
+    def placement(*, status, latest_alert_day, alert_day):
+        within_window = 0 <= alert_day - latest_alert_day <= window_days
+        if not within_window:
+            return "independent"
+        return "merge" if status in {"open", "recheck"} else "child"
+
+    # The open window slides from the most recent alert, including exactly day 2.
+    assert placement(status="open", latest_alert_day=2, alert_day=4) == "merge"
+    assert placement(status="open", latest_alert_day=2, alert_day=4.000001) == "independent"
+    # Finalization does not move the anchor from the incident's latest alert.
+    assert placement(status="close", latest_alert_day=2, alert_day=4) == "child"
+    assert placement(status="close", latest_alert_day=2, alert_day=4.000001) == "independent"
+    return {
+        "open_exact_two_day_gap_merges": True,
+        "final_exact_two_day_gap_creates_child": True,
+        "gap_over_two_days_is_independent": True,
+        "window_anchor": "latest_alert_at",
+    }
+
+
 def gate_ablation_same_evidence():
     # Three traces conclude dangerous, benign, benign. Both arms share the majority conclusion
     # and the same checklist; only the close_score condition differs.
@@ -660,6 +683,7 @@ def main():
         closure_gate_cases,
         separated_rule_agent_authority,
         decision_time_scoring,
+        incident_grouping_window_boundaries,
         seasonal_runbook_daily_check,
         gate_ablation_same_evidence,
         policy_independent_risk_units,
@@ -667,7 +691,7 @@ def main():
         episode_risk_and_zero_denominator,
     ]
     results = {example.__name__: example() for example in examples}
-    results["scope"] = "18 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
+    results["scope"] = "19 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
     destination = Path(__file__).with_name("verification_results.json")
     destination.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"Verified {len(examples)} illustrative examples. Results: {destination}")

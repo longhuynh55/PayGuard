@@ -1,5 +1,17 @@
 """Operational monitoring metrics."""
 
+from monitoring.incidents import (
+    DECISION_ACTIONS,
+    FINAL_ACTIONS,
+    INCIDENT_COLUMNS,
+    DecisionSource,
+    IncidentResult,
+    InMemoryDecisionSource,
+    MonitoringIncidentsError,
+    compute_incidents,
+    incidents_csv,
+    write_incidents_csv,
+)
 from monitoring.metrics import (
     DAILY_METRIC_COLUMNS,
     MonitoringMetricsError,
@@ -17,6 +29,16 @@ from monitoring.signals import (
 )
 
 __all__ = [
+    "DECISION_ACTIONS",
+    "FINAL_ACTIONS",
+    "INCIDENT_COLUMNS",
+    "DecisionSource",
+    "IncidentResult",
+    "InMemoryDecisionSource",
+    "MonitoringIncidentsError",
+    "compute_incidents",
+    "incidents_csv",
+    "write_incidents_csv",
     "DAILY_METRIC_COLUMNS",
     "ALERT_COLUMNS",
     "MonitoringMetricsError",

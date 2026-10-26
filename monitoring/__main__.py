@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 import sqlite3
 import sys
 from typing import Sequence
 
+from monitoring.incidents import (
+    InMemoryDecisionSource,
+    compute_incidents,
+    write_incidents_csv,
+)
 from monitoring.metrics import compute_daily_metrics, write_metrics_csv
-from monitoring.signals import compute_alerts, write_alerts_csv
+from monitoring.signals import ALERT_COLUMNS, compute_alerts, write_alerts_csv
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -41,6 +47,19 @@ def _parser() -> argparse.ArgumentParser:
     signals_parser.add_argument(
         "--report-output", help="write JSON suppression report here; default is JSON on stderr"
     )
+
+    incidents_parser = subparsers.add_parser(
+        "incidents", help="group one episode's P3.2 alert CSV into incidents"
+    )
+    incidents_parser.add_argument("--episode-id", required=True)
+    incidents_parser.add_argument("--alerts-csv", required=True)
+    incidents_parser.add_argument(
+        "--decisions-json",
+        help="optional JSON array of decisions; omit before P4 is available",
+    )
+    incidents_parser.add_argument(
+        "--output", help="write incident CSV here; default is CSV on stdout"
+    )
     return parser
 
 
@@ -53,8 +72,50 @@ def _read_only_connection(path: str | Path) -> sqlite3.Connection:
     return connection
 
 
+def _read_alerts_csv(path: str | Path) -> list[dict[str, object]]:
+    with Path(path).open(encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if tuple(reader.fieldnames or ()) != ALERT_COLUMNS:
+            raise ValueError("alerts CSV header does not match the P3.2 output schema")
+        rows: list[dict[str, object]] = []
+        for row in reader:
+            parsed: dict[str, object] = dict(row)
+            for field in ("value", "threshold"):
+                parsed[field] = float(parsed[field])
+            rows.append(parsed)
+        return rows
+
+
+def _read_decisions_json(path: str | Path | None) -> tuple[dict[str, object], ...]:
+    if path is None:
+        return ()
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+        raise ValueError("decisions JSON must be an array of decision objects")
+    return tuple(value)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "incidents":
+        alerts = _read_alerts_csv(args.alerts_csv)
+        decision_source = InMemoryDecisionSource(_read_decisions_json(args.decisions_json))
+        result = compute_incidents(
+            alerts,
+            episode_id=args.episode_id,
+            decision_source=decision_source,
+        )
+        if args.output:
+            write_incidents_csv(result.incidents, args.output)
+            print(
+                f"incident_count={result.report['incident_count']} "
+                f"snapshot_count={result.report['snapshot_count']} output={Path(args.output)}",
+                file=sys.stderr,
+            )
+        else:
+            write_incidents_csv(result.incidents, sys.stdout)
+        return 0
+
     if args.command not in {"metrics", "signals"}:
         raise ValueError(f"unsupported monitoring command: {args.command}")
     with _read_only_connection(args.operational_db) as operational:

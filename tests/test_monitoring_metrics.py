@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from model.evaluate import score_monitoring_episodes, train_operational_model
+from monitoring.incidents import compute_incidents
 from monitoring.metrics import compute_daily_metrics, population_stability_index
 from monitoring.signals import compute_alerts
 from simulator.config import load_episode_config, load_simulator_config
@@ -477,6 +478,26 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         for episode_id, result in alert_results.items()
     }
     print(f"P3.2 smoke alert counts: {alert_counts}")
+
+    incident_results = {
+        episode_id: compute_incidents(result.alerts, episode_id=episode_id)
+        for episode_id, result in alert_results.items()
+    }
+    incident_counts = {
+        episode_id: result.report["incident_count"]
+        for episode_id, result in incident_results.items()
+    }
+    print(f"P3.3 smoke incident counts: {incident_counts}")
+    assert incident_counts == {
+        "ep-0001": 1,
+        "ep-0002": 1,
+        "ep-0003": 1,
+        "ep-0004": 1,
+        "ep-0005": 1,
+    }
+    for episode_id in ("ep-0003", "ep-0005"):
+        if alert_counts.get(episode_id) == 5:
+            assert incident_counts[episode_id] < alert_counts[episode_id]
 
     clean_episode = next(item for item in generated.episodes if item.template == "clean")
     clean_result = alert_results[clean_episode.episode_id]
