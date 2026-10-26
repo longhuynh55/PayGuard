@@ -34,6 +34,7 @@ def _add_transaction(
     created_at: datetime,
     available_at: datetime | None = None,
     amount: int | None = 100_000,
+    customer_id: str = "customer-base",
 ) -> None:
     created = _local_timestamp(created_at)
     available = _local_timestamp(available_at or created_at)
@@ -43,13 +44,30 @@ def _add_transaction(
         {
             "txn_id": txn_id,
             "episode_id": episode_id,
-            "customer_id": "customer-base",
+            "customer_id": customer_id,
             "merchant_id": "merchant-base",
             "created_at": created,
             "event_at": created,
             "available_at": available,
             "amount": amount,
             "channel": "qr",
+        },
+    )
+
+
+def _add_customer(operational, *, customer_id: str, episode_id: str, observed_at: datetime) -> None:
+    timestamp = _local_timestamp(observed_at)
+    insert_operational_record(
+        operational,
+        "customers",
+        {
+            "customer_id": customer_id,
+            "episode_id": episode_id,
+            "event_at": timestamp,
+            "available_at": timestamp,
+            "segment": "retail",
+            "province": "HCM",
+            "age_band": "35-44",
         },
     )
 
@@ -292,6 +310,62 @@ def test_episode_metrics_do_not_include_other_episode_rows(operational_store: St
     assert selected_after == selected_before
 
 
+def test_psi_excludes_transactions_censored_by_p2_observation_flags(
+    operational_store: StorePair,
+) -> None:
+    reference_observed_at = datetime(2025, 11, 15, 9, 0, tzinfo=BUSINESS_TZ)
+    _add_customer(
+        operational_store.operational,
+        customer_id="customer-new-reference",
+        episode_id="base",
+        observed_at=reference_observed_at,
+    )
+    current_observed_at = datetime(2026, 2, 10, 9, 0, tzinfo=BUSINESS_TZ)
+    _add_customer(
+        operational_store.operational,
+        customer_id="customer-new-current",
+        episode_id="ep-a",
+        observed_at=current_observed_at,
+    )
+    for index in range(35):
+        _add_transaction(
+            operational_store.operational,
+            txn_id=f"txn-new-reference-{index:02d}",
+            episode_id="base",
+            created_at=reference_observed_at + timedelta(minutes=index + 1),
+            amount=100_000 + index,
+            customer_id="customer-new-reference",
+        )
+        _add_transaction(
+            operational_store.operational,
+            txn_id=f"txn-new-current-{index:02d}",
+            episode_id="ep-a",
+            created_at=current_observed_at + timedelta(minutes=index + 1),
+            amount=100_000 + index,
+            customer_id="customer-new-current",
+        )
+
+    rows = compute_daily_metrics(operational_store.operational, episode_ids=("ep-a",))
+    count_metric = _daily_row(
+        rows,
+        metric_id="psi.txn_count_24h",
+        episode_id="ep-a",
+        business_date="2026-02-10",
+    )
+    amount_metric = _daily_row(
+        rows,
+        metric_id="psi.amount_avg_7d",
+        episode_id="ep-a",
+        business_date="2026-02-10",
+    )
+    for metric in (count_metric, amount_metric):
+        assert metric["n_window"] == 0
+        assert metric["value"] is None
+        assert "window_censored_samples=35" in metric["flags"]
+        assert "reference_censored_samples=35" in metric["flags"]
+        assert metric["n_reference"] >= 30
+
+
 def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     tmp_path: Path,
 ) -> None:
@@ -345,11 +419,10 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     with output_path.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
     assert result.stderr.startswith("metric_count=")
-    assert len(rows) == len(generated.episodes) * 30 * 4
+    assert len(rows) == len(generated.episodes) * 30 * 3
     assert {row["metric_id"] for row in rows} == {
         "psi.txn_count_24h",
         "psi.amount_avg_7d",
-        "psi.amount_to_customer_historical_avg",
         "model.review_rate",
     }
     assert any(int(row["n_reference"]) > 0 for row in rows if row["metric_id"].startswith("psi."))

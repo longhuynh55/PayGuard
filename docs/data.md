@@ -211,6 +211,8 @@ Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phi
 | `window_end` | `TEXT` | Ngày cuối cửa sổ nghiệp vụ, gồm cả ngày này. |
 | `n_window` | `INTEGER` | Số feature value hữu hạn hoặc số model score trong cửa sổ, tùy metric. |
 | `n_reference` | `INTEGER` | Số feature value hữu hạn của base reference; bằng 0 với tỉ lệ review. |
-| `flags` | `TEXT` JSON array | Cờ chất lượng như `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `target_unavailable_at_decision`. Không thay các cờ này bằng giá trị mặc định im lặng. |
+| `flags` | `TEXT` JSON array | Cờ chất lượng như `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
+
+P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
 
 Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. Bảng thuộc phía operational và không có dữ liệu truth.

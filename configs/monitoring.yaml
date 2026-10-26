@@ -60,8 +60,6 @@ features:
     feature: txn_count_24h
   - metric_id: psi.amount_avg_7d
     feature: amount_avg_7d
-  - metric_id: psi.amount_to_customer_historical_avg
-    feature: amount_to_customer_historical_avg
 
 model_review_rate:
   metric_id: model.review_rate

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import yaml
 
+from model.features import ScoreFeatureMatrix, build_score_feature_matrix
 from simulator.asof import read_as_of
 from simulator.config import EpisodeConfig, SimulatorConfig, load_episode_config, load_simulator_config
 from simulator.storage import utc_timestamp
@@ -37,9 +38,11 @@ DAILY_METRIC_COLUMNS = (
     "flags",
 )
 
-_SUPPORTED_FEATURES = frozenset(
-    {"txn_count_24h", "amount_avg_7d", "amount_to_customer_historical_avg"}
-)
+_FEATURE_OBSERVATION_FLAG = {
+    "txn_count_24h": "history_window_observed_24h",
+    "amount_avg_7d": "history_window_observed_7d",
+}
+_SUPPORTED_FEATURES = frozenset(_FEATURE_OBSERVATION_FLAG)
 _REFERENCE_NOT_APPLICABLE = "not_applicable"
 
 
@@ -68,9 +71,9 @@ class _MonitoringConfig:
 
 
 @dataclass(frozen=True)
-class _FeatureValues:
-    values_by_txn_id: dict[str, dict[str, float | None]]
-    unavailable_target_count: int
+class _FeatureSamples:
+    values: tuple[float, ...]
+    censored_count: int
 
 
 def _as_date(value: Any, *, field: str) -> date:
@@ -176,7 +179,8 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
             raise MonitoringMetricsError(f"monitoring config features[{index}] needs metric_id")
         if feature not in _SUPPORTED_FEATURES:
             raise MonitoringMetricsError(
-                f"monitoring config features[{index}] uses unsupported P2.2 feature {feature!r}"
+                f"monitoring config features[{index}] needs a P2.2 feature with an observation flag; "
+                f"got {feature!r}"
             )
         features.append(_FeatureSpec(metric_id=metric_id, feature=feature))
     if len({item.metric_id for item in features}) != len(features):
@@ -254,86 +258,34 @@ def _registered_episodes(
     return tuple(sorted(selected_episode_ids))
 
 
-def _feature_values(
-    source_rows: list[dict[str, Any]],
-    target_rows: list[dict[str, Any]],
-    *,
-    episode_id: str,
-) -> _FeatureValues:
-    """Calculate the selected P2.2 features at each target's decision timestamp."""
-    sources_by_customer: dict[str, list[tuple[dict[str, Any], datetime, datetime]]] = {}
-    for row in source_rows:
-        if row["episode_id"] not in {"base", episode_id}:
+def _feature_rows_by_txn_id(
+    matrix: ScoreFeatureMatrix,
+) -> dict[str, dict[str, int | float | None]]:
+    return {
+        example.txn_id: dict(zip(matrix.feature_names, values, strict=True))
+        for example, values in zip(matrix.examples, matrix.values, strict=True)
+    }
+
+
+def _feature_samples(
+    txn_ids: list[str],
+    rows_by_txn_id: dict[str, dict[str, int | float | None]],
+    feature: str,
+) -> _FeatureSamples:
+    observation_flag = _FEATURE_OBSERVATION_FLAG[feature]
+    values: list[float] = []
+    censored_count = 0
+    for txn_id in txn_ids:
+        row = rows_by_txn_id.get(txn_id)
+        if row is None:
             continue
-        sources_by_customer.setdefault(str(row["customer_id"]), []).append(
-            (row, _parse_timestamp(row["created_at"]), _parse_timestamp(row["available_at"]))
-        )
-    for rows in sources_by_customer.values():
-        rows.sort(key=lambda item: (item[1], str(item[0]["txn_id"])))
-
-    values: dict[str, dict[str, float | None]] = {}
-    unavailable_target_count = 0
-    for target in target_rows:
-        target_id = str(target["txn_id"])
-        target_time = _parse_timestamp(str(target["created_at"]))
-        if _parse_timestamp(str(target["available_at"])) > target_time:
-            values[target_id] = {
-                "txn_count_24h": None,
-                "amount_avg_7d": None,
-                "amount_to_customer_historical_avg": None,
-            }
-            unavailable_target_count += 1
+        if row[observation_flag] != 1:
+            censored_count += 1
             continue
-
-        allowed_episodes = {"base", episode_id}
-        history = [
-            item
-            for item in sources_by_customer.get(str(target["customer_id"]), ())
-            if item[0]["episode_id"] in allowed_episodes
-            and item[0]["txn_id"] != target_id
-            and item[1] < target_time
-            and item[2] <= target_time
-        ]
-        history_24h_start = target_time - timedelta(hours=24)
-        history_7d_start = target_time - timedelta(days=7)
-        history_24h = [item for item in history if item[1] >= history_24h_start]
-        history_7d_amounts = [
-            int(item[0]["amount"])
-            for item in history
-            if item[1] >= history_7d_start and item[0]["amount"] is not None
-        ]
-        all_amounts = [
-            int(item[0]["amount"]) for item in history if item[0]["amount"] is not None
-        ]
-
-        target_amount = target["amount"]
-        historical_average = sum(all_amounts) / len(all_amounts) if all_amounts else None
-        amount_ratio = (
-            None
-            if target_amount is None or historical_average in {None, 0}
-            else float(target_amount) / historical_average
-        )
-        values[target_id] = {
-            "txn_count_24h": float(len(history_24h)),
-            "amount_avg_7d": (
-                float(sum(history_7d_amounts) / len(history_7d_amounts))
-                if history_7d_amounts
-                else None
-            ),
-            "amount_to_customer_historical_avg": amount_ratio,
-        }
-    return _FeatureValues(values, unavailable_target_count)
-
-
-def _finite_values(
-    feature_values: _FeatureValues, feature: str
-) -> tuple[float, ...]:
-    result = []
-    for values in feature_values.values_by_txn_id.values():
-        value = values[feature]
-        if value is not None and math.isfinite(value):
-            result.append(float(value))
-    return tuple(result)
+        value = row[feature]
+        if value is not None and math.isfinite(float(value)):
+            values.append(float(value))
+    return _FeatureSamples(tuple(values), censored_count)
 
 
 def _quantile_edges(reference: np.ndarray, bins: int) -> np.ndarray:
@@ -451,9 +403,7 @@ def compute_daily_metrics(
         f"{monitoring_config.reference_start.isoformat()}/"
         f"{(monitoring_config.reference_end_exclusive - timedelta(days=1)).isoformat()}"
     )
-    selected_ids = (
-        tuple(episode_ids) if episode_ids is not None else None
-    )
+    selected_ids = tuple(episode_ids) if episode_ids is not None else None
     registered_episodes = _registered_episodes(operational, selected_ids)
 
     metric_rows: list[dict[str, Any]] = []
@@ -473,13 +423,60 @@ def compute_daily_metrics(
             <= _local_date(str(row["event_at"]), timezone)
             < monitoring_config.reference_end_exclusive
         ]
-        reference_features = _feature_values(
-            reference_sources, reference_targets, episode_id=episode_id
+        reference_targets_unavailable = [
+            row
+            for row in reference_targets
+            if _parse_timestamp(str(row["available_at"]))
+            > _parse_timestamp(str(row["created_at"]))
+        ]
+        available_reference_targets = [
+            row for row in reference_targets if row not in reference_targets_unavailable
+        ]
+        reference_features = build_score_feature_matrix(
+            operational,
+            available_reference_targets,
+            episode_id=episode_id,
+            t0=t0_utc,
+            include_base_targets=True,
         )
-        reference_by_feature = {
-            spec.feature: _finite_values(reference_features, spec.feature)
-            for spec in monitoring_config.features
+        reference_feature_rows = _feature_rows_by_txn_id(reference_features)
+        reference_target_ids = [str(row["txn_id"]) for row in available_reference_targets]
+
+        last_business_date = t0_date + timedelta(
+            days=episode_config.protocol.duration_days.value - 1
+        )
+        last_as_of = _daily_as_of(last_business_date, timezone)
+        episode_snapshot = read_as_of(
+            operational,
+            "transactions",
+            episode_id=episode_id,
+            t0=t0_utc,
+            as_of_time=last_as_of,
+        )
+        episode_targets = [
+            row
+            for row in episode_snapshot
+            if row["episode_id"] == episode_id
+            and t0_date <= _local_date(str(row["event_at"]), timezone) <= last_business_date
+        ]
+        episode_targets_unavailable = {
+            str(row["txn_id"])
+            for row in episode_targets
+            if _parse_timestamp(str(row["available_at"]))
+            > _parse_timestamp(str(row["created_at"]))
         }
+        available_episode_targets = [
+            row
+            for row in episode_targets
+            if str(row["txn_id"]) not in episode_targets_unavailable
+        ]
+        episode_features = build_score_feature_matrix(
+            operational,
+            available_episode_targets,
+            episode_id=episode_id,
+            t0=t0_utc,
+        )
+        episode_feature_rows = _feature_rows_by_txn_id(episode_features)
 
         for day_offset in range(episode_config.protocol.duration_days.value):
             business_date = t0_date + timedelta(days=day_offset)
@@ -505,13 +502,20 @@ def compute_daily_metrics(
                 if row["episode_id"] == episode_id
                 and window_start <= _local_date(str(row["event_at"]), timezone) <= business_date
             ]
-            window_features = _feature_values(
-                episode_sources, window_targets, episode_id=episode_id
+            window_target_ids = [str(row["txn_id"]) for row in window_targets]
+            unavailable_target_count = sum(
+                txn_id in episode_targets_unavailable for txn_id in window_target_ids
             )
 
             for spec in monitoring_config.features:
-                window_values = _finite_values(window_features, spec.feature)
-                baseline_values = reference_by_feature[spec.feature]
+                window_samples = _feature_samples(
+                    window_target_ids, episode_feature_rows, spec.feature
+                )
+                reference_samples = _feature_samples(
+                    reference_target_ids, reference_feature_rows, spec.feature
+                )
+                window_values = window_samples.values
+                baseline_values = reference_samples.values
                 flags: list[str] = []
                 if not complete_window:
                     flags.append("window_incomplete")
@@ -523,8 +527,19 @@ def compute_daily_metrics(
                     flags.append("no_window_samples")
                 if not baseline_values:
                     flags.append("no_reference_samples")
-                if window_features.unavailable_target_count:
-                    flags.append("target_unavailable_at_decision")
+                if window_samples.censored_count:
+                    flags.append(f"window_censored_samples={window_samples.censored_count}")
+                if reference_samples.censored_count:
+                    flags.append(
+                        f"reference_censored_samples={reference_samples.censored_count}"
+                    )
+                if unavailable_target_count:
+                    flags.append(f"target_unavailable_at_decision={unavailable_target_count}")
+                if reference_targets_unavailable:
+                    flags.append(
+                        "reference_targets_unavailable_at_decision="
+                        f"{len(reference_targets_unavailable)}"
+                    )
                 value = population_stability_index(
                     window_values,
                     baseline_values,

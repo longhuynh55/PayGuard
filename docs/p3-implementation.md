@@ -27,6 +27,7 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Phụ thuộc:** P2.5 (`model_scores`), artifact P1.
 - **Kiểm tra:** metric tại ngày d chỉ dùng dữ liệu `available_at <= as_of_time` của d; cùng input → cùng output.
 - **Hoàn tất:** bảng metric theo ngày cho smoke.
+- **Vòng 1 đã bàn giao:** `model.review_rate` hiện chỉ là tỷ lệ thô vì `model_scores` chưa được chấm trên giai đoạn reference; metric này chưa dùng để sinh signal và phần reference được để sang vòng 2.
 
 ### P3.2 — Signal và alert (`todo`)
 - **Mục tiêu:** chuyển metric vượt ngưỡng thành `alerts` theo schema [monitoring.md](monitoring.md).

@@ -346,15 +346,19 @@ def build_score_feature_matrix(
     *,
     episode_id: str,
     t0: str,
+    include_base_targets: bool = False,
 ) -> ScoreFeatureMatrix:
     """Build monitoring features from a separate as-of snapshot per decision.
 
     The input rows only identify the transactions to score. For each distinct
     decision timestamp, both feature sources are fetched again through
-    ``read_as_of`` at that exact timestamp and episode.
+    ``read_as_of`` at that exact timestamp and episode. ``include_base_targets``
+    is for fixed-reference feature distributions; it reuses the same P2.2 SQL
+    and observation flags for base transactions without changing score callers.
     """
     examples: list[ScoreExample] = []
     seen: set[str] = set()
+    transaction_episode_by_txn_id: dict[str, str] = {}
     for transaction in transactions:
         txn_id = transaction.get("txn_id")
         row_episode_id = transaction.get("episode_id")
@@ -365,7 +369,9 @@ def build_score_feature_matrix(
             for value in (txn_id, row_episode_id, decision_at, available_at)
         ):
             raise FeatureAsOfError("score transaction is missing its ID, episode, or decision time")
-        if row_episode_id != episode_id:
+        if row_episode_id != episode_id and not (
+            include_base_targets and row_episode_id == "base"
+        ):
             raise FeatureAsOfError("score transactions must belong to the requested episode")
         if transaction.get("event_at") != decision_at:
             raise FeatureAsOfError("score transaction event_at must equal created_at")
@@ -374,6 +380,7 @@ def build_score_feature_matrix(
         if txn_id in seen:
             raise FeatureAsOfError(f"duplicate score transaction ID {txn_id!r}")
         seen.add(txn_id)
+        transaction_episode_by_txn_id[txn_id] = str(row_episode_id)
         examples.append(ScoreExample(txn_id, episode_id, decision_at))
 
     examples.sort(key=lambda example: (example.event_at, example.txn_id))
@@ -425,7 +432,13 @@ def build_score_feature_matrix(
             connection.executemany(
                 "INSERT INTO feature_examples VALUES (?, ?, ?, ?, ?)",
                 [
-                    (index, example.txn_id, example.episode_id, episode_id, example.event_at)
+                    (
+                        index,
+                        example.txn_id,
+                        transaction_episode_by_txn_id[example.txn_id],
+                        episode_id,
+                        example.event_at,
+                    )
                     for index, example in enumerate(all_examples)
                 ],
             )
