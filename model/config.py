@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -32,9 +33,17 @@ class CalibrationConfig:
 
 
 @dataclass(frozen=True)
+class ConformalConfig:
+    alpha_legit: float
+    alpha_fraud: float
+    provenance: str
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     training: TrainingConfig
     calibration: CalibrationConfig
+    conformal: ConformalConfig
 
 
 def _mapping(value: object, *, field: str) -> dict[str, object]:
@@ -55,8 +64,17 @@ def _positive_integer(value: object, *, field: str) -> int:
     return value
 
 
+def _alpha(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"model config {field} must be numeric")
+    alpha = float(value)
+    if not math.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError(f"model config {field} must be finite and in (0, 1)")
+    return alpha
+
+
 def load_pipeline_config(path: str | Path = "configs/model.yaml") -> PipelineConfig:
-    """Load training and calibration settings without changing split ownership."""
+    """Load model settings without changing split ownership."""
     config_path = Path(path)
     try:
         with config_path.open("r", encoding="utf-8") as stream:
@@ -67,6 +85,7 @@ def load_pipeline_config(path: str | Path = "configs/model.yaml") -> PipelineCon
     root = _mapping(raw, field="root")
     training_raw = _mapping(root.get("training"), field="training")
     calibration_raw = _mapping(root.get("calibration"), field="calibration")
+    conformal_raw = _mapping(root.get("conformal"), field="conformal")
     lightgbm_raw = _mapping(training_raw.get("lightgbm"), field="training.lightgbm")
 
     allowed_parameters = {
@@ -172,6 +191,17 @@ def load_pipeline_config(path: str | Path = "configs/model.yaml") -> PipelineCon
             support_basis=support_basis,
             provenance=_non_empty_string(
                 calibration_raw.get("provenance"), field="calibration.provenance"
+            ),
+        ),
+        conformal=ConformalConfig(
+            alpha_legit=_alpha(
+                conformal_raw.get("alpha_legit"), field="conformal.alpha_legit"
+            ),
+            alpha_fraud=_alpha(
+                conformal_raw.get("alpha_fraud"), field="conformal.alpha_fraud"
+            ),
+            provenance=_non_empty_string(
+                conformal_raw.get("provenance"), field="conformal.provenance"
             ),
         ),
     )

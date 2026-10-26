@@ -1,4 +1,4 @@
-"""Deterministic LightGBM training and calibration pipeline for P2.3."""
+"""Deterministic LightGBM training, calibration, and conformal pipeline."""
 
 from __future__ import annotations
 
@@ -15,18 +15,27 @@ import numpy as np
 
 from model.calibrate import FittedCalibrator, fit_calibrator
 from model.config import PipelineConfig, TrainingConfig, load_pipeline_config
+from model.conformal import (
+    FittedMondrianConformal,
+    PredictionSet,
+    conformal_metadata,
+    fit_mondrian_conformal,
+    predict_sets,
+)
 from model.data import ModelSplits
 from model.features import FeatureMatrix, FeatureSplits
 
 
 @dataclass(frozen=True)
 class ModelRun:
-    """A fitted predictor, calibration transform, scores, and reproducibility metadata."""
+    """Fitted predictor, calibration and conformal transforms, scores, and metadata."""
 
     predictor: lgb.LGBMClassifier
     calibrator: FittedCalibrator
+    conformal: FittedMondrianConformal
     raw_scores: dict[str, tuple[float, ...]]
     calibrated_probabilities: dict[str, tuple[float, ...]]
+    conformal_sets: dict[str, tuple[PredictionSet, ...]]
     metadata: dict[str, Any]
 
 
@@ -174,6 +183,16 @@ def train_and_calibrate(
         name: _raw_scores(predictor, matrix)
         for name, matrix in matrices.items()
     }
+    # Mondrian thresholds and sets consume only the predictor's raw score.
+    # The October calibration split is the sole source of thresholds.
+    conformal = fit_mondrian_conformal(
+        raw_scores["calibration"],
+        features.calibration.targets,
+        pipeline_config.conformal,
+    )
+    conformal_sets = {
+        name: predict_sets(conformal, scores) for name, scores in raw_scores.items()
+    }
     calibrator = fit_calibrator(
         raw_scores["calibration"],
         features.calibration.targets,
@@ -221,12 +240,15 @@ def train_and_calibrate(
             "minimum": calibrator.minimum_support,
             "provenance": pipeline_config.calibration.provenance,
         },
+        "conformal": conformal_metadata(conformal),
     }
     return ModelRun(
         predictor=predictor,
         calibrator=calibrator,
+        conformal=conformal,
         raw_scores=raw_scores,
         calibrated_probabilities=calibrated_probabilities,
+        conformal_sets=conformal_sets,
         metadata=metadata,
     )
 
@@ -244,6 +266,7 @@ def save_model_run(model_run: ModelRun, output_dir: str | Path) -> Path:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(model_run.predictor, artifact_dir / "predictor.joblib")
     joblib.dump(model_run.calibrator, artifact_dir / "calibrator.joblib")
+    joblib.dump(model_run.conformal, artifact_dir / "conformal.joblib")
     with (artifact_dir / "metadata.json").open("w", encoding="utf-8") as stream:
         json.dump(model_run.metadata, stream, indent=2, sort_keys=True, allow_nan=False)
         stream.write("\n")

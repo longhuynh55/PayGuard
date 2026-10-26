@@ -17,7 +17,7 @@ Mọi cohort có nhãn đã ≥ H = 90 ngày tại T0 = 1/2/2026 (tập trẻ nh
 
 - **Vì sao gộp isotonic và conformal vào cùng tháng 10:** conformal Mondrian tính trên **score thô** của predictor đã cố định trước tháng 10, nên coverage không phụ thuộc calibrator; isotonic là biến đổi đơn điệu, chỉ để ra xác suất dễ đọc. CBPE tự calibration lại trên reference.
 - **Hệ quả:** reliability diagram/ECE **không** tính trên tháng 10 (in-sample của calibrator) mà trên dữ liệu sau T0 khi nhãn về, hoặc truth ở evaluator.
-- Audit số lượng và số positive từng tập trước khi chạy. Thiếu support cho calibration theo lớp → mở rộng lịch sử về trước hoặc giảm scope.
+- Audit số lượng và số positive từng tập trước khi chạy. Nếu quantile conformal có hạng vượt support calibration, áp dụng ngưỡng vô hạn theo mục 3 và giữ α đã cấu hình.
 - Khi viết code phải giữ đúng đường dữ liệu này: conformal đọc score thô, không đọc output của isotonic.
 
 ## 2. Model
@@ -32,7 +32,9 @@ Mọi cohort có nhãn đã ≥ H = 90 ngày tại T0 = 1/2/2026 (tập trẻ nh
 ## 3. Conformal giao dịch
 
 - Ba vùng: singleton legit / singleton fraud / review; tập rỗng và đa nhãn đều review.
-- Mondrian alpha theo lớp là cấu hình thực nghiệm. Bản 24/10 dùng α bất đối xứng (α_legit 0,005, α_fraud 0,20) vì α bằng nhau chặn ~10% giao dịch hợp lệ và α_fraud 0,10 đẩy ~9% vào review — cần đo lại trên split mới.
+- Mondrian alpha theo lớp là cấu hình thực nghiệm; giá trị khởi đầu α_legit = 0,005 và α_fraud = 0,20, theo giả định bản 24/10 cần đo lại trên split mới, chưa tune.
+- Với score thô `s = P(fraud)`, nonconformity là `s` cho lớp legit và `1 − s` cho lớp fraud. Ngưỡng lớp là order statistic hạng `ceil((n + 1)(1 − α))` trên các mẫu calibration đúng lớp. Nếu hạng vượt `n`, ngưỡng là vô hạn: luôn đưa lớp đó vào tập dự đoán, giữ nguyên α và ghi rõ thiếu support trong report.
+- Coverage theo lớp là số mẫu mà nhãn thật nằm trong tập dự đoán chia số mẫu thật của lớp đó. False approval là fraud được quyết định legit chia tổng fraud; false decline là legit được quyết định fraud chia tổng legit; review là tập rỗng hoặc đa nhãn chia tổng số mẫu.
 - Báo coverage theo lớp, false approval / false decline / review, trước và sau drift. Không gọi singleton là chắc chắn đúng; undercoverage sau drift là kết quả cần công khai, không chỉnh test để ép đạt 1−α.
 - Bảo đảm theo lớp của conformal giao dịch **không** chuyển thành bảo đảm cho triage incident.
 

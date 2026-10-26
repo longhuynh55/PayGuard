@@ -271,5 +271,11 @@ def test_raw_and_calibrated_scores_are_separate_and_metadata_is_complete(tmp_pat
     assert metadata["model_version"] == "payguard-lgbm-isotonic-round1"
     assert metadata["calibration_method"] == "sigmoid"
     assert metadata["calibration_support"]["positive_count"] == 24
+    assert metadata["conformal"]["fit_split"] == "calibration"
+    assert metadata["conformal"]["score_source"] == "raw_predictor_score"
+    assert metadata["conformal"]["thresholds"]["legit"]["status"] == (
+        "infinite_small_support"
+    )
     assert (artifact_dir / "predictor.joblib").is_file()
     assert (artifact_dir / "calibrator.joblib").is_file()
+    assert (artifact_dir / "conformal.joblib").is_file()
