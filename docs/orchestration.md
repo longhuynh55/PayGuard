@@ -18,7 +18,7 @@ GIAO (prompt theo sub-plan) → CHỜ (herdr agent wait) → TEST → REVIEW (gp
    → PASS + test xanh: TỰ MERGE vào main → cập nhật Trạng thái → task kế tiếp
 ```
 
-1. **Giao:** `herdr worktree create --branch slice/<task> --base main`; khởi động coder bằng `codex -m gpt-6-luna -c 'model_reasoning_effort="max"' -s workspace-write -a never -c 'sandbox_workspace_write.network_access=true'` (không bao giờ hỏi; lệnh bị sandbox chặn trả lỗi về cho model; có mạng cho uv; CHỈ ghi trong worktree); prompt gồm task ID, vòng, luật Implementer, lệnh kiểm tra và dòng kết thúc `TASK <id> ROUND<n> DONE`. CHỈ gửi prompt khi coder `idle`/`done` — gửi lúc `blocked` sẽ mất.
+1. **Giao:** `herdr worktree create --branch slice/<task> --base main`; khởi động coder bằng `codex -m gpt-6-luna -c 'model_reasoning_effort="max"' -s workspace-write -a never -c 'sandbox_workspace_write.network_access=true'` (không bao giờ hỏi; lệnh bị sandbox chặn trả lỗi về cho model; có mạng cho uv; CHỈ ghi trong worktree); sau khi coder `idle` gửi `/fast` (người dùng yêu cầu 26/10: service tier priority cho coder `gpt-6-luna`); prompt gồm task ID, vòng, luật Implementer, lệnh kiểm tra và dòng kết thúc `TASK <id> ROUND<n> DONE`. CHỈ gửi prompt khi coder `idle`/`done` — gửi lúc `blocked` sẽ mất.
    Coder **KHÔNG commit** (thư mục `.git` của worktree nằm ngoài sandbox); để nguyên thay đổi.
 2. **Test:** trong worktree chạy `uv run pytest`, `python3 review/verify_plan_claims.py`, `python3 review/check_links.py`; lưu vào `review/findings/<task>-tests.txt`. Đỏ → gửi coder sửa (không tính là vòng review).
 3. **Commit + review:** orchestrator commit thay đổi trong worktree, rồi supervisor review (dự phòng: `scripts/review_task.sh <task> <vòng>`). Sửa sau review → commit mới trên cùng nhánh.
