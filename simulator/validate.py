@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -35,6 +35,8 @@ from simulator.storage import StorageError, utc_timestamp
 RUN_METADATA_KEY = "p1.8.run_metadata.v1"
 VALIDATION_METADATA_KEY = "p1.8.validation.v1"
 SCHEMA_VERSION = 1
+# Contract value in docs/data.md, section 5 (MVP D = 7 days).
+MVP_INCIDENT_DEADLINE_DAYS = 7
 _RESERVED_ID_TOKENS = {
     "truth",
     "fraud",
@@ -321,6 +323,115 @@ def _validate_episode_manifest(
     return f"{len(non_base)} locked smoke episode roles and private manifest entries match"
 
 
+def _validate_incident_truth(private: sqlite3.Connection, metadata: dict[str, Any]) -> str:
+    """Check that each locked smoke template has its exact private truth contract."""
+    episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    assignments = {
+        assignment.episode_id: assignment
+        for assignment in episode_config.profile("smoke").assignments
+    }
+    manifest = {
+        row["episode_id"]: dict(row)
+        for row in private.execute("SELECT * FROM episode_manifest")
+    }
+    truth_by_episode: dict[str, list[dict[str, Any]]] = {
+        episode_id: [] for episode_id in manifest
+    }
+    for row in private.execute("SELECT * FROM incident_truth"):
+        truth = dict(row)
+        if truth["episode_id"] not in truth_by_episode:
+            _fail(
+                f"incident truth {truth['incident_truth_id']} references an episode "
+                "without a private manifest"
+            )
+        truth_by_episode[truth["episode_id"]].append(truth)
+
+    expected_contracts = {
+        "data_pipeline": {
+            "cause": "data_pipeline",
+            "requires_intervention": 1,
+            "accepted_actions": {"data_ticket", "human_review"},
+        },
+        "seasonal": {
+            "cause": "seasonal",
+            "requires_intervention": 0,
+            "accepted_actions": set(),
+        },
+    }
+    verified_incidents = 0
+    for episode_id, manifest_entry in manifest.items():
+        assignment = assignments.get(episode_id)
+        if assignment is None:
+            _fail(f"private manifest episode {episode_id} is absent from locked smoke config")
+        template = manifest_entry["template"]
+        truth_rows = truth_by_episode[episode_id]
+        if template == "clean":
+            if truth_rows:
+                _fail(f"clean episode {episode_id} must not have incident truth")
+            continue
+        expected = expected_contracts.get(template)
+        if expected is None:
+            _fail(f"unsupported round-one incident template in manifest: {template!r}")
+        if len(truth_rows) != 1:
+            _fail(
+                f"episode {episode_id} template {template!r} requires exactly one incident truth; "
+                f"found {len(truth_rows)}"
+            )
+        truth = truth_rows[0]
+        if truth["cause"] != expected["cause"]:
+            _fail(f"incident truth cause does not match {template!r} for {episode_id}")
+        if truth["requires_intervention"] != expected["requires_intervention"]:
+            _fail(f"incident truth requires_intervention does not match {template!r} for {episode_id}")
+        try:
+            actions = json.loads(truth["accepted_actions_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            _fail(f"incident truth accepted_actions_json is invalid for {episode_id}: {exc}")
+        if (
+            not isinstance(actions, list)
+            or any(not isinstance(action, str) for action in actions)
+            or len(actions) != len(set(actions))
+            or set(actions) != expected["accepted_actions"]
+        ):
+            _fail(f"incident truth accepted_actions do not match docs/data.md section 5 for {episode_id}")
+
+        time_fields = (
+            "effect_start_at",
+            "effect_available_at",
+            "intervention_start_at",
+            "deadline_at",
+        )
+        parsed_times: dict[str, datetime] = {}
+        for field in time_fields:
+            value = truth[field]
+            if utc_timestamp(value) != value:
+                _fail(f"incident truth {field} must use fixed-width UTC for {episode_id}")
+            parsed_times[field] = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not parsed_times["effect_start_at"] <= parsed_times["effect_available_at"]:
+            _fail(f"incident truth effect_start_at follows effect_available_at for {episode_id}")
+        if parsed_times["intervention_start_at"] != parsed_times["effect_available_at"]:
+            _fail(f"incident truth intervention_start_at must equal effect_available_at for {episode_id}")
+        if parsed_times["intervention_start_at"] > parsed_times["deadline_at"]:
+            _fail(f"incident truth intervention_start_at follows deadline_at for {episode_id}")
+        if parsed_times["deadline_at"] != (
+            parsed_times["intervention_start_at"]
+            + timedelta(days=MVP_INCIDENT_DEADLINE_DAYS)
+        ):
+            _fail(
+                f"incident truth deadline_at must equal intervention_start_at + "
+                f"{MVP_INCIDENT_DEADLINE_DAYS} days for {episode_id}"
+            )
+        effect_end = truth["effect_end_at"]
+        if effect_end is not None:
+            if utc_timestamp(effect_end) != effect_end:
+                _fail(f"incident truth effect_end_at must use fixed-width UTC for {episode_id}")
+            if datetime.fromisoformat(effect_end.replace("Z", "+00:00")) < parsed_times["effect_start_at"]:
+                _fail(f"incident truth effect_end_at precedes effect_start_at for {episode_id}")
+        if truth["parent_scenario"] is not None:
+            _fail(f"round-one smoke truth must not have a parent scenario for {episode_id}")
+        verified_incidents += 1
+    return f"{verified_incidents} incident truth rows match locked templates and docs/data.md section 5"
+
+
 def _collect_contract_violations(operational: sqlite3.Connection) -> str:
     violations: list[str] = []
     registered = {
@@ -561,6 +672,18 @@ def _validate_reports(run_dir: Path) -> str:
         _fail(f"smoke report is unreadable or invalid JSON: {exc}")
     if public_report.get("profile") != "smoke" or public_report.get("report_version") != 1:
         _fail("public smoke report has an unsupported version/profile")
+    if not {
+        "as_of_time",
+        "label_policy_version",
+        "model_version",
+    } <= set(public_report):
+        _fail("public smoke report is missing label-policy or model-version metadata")
+    if not isinstance(public_report["label_policy_version"], str) or not public_report["label_policy_version"]:
+        _fail("public smoke report label_policy_version must be non-empty")
+    if public_report["model_version"] is not None and not isinstance(
+        public_report["model_version"], str
+    ):
+        _fail("public smoke report model_version must be a string or null")
     forbidden = sorted({key for key in _walk_keys(public_report) if key in _PUBLIC_FORBIDDEN_KEYS})
     if forbidden:
         _fail(f"operational report contains private truth fields: {forbidden}")
@@ -579,6 +702,36 @@ def _validate_reports(run_dir: Path) -> str:
     if "truth_label_support" not in private_report or "label_delay_oracle" not in private_report:
         _fail("private smoke report is missing truth support or oracle label-delay results")
     return "operational support/distribution/window report is public-safe; truth and oracle report is private"
+
+
+def _validate_p2_handoff_support(run_dir: Path) -> str:
+    report_path = run_dir / "reports" / "smoke.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    cohorts = report["p2_cohort_support"]
+    missing: list[str] = []
+    for split in ("fit", "validation", "calibration"):
+        support = cohorts[split]
+        if support["positive_count"] < 1:
+            missing.append(f"{split}:positive")
+        if support["negative_count"] < 1:
+            missing.append(f"{split}:negative")
+        if support["support_status"] != "sufficient":
+            missing.append(f"{split}:status={support['support_status']}")
+    reference = cohorts["reference_drift"]
+    if reference["transaction_count"] < 1 or reference["support_status"] != "available":
+        missing.append("reference_drift:missing_reference")
+    if missing:
+        _fail("required P2 handoff support is missing: " + ", ".join(missing))
+
+    calibration = cohorts["calibration"]
+    if calibration["calibration_minimum_met"] is False and not any(
+        "fallback_method=sigmoid" in warning for warning in calibration.get("warnings", [])
+    ):
+        _fail("calibration isotonic shortfall must be reported as a sigmoid fallback warning")
+    return (
+        "fit, validation, calibration each contain positive and negative observed labels; "
+        "reference cohort is present; isotonic shortfall is a non-blocking fallback warning"
+    )
 
 
 def _validate_private_label_truth(
@@ -702,6 +855,7 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))
+            _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(private, _load_run_metadata(private)))
             _evaluate(checks, "private_label_truth_matches_observed_labels", lambda: _validate_private_label_truth(operational, private))
             _evaluate(checks, "pending_is_not_negative", lambda: _validate_pending(private, _load_run_metadata(private), operational))
             _evaluate(checks, "run_metadata_and_canonical_fingerprint", lambda: _validate_metadata(operational, private, _load_run_metadata(private)))
@@ -718,6 +872,7 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         except Exception:
             metadata = None
         _evaluate(checks, "report_truth_boundary", lambda: _validate_reports(root))
+        _evaluate(checks, "p2_handoff_support", lambda: _validate_p2_handoff_support(root))
     else:
         checks.append({"name": "private_schema", "passed": False, "detail": "private database could not be opened"})
 

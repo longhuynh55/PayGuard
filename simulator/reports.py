@@ -117,6 +117,7 @@ def _audit_support(
     cohorts: dict[str, Any] = {}
     for item in audit.splits:
         missing: list[str] = []
+        warnings: list[str] = []
         if item.positive_count == 0:
             missing.append("positive")
         if item.negative_count == 0:
@@ -130,7 +131,10 @@ def _audit_support(
                 item.positive_count >= required and item.negative_count >= required
             )
             if not calibration_met:
-                missing.append(f"calibration_support_{required}_per_class")
+                warnings.append(
+                    f"isotonic_support_below_{required}_per_class; "
+                    f"fallback_method={pipeline.calibration.fallback_method}"
+                )
         cohorts[item.name] = {
             "date_window": {
                 "start_inclusive": item.window.start_inclusive.isoformat(),
@@ -147,6 +151,7 @@ def _audit_support(
             "requirements": requirements,
             "calibration_minimum_met": calibration_met,
             "missing_support": missing,
+            "warnings": warnings,
             "support_status": "sufficient" if not missing else "insufficient",
         }
 
@@ -321,6 +326,9 @@ def build_smoke_reports(
     )
     public_labels["training_snapshot_at_t0"] = {
         "as_of_time": t0_text,
+        "label_policy_version": label_policy_time["label_policy_version"],
+        "model_version": label_policy_time["model_version"],
+        "maturity_horizon_days": label_policy_time["maturity_horizon_days"],
         "observed": label_policy_time["observed"],
     }
     private_oracle["training_snapshot_at_t0"] = {
@@ -397,6 +405,9 @@ def build_smoke_reports(
             )
             public_labels[episode_id] = {
                 "as_of_time": utc_timestamp(label_as_of),
+                "label_policy_version": delay_report["label_policy_version"],
+                "model_version": delay_report["model_version"],
+                "maturity_horizon_days": delay_report["maturity_horizon_days"],
                 "observed": delay_report["observed"],
             }
             private_oracle[episode_id] = {
@@ -440,6 +451,8 @@ def build_smoke_reports(
         "profile": "smoke",
         "business_timezone": timezone_name,
         "as_of_time": t0_text,
+        "label_policy_version": label_policy_time["label_policy_version"],
+        "model_version": label_policy_time["model_version"],
         "support_sources": {
             "model_splits": support_config["split_source"],
             "reference_drift": support_config["reference_source"],
