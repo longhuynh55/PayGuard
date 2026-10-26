@@ -1,6 +1,6 @@
 # P4 — Sub-plan triển khai triage (rule, gate, agent)
 
-> Trạng thái: **bản nháp chờ người dùng duyệt — chưa giao coder**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
+> Trạng thái: **người dùng duyệt 26/10/2026; vòng 1 đang triển khai**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
 > Format task và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md). Mốc ★ và ngân sách LLM: [MASTER_PLAN.md](../MASTER_PLAN.md) mục 3 và 5.
 
 ## Thứ tự hai vòng
@@ -29,7 +29,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 
 ### P4.1 — Bảng `decisions` và gate
 - **Mục tiêu:** hiện thực bảng `decisions` ([triage.md](triage.md) mục 6) và gate phân nhánh theo hành động (mục 2).
-- **Phụ thuộc:** P3.5 (incident/alert trong DB operational).
+- **Phụ thuộc:** schema `incidents` của P3.3. Gate nhận incident qua interface trong bộ nhớ; đọc từ DB operational (P3.5) nối ở P4.3, nên P4.1 chạy song song được với P3.5.
 - **Kiểm tra:** `evidence_status` chỉ do code tính từ output tool/checklist, LLM không ghi được trường này; `data_ticket`/`fraud_ops` không đòi benign hay score; `close` chỉ qua runbook `close_enabled` hoặc agent qua tau; điều kiện bắt buộc chuyển người thắng mọi nhánh; tool lỗi/thiếu bằng chứng → `human_review`. Mỗi lần gate chạy ghi một dòng có `policy_version`, `as_of_time`, kết quả từng mục checklist.
 - **Hoàn tất:** schema `decisions` ở [data.md](data.md) (operational, không truth) + test từng nhánh của mục 2.
 
@@ -65,7 +65,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 ## Câu hỏi cần người dùng chốt trước khi code
 
 1. **`decision_at` — đã chốt (người dùng giao planner chọn, 26/10):** vòng 1 đặt `decision_at = as_of_time` của snapshot, không cộng độ trễ xử lý giả định. Độ trễ thật (gồm thời gian gọi LLM) ghi riêng trong cột token/chi phí, không đổi `decision_at`.
-2. **LLM — đã chốt (người dùng, 26/10):** Qwen 3.7 Flash qua OpenRouter, đọc `OPENROUTER_API_KEY` từ môi trường/`.env` (không commit, không log key). Chi tiết model và hệ quả (không có JSON schema chặt): [rationale.md](rationale.md) mục 3. Trần chi phí tạm cho P4.6: chờ người dùng.
+2. **LLM — đã chốt (người dùng, 26/10):** Qwen 3.7 Flash qua OpenRouter, đọc `OPENROUTER_API_KEY` từ môi trường/`.env` (không commit, không log key). Chi tiết model và hệ quả (không có JSON schema chặt): [rationale.md](rationale.md) mục 3. Trần chi phí tạm: **1 USD** cho toàn bộ P4 vòng 1 (người dùng chốt 26/10).
 3. **Rule vòng 1:** chọn `unit_or_null_change` (smoke có 2 sự cố `data_pipeline` được phát hiện) thay vì `seasonal_calendar` (2 incident seasonal hiện unmatched do hiệu ứng trễ cửa sổ — cần matcher vòng 2 trước).
 
 ## Nghiệm thu P4 vòng 1

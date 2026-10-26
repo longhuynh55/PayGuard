@@ -6,6 +6,8 @@
 
 **P1 → P2 → P3**, theo thứ tự hai vòng: vòng 1 cả ba stage tới mốc ★ luồng mỏng ([MASTER_PLAN.md](../MASTER_PLAN.md)), sau đó vòng 2. Chạy liên tục, không dừng giữa các task trừ khi gặp điều kiện dừng bên dưới.
 
+**Mở rộng 26/10/2026 (người dùng duyệt):** thêm **P3.5 + P4 vòng 1** tới mốc ★ theo [p4-implementation.md](p4-implementation.md). LLM Qwen 3.7 Flash qua OpenRouter; **trần chi phí API tạm 1 USD** cho toàn bộ P4 vòng 1 — vượt trần → DỪNG hỏi người dùng. Chỉ P4.6 gọi API thật; test dùng LLM giả lập.
+
 ## Vòng lặp mỗi task
 
 ```
