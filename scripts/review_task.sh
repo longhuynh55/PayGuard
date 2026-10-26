@@ -17,6 +17,10 @@ if [[ "$round" != "1" && "$round" != "2" && "${ALLOW_EXTRA_ROUND:-0}" != "1" ]];
   exit 2
 fi
 
+stage="${task%%.*}"                       # P1.3 -> P1
+spec="docs/${stage,,}-implementation.md"   # -> docs/p1-implementation.md
+[[ -f "$spec" ]] || { echo "No sub-plan $spec for task $task" >&2; exit 2; }
+
 mkdir -p review/findings
 out="review/findings/${task}-r${round}.md"
 tests="review/findings/${task}-tests.txt"
@@ -26,7 +30,7 @@ Bạn là REVIEWER của task ${task}, vòng ${round}. Đọc AGENTS.md và làm
 
 Phạm vi review:
 - Diff: \`git diff ${base}...HEAD\` (và \`git status\` cho file chưa commit).
-- Task spec: mục ${task} trong docs/p1-implementation.md, kể cả bảng "Thứ tự: hai vòng".
+- Task spec: mục ${task} trong ${spec}, kể cả bảng "Thứ tự: hai vòng".
 - Hợp đồng: các file docs/ mà task link tới. archive/ KHÔNG dùng làm căn cứ.
 - Kết quả test do orchestrator chạy: ${tests} (nếu có). KHÔNG tự chạy lệnh ghi file.
 
