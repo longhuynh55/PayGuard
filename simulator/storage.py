@@ -179,6 +179,7 @@ def _insert(
         "affected_segments_json",
         "affected_features_json",
         "accepted_actions_json",
+        "conformal_set",
     }
     for key in keys:
         value = record[key]

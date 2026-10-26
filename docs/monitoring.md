@@ -8,20 +8,25 @@
 - Job chạy mỗi ngày trên giai đoạn monitoring; cửa sổ 7 ngày so với reference.
 - **Metric:** PSI/KS trên feature, phân phối score và uncertainty, tỉ lệ cảnh báo/review của model, **CBPE** (NannyML) ước lượng performance khi chưa có nhãn. Gồm cả feature phía người nhận (tỉ lệ người gửi lần đầu, chuyển ra trong 24 h, số tiền sát 10 triệu, tài khoản mới/ngủ lâu có tiền vào); segment TRANSFER tách riêng. Cửa sổ cash-out 24 h chỉ dùng khi đã quan sát đủ hoặc ghi rõ censored.
 - **Reference:** PSI/KS dùng 11/2025–1/2026, không cần nhãn. CBPE fit trên tháng 10 có nhãn theo policy với predictor cố định; CBPE không thay calibrator của model/conformal.
-- **Signal:** ngưỡng khởi đầu PSI > 0,25, KS p < 0,01; Benjamini–Hochberg làm baseline phụ. **Chỉnh trên episode clean thuộc development**, khóa trước calibration/test.
+- **P3.1 vòng 1:** cấu hình [monitoring.yaml](../configs/monitoring.yaml) chọn các feature P2.2 để tính PSI và khai báo bin, epsilon, provenance. Tỉ lệ review là số `decision_region = review` chia tổng model score trong cửa sổ 7 ngày; do `model_scores` hiện chỉ lưu episode sau T0, metric này chưa có reference và chưa dùng để sinh signal; phần reference được để sang vòng 2 ([trạng thái bàn giao](p3-implementation.md)).
+- **Signal:** ngưỡng khởi đầu PSI > 0,25, KS p < 0,01; Benjamini–Hochberg làm baseline phụ. **Chỉnh trên episode clean thuộc development**, khóa trước calibration/test. Vòng 1 mới triển khai PSI; KS ở vòng 2.
 - Khi nhãn về (trễ): tính performance thật → so với ước lượng CBPE. CBPE không báo động **không** đủ để kết luận benign.
 
 ## 2. Gộp alert thành incident
 
 - Alert mới trùng feature/segment, cách ≤ 2 ngày với một incident **đang mở** (chưa có quyết định cuối, hoặc đang recheck) → gộp vào incident đó.
 - Incident đã có quyết định cuối (close / data_ticket / fraud_ops / human_review) mà có alert mới → tạo **incident con** có `parent_incident_id`. Không mở lại, không sửa quyết định cũ.
+- Làm rõ mốc thời gian: với incident đang mở, khoảng cách ≤ 2 ngày được tính từ alert gần nhất đã gộp vào incident.
+- Làm rõ incident con: alert cùng feature/segment sau quyết định cuối chỉ thành incident con nếu cách alert gần nhất của incident cha ≤ 2 ngày; xa hơn thì tạo incident mới độc lập với `parent_incident_id = NULL`.
 - Chấm theo incident, báo cáo kèm số alert. Cách chấm từng quyết định theo thời điểm: [evaluation.md](evaluation.md).
 - Số incident con có thể khác giữa các policy vì thời điểm quyết định cuối khác nhau. Giữ nguyên alert và truth đầu vào khi so policy; báo số case con như workload. Metric rủi ro so sánh chính dùng tập truth/episode cố định theo [evaluation.md](evaluation.md), không dùng số incident con làm mẫu số chính.
 
 | Bảng | Cột chính |
 |---|---|
-| `alerts` | `alert_id`, `episode_id`, `as_of_time`, metric, feature, segment, giá trị, reference, ngưỡng |
+| `alerts` | `alert_id`, `episode_id`, `as_of_time`, metric, feature, segment, giá trị, reference, ngưỡng; chi tiết schema tại [data.md, mục 7](data.md) |
 | `incidents` | `incident_id`, `parent_incident_id`, `episode_id`, danh sách `alert_id`, feature/segment, `opened_at`, trạng thái |
+
+Schema chi tiết của `incidents`, gồm các cột thời gian `event_at`/`available_at`: [data.md, mục 7](data.md).
 
 ## 3. Thí nghiệm riêng của monitoring
 

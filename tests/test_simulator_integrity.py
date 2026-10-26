@@ -266,6 +266,7 @@ def test_operational_catalog_has_no_truth_or_generator_columns(p1_2_store) -> No
         "transaction_events",
         "label_events",
         "business_calendar",
+        "model_scores",
     }
     forbidden_parts = ("truth", "mechanism", "cause", "accepted_actions", "generator", "seed", "injector")
     for table, columns in schema.items():

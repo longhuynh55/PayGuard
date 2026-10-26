@@ -172,3 +172,107 @@ Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.
 | Hai nguyên nhân | Mỗi sự cố thành phần theo bảng trên | `human_review` thỏa cả hai |
 
 D là giả định nghiệp vụ khai báo trước, không tune. Cách evaluator dùng các cột này: [evaluation.md](evaluation.md).
+
+## 6. Đầu ra model (`model_scores`)
+
+`model_scores` là bảng operational, mỗi dòng là score của một giao dịch trong một phiên bản model. `event_at` bằng `decision_at`; trong replay P2.5, score được xem là sẵn có ngay tại thời điểm quyết định (`available_at = decision_at`). Bảng chỉ chứa dự đoán và phiên bản policy/model, không chứa nhãn quan sát, truth, template hay metadata injector.
+
+| Cột | Kiểu | Null? | Khóa / ràng buộc |
+|---|---|---|---|
+| `txn_id` | `TEXT` | Không | Thành phần PK; FK cùng `episode_id` tới `transactions(txn_id, episode_id)` |
+| `episode_id` | `TEXT` | Không | Thành phần PK; FK cùng `txn_id`; khác `base` |
+| `decision_at` | `TEXT` UTC | Không | Thời điểm quyết định, bằng `transactions.created_at` |
+| `event_at` | `TEXT` UTC | Không | Bằng `decision_at`, dùng bởi hợp đồng as-of |
+| `available_at` | `TEXT` UTC | Không | Lúc score đọc được; ≥ `decision_at` |
+| `raw_score` | `REAL` | Không | Xác suất fraud thô trong `[0, 1]` |
+| `calibrated_prob` | `REAL` | Không | Xác suất fraud sau calibration trong `[0, 1]` |
+| `conformal_set` | `TEXT` JSON array | Không | Tập con của `legit`, `fraud`; `[]` hợp lệ |
+| `decision_region` | `TEXT` | Không | Một trong `legit`, `fraud`, `review`; tập rỗng/đa nhãn ánh xạ thành `review` |
+| `model_version` | `TEXT` | Không | Thành phần PK |
+| `label_policy_version` | `TEXT` | Không | Phiên bản chính sách nhãn dùng khi huấn luyện |
+
+Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phiên bản score khác nhau; P2.5 smoke xuất một dòng cho mỗi giao dịch. Bảng có chỉ mục `(episode_id, event_at, available_at)` để P3 đọc theo episode và snapshot.
+
+## 7. Đầu ra monitoring (`daily_metrics`)
+
+`daily_metrics` là bảng kết quả operational của job P3.1; smoke CLI xuất CSV theo schema này. Bảng không đọc hoặc chứa truth, template, cơ chế injector hay metadata private. Mỗi dòng là một metric của một episode tại một snapshot ngày nghiệp vụ.
+
+| Cột | Kiểu | Ý nghĩa |
+|---|---|---|
+| `metric_id` | `TEXT` | ID metric ổn định, khai báo trong cấu hình monitoring. |
+| `episode_id` | `TEXT` | Episode đang được theo dõi; không phải `base`. |
+| `as_of_time` | `TEXT` UTC | Thời điểm chụp dữ liệu, cuối ngày nghiệp vụ Việt Nam. |
+| `business_date` | `TEXT` | Ngày nghiệp vụ `Asia/Ho_Chi_Minh`, dạng `YYYY-MM-DD`. |
+| `feature` | `TEXT` | Feature P2.2 hoặc `decision_region` đối với tỉ lệ review. |
+| `segment` | `TEXT` | `all` ở P3.1; metric review ghi `model_version=<id>` để không gộp các phiên bản model. |
+| `value` | `REAL NULL` | PSI cho feature hoặc tỉ lệ review trên số model score trong cửa sổ. NULL khi không có mẫu để tính. |
+| `reference_window` | `TEXT` | Khoảng ngày nền cố định cho PSI (`YYYY-MM-DD/YYYY-MM-DD`, hai đầu gồm); `not_applicable` cho tỉ lệ review thô vì P2.5 không lưu score của base. |
+| `window_start` | `TEXT` | Ngày đầu cửa sổ nghiệp vụ 7 ngày, gồm cả ngày này. |
+| `window_end` | `TEXT` | Ngày cuối cửa sổ nghiệp vụ, gồm cả ngày này. |
+| `n_window` | `INTEGER` | Số feature value hữu hạn hoặc số model score trong cửa sổ, tùy metric. |
+| `n_reference` | `INTEGER` | Số feature value hữu hạn của base reference; bằng 0 với tỉ lệ review. |
+| `flags` | `TEXT` JSON array | Cờ chất lượng như `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
+
+P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
+
+Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)`. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. Bảng thuộc phía operational và không có dữ liệu truth.
+
+### `alerts`
+
+`alerts` là đầu ra signal operational của P3.2. Schema logic của từng alert:
+
+| Cột | Kiểu | Ý nghĩa |
+|---|---|---|
+| `alert_id` | `TEXT` | ID trung tính, tất định; SHA-256 rút gọn từ `episode_id`, `as_of_time`, `metric`, `feature`, `segment`, không chứa template hoặc truth. |
+| `episode_id` | `TEXT` | Episode của dòng metric đầu vào, khác `base`. |
+| `as_of_time` | `TEXT` UTC | Snapshot của `daily_metrics` đã sinh alert. |
+| `metric` | `TEXT` | `metric_id` của dòng `daily_metrics`; vòng 1 chỉ chấp nhận metric PSI. |
+| `feature` | `TEXT` | Feature P3.1 tương ứng. |
+| `segment` | `TEXT` | Segment P3.1 tương ứng. |
+| `value` | `REAL` | PSI đo được trên cửa sổ monitoring. |
+| `reference` | `TEXT` | `reference_window` của `daily_metrics`; đây là khoảng ngày nền, không phải một giá trị vô hướng riêng. |
+| `threshold` | `REAL` | Ngưỡng PSI tại lúc sinh alert; vòng 1 dùng `0.25` với điều kiện nghiêm ngặt `value > threshold`. |
+| `event_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric. |
+| `available_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric; alert được xem là khả dụng tại snapshot đó. |
+
+Khóa chính logic là `alert_id`; mỗi alert ứng với tối đa một dòng `(episode_id, as_of_time, metric, feature, segment)`. Schema này thuộc phía operational và không có truth. Trong vòng 1, `daily_metrics` và `alerts` là đầu vào/đầu ra in-memory hoặc CSV, chưa được lưu thành bảng SQLite đọc qua `read_as_of`; thời điểm lưu vào operational store và thêm allowlist as-of được ghi nhận là việc vòng 2 hoặc trước P4 trong [p3-implementation.md](p3-implementation.md).
+
+### `incidents`
+
+`incidents` là các snapshot operational của trạng thái gộp alert cho một episode. Mỗi thay đổi trạng thái hoặc danh sách alert tạo một snapshot mới; dữ liệu truth, template và metadata injector không được đọc hoặc lưu ở đây. `incident_id` là ID trung tính, tất định, dẫn xuất từ episode, alert đầu tiên, feature/segment và parent nếu có; không mã hóa truth. `alert_ids_json` là JSON array theo thứ tự `as_of_time`, rồi `alert_id` để phân xử các thời điểm bằng nhau. Alert đầu vào thuộc đúng episode và chỉ khả dụng nếu `available_at <= as_of_time`.
+
+| Cột | Kiểu | Ý nghĩa / ràng buộc |
+|---|---|---|
+| `incident_id` | `TEXT` | ID ổn định cho một incident; không chứa template hoặc truth. |
+| `parent_incident_id` | `TEXT NULL` | ID incident cha cùng episode; NULL với incident độc lập. |
+| `episode_id` | `TEXT` | Episode operational, khác `base`. |
+| `alert_ids_json` | `TEXT` JSON array | Danh sách alert đã gộp vào snapshot này. |
+| `feature` | `TEXT` | Feature của alert/incident. |
+| `segment` | `TEXT` | Segment của alert/incident. |
+| `opened_at` | `TEXT` UTC | `as_of_time` của alert đầu tiên trong incident. |
+| `status` | `TEXT` | `open`, `recheck`, hoặc quyết định cuối `close`, `data_ticket`, `fraud_ops`, `human_review`. `recheck` không phải trạng thái cuối. |
+| `event_at` | `TEXT` UTC | Thời điểm sự kiện làm thay đổi snapshot: `as_of_time` của alert hoặc `decision_at` của quyết định. |
+| `available_at` | `TEXT` UTC | Thời điểm snapshot khả dụng; lấy từ alert khi alert làm thay đổi snapshot, hoặc bằng `decision_at` khi quyết định làm thay đổi trạng thái. |
+
+Khóa chính logic là `(incident_id, event_at)`; các cập nhật cùng incident tại cùng thời điểm được gộp thành một snapshot tất định. Bảng append-only để giữ trạng thái theo thời gian; truy vấn tại `as_of_time` chỉ đọc `available_at <= as_of_time` và đúng `episode_id`, rồi chọn snapshot mới nhất theo `event_at` cho mỗi `incident_id`. `parent_incident_id` tham chiếu ID ổn định trong cùng episode, không tham chiếu một phiên bản snapshot cụ thể. Bảng không chứa quyết định gốc hay thay đổi chúng; P4 cung cấp quyết định qua interface của monitoring.
+
+### Báo cáo evaluator P3.4 (private)
+
+Evaluator ghi JSON tại `reports/p3_4_detection_recall.json` tương đối với thư mục private DB. Công thức và cách diễn giải metric thuộc [evaluation.md](evaluation.md); bảng dưới đây định nghĩa riêng cấu trúc báo cáo.
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `schema_version` | `INTEGER` | Phiên bản cấu trúc JSON. |
+| `as_of_time` | `TEXT` UTC | Cutoff dùng để lọc snapshot incident theo `available_at`. |
+| `matching_scope` | `TEXT` | Tên phạm vi matcher được dùng. |
+| `deferred_to_round2` | `TEXT[]` JSON | Phần matcher chưa triển khai trong vòng 1. |
+| `feature_mapping` | `OBJECT` JSON | Mapping tường minh từ feature monitoring sang feature truth. |
+| `detection_recall` | `OBJECT` JSON | Tổng số sự cố cần can thiệp được phát hiện. |
+| `by_scenario` | `OBJECT[]` JSON | Số đếm theo cặp `cause`/`template`; `recall` là NULL khi mẫu số bằng 0. |
+| `truth_counts` | `OBJECT` JSON | Tổng số truth, truth cần can thiệp và truth benign trong episode đã chọn. |
+| `incident_counts` | `OBJECT` JSON | Tổng số incident đã xét, matched, unmatched và matched với truth benign. |
+| `unmatched_incident_ids` | `TEXT[]` JSON | Incident unmatched; không được xem là benign. |
+| `benign_incident_ids` | `TEXT[]` JSON | Incident khớp ít nhất một truth benign. |
+| `incident_matches` | `OBJECT[]` JSON | Trạng thái và các truth ID được ghép cho từng incident. Vòng 1 chỉ có `matched`/`unmatched`. |
+
+Các object con có cấu trúc cố định: `detection_recall` gồm `detected`, `denominator`, `recall` (`REAL NULL`) và `missed_truth_ids`; mỗi phần tử `by_scenario` gồm `cause`, `template`, `detected`, `denominator`, `missed_truth_ids`, `recall` (`REAL NULL`) và `benign_truth_count`; `truth_counts` gồm `total`, `requires_intervention`, `benign`; `incident_counts` gồm `evaluated`, `matched`, `unmatched`, `benign_matched`; mỗi phần tử `incident_matches` gồm `incident_id`, `episode_id`, `feature`, `segment`, `incident_start_at`, `incident_end_at`, `status`, `matched_truth_ids`. `incident_start_at`/`incident_end_at` là mốc `available_at` sớm nhất/muộn nhất của các snapshot có thêm alert ID vào `alert_ids_json`; snapshot quyết định không mở rộng khoảng này. Timestamp dùng UTC; các mảng ID giữ thứ tự tất định.

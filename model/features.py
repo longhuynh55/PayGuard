@@ -66,6 +66,24 @@ class FeatureSplits:
     calibration: FeatureMatrix
 
 
+@dataclass(frozen=True)
+class ScoreExample:
+    """One unlabeled transaction to score at its decision timestamp."""
+
+    txn_id: str
+    episode_id: str
+    event_at: str
+
+
+@dataclass(frozen=True)
+class ScoreFeatureMatrix:
+    """Point-in-time features aligned with monitoring transactions."""
+
+    examples: tuple[ScoreExample, ...]
+    feature_names: tuple[str, ...]
+    values: tuple[tuple[FeatureValue, ...], ...]
+
+
 class FeatureAsOfError(ValueError):
     """Raised when a split example cannot be observed at its decision time."""
 
@@ -320,3 +338,152 @@ def build_feature_splits(
         validation=_matrix(splits.validation, rows_by_txn_id),
         calibration=_matrix(splits.calibration, rows_by_txn_id),
     )
+
+
+def build_score_feature_matrix(
+    operational: sqlite3.Connection,
+    transactions: tuple[dict[str, object], ...] | list[dict[str, object]],
+    *,
+    episode_id: str,
+    t0: str,
+    include_base_targets: bool = False,
+) -> ScoreFeatureMatrix:
+    """Build monitoring features from a separate as-of snapshot per decision.
+
+    The input rows only identify the transactions to score. For each distinct
+    decision timestamp, both feature sources are fetched again through
+    ``read_as_of`` at that exact timestamp and episode. ``include_base_targets``
+    is for fixed-reference feature distributions; it reuses the same P2.2 SQL
+    and observation flags for base transactions without changing score callers.
+    """
+    examples: list[ScoreExample] = []
+    seen: set[str] = set()
+    transaction_episode_by_txn_id: dict[str, str] = {}
+    for transaction in transactions:
+        txn_id = transaction.get("txn_id")
+        row_episode_id = transaction.get("episode_id")
+        decision_at = transaction.get("created_at")
+        available_at = transaction.get("available_at")
+        if not all(
+            isinstance(value, str) and value
+            for value in (txn_id, row_episode_id, decision_at, available_at)
+        ):
+            raise FeatureAsOfError("score transaction is missing its ID, episode, or decision time")
+        if row_episode_id != episode_id and not (
+            include_base_targets and row_episode_id == "base"
+        ):
+            raise FeatureAsOfError("score transactions must belong to the requested episode")
+        if transaction.get("event_at") != decision_at:
+            raise FeatureAsOfError("score transaction event_at must equal created_at")
+        if available_at > decision_at:
+            raise FeatureAsOfError("score transaction is not available at its decision time")
+        if txn_id in seen:
+            raise FeatureAsOfError(f"duplicate score transaction ID {txn_id!r}")
+        seen.add(txn_id)
+        transaction_episode_by_txn_id[txn_id] = str(row_episode_id)
+        examples.append(ScoreExample(txn_id, episode_id, decision_at))
+
+    examples.sort(key=lambda example: (example.event_at, example.txn_id))
+    by_decision: dict[str, list[ScoreExample]] = {}
+    for example in examples:
+        by_decision.setdefault(example.event_at, []).append(example)
+
+    snapshot_transactions: dict[str, dict[str, object]] = {}
+    snapshot_customers: dict[str, dict[str, object]] = {}
+    for decision_at in by_decision:
+        transactions_as_of = read_as_of(
+            operational,
+            "transactions",
+            episode_id=episode_id,
+            t0=t0,
+            as_of_time=decision_at,
+        )
+        customers_as_of = read_as_of(
+            operational,
+            "customers",
+            episode_id=episode_id,
+            t0=t0,
+            as_of_time=decision_at,
+        )
+        _merge_as_of_rows(snapshot_transactions, transactions_as_of, "txn_id")
+        _merge_as_of_rows(snapshot_customers, customers_as_of, "customer_id")
+
+    values_by_txn_id: dict[str, tuple[FeatureValue, ...]] = {}
+    all_examples = tuple(examples)
+    with duckdb.connect(database=":memory:") as connection:
+        connection.execute("SET threads = 1")
+        _create_source_tables(
+            connection,
+            list(snapshot_transactions.values()),
+            list(snapshot_customers.values()),
+        )
+        connection.execute(
+            """
+            CREATE TABLE feature_examples (
+                position BIGINT NOT NULL,
+                txn_id VARCHAR NOT NULL,
+                transaction_episode_id VARCHAR NOT NULL,
+                episode_id VARCHAR NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        if all_examples:
+            connection.executemany(
+                "INSERT INTO feature_examples VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        index,
+                        example.txn_id,
+                        transaction_episode_by_txn_id[example.txn_id],
+                        episode_id,
+                        example.event_at,
+                    )
+                    for index, example in enumerate(all_examples)
+                ],
+            )
+            raw_rows = connection.execute(_FEATURE_QUERY).fetchall()
+        else:
+            raw_rows = []
+
+    for raw_row in raw_rows:
+        position, target_available, *values = raw_row
+        example = all_examples[position]
+        if not target_available:
+            raise FeatureAsOfError(
+                f"transaction {example.txn_id!r} is not available at its decision time "
+                f"{example.event_at}"
+            )
+        if example.txn_id in values_by_txn_id:
+            raise FeatureAsOfError(f"duplicate score transaction ID {example.txn_id!r}")
+        values_by_txn_id[example.txn_id] = tuple(
+            None
+            if value is None
+            else int(value)
+            if index in {0, 1, 2, 3, 6, 7, 8}
+            else float(value)
+            for index, value in enumerate(values)
+        )
+
+    if set(values_by_txn_id) != {example.txn_id for example in examples}:
+        raise FeatureAsOfError("feature SQL did not return one row for every score transaction")
+    return ScoreFeatureMatrix(
+        examples=tuple(examples),
+        feature_names=FEATURE_NAMES,
+        values=tuple(values_by_txn_id[example.txn_id] for example in examples),
+    )
+
+
+def _merge_as_of_rows(
+    destination: dict[str, dict[str, object]],
+    rows: list[dict[str, object]],
+    key_name: str,
+) -> None:
+    for row in rows:
+        key = row[key_name]
+        existing = destination.get(key)
+        if existing is not None and existing != row:
+            raise FeatureAsOfError(
+                f"operational row {key!r} changed between as-of snapshots"
+            )
+        destination[key] = row
