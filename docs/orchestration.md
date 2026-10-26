@@ -8,6 +8,8 @@
 
 **Mở rộng 26/10/2026 (người dùng duyệt):** thêm **P3.5 + P4 vòng 1** tới mốc ★ theo [p4-implementation.md](p4-implementation.md). LLM Qwen 3.7 Flash qua OpenRouter; **trần chi phí API tạm 1 USD** cho toàn bộ P4 vòng 1 — vượt trần → DỪNG hỏi người dùng. Chỉ P4.6 gọi API thật; test dùng LLM giả lập.
 
+**Supervisor (người dùng yêu cầu 26/10/2026):** khi có ≥ 2 coder chạy song song, một phiên Codex `gpt-6.1-sol` (reasoning high) trong herdr giám sát các pane coder theo brief của orchestrator: soi diff `docs/`/`tests/`, ranh giới file của lane, câu hỏi bị treo. Được gửi nhắc chỉnh hướng khi coder vi phạm luật rõ ràng (AGENTS.md hoặc prompt task); KHÔNG sửa file, KHÔNG commit/merge, KHÔNG trả lời câu hỏi spec/protocol hay duyệt quyền — các việc đó leo thang về orchestrator/người dùng bằng `SUPERVISOR ALERT`. Review chính thức vẫn qua `scripts/review_task.sh`.
+
 ## Vòng lặp mỗi task
 
 ```
@@ -86,3 +88,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 12:00 | P3.4 | Review vòng 1 CHANGES_REQUIRED (snapshot quyết định kéo dài khoảng phát hiện → recall bị thổi phồng) → sửa (122 test) → review vòng 2 PASS → merge. Smoke recall data_pipeline 2/2; 2 incident seasonal unmatched do hiệu ứng trễ cửa sổ 7 ngày (alert `amount_avg_7d` ngoài effect window) — matcher vòng 2 cần xử lý trước khi chấm benign ở P4/P5. **P2 + P3 vòng 1 xong; P1.8 chờ người dùng.** Không tự mở P4 (ngoài goal P1→P3) |
 | 26/10 22:30 | P1.8 + P3.5 | Người dùng duyệt vòng sửa 3 cho P1.8 và chạy song song: A = P1.8 sửa validate đối chiếu mốc truth (merge main mới vào nhánh, conflict CHỈ dòng Trạng thái MASTER); B = P3.5 lưu `daily_metrics`/`alerts`/`incidents` vào DB operational (trước P4). Orchestrator viết sub-plan P4 song song; P4 chỉ code sau khi người dùng duyệt |
 | 26/10 23:00 | P1.8 r3 | Coder sửa validate đối chiếu mốc truth với giao dịch bị tác động (131 test). Sub-agent QA (Claude, người dùng yêu cầu) xác nhận phản ví dụ +365 ngày: trước sửa passed 14/14, sau sửa failed 13/14 + CLI exit 1; thêm 4 biến thể đều bị bắt → review vòng 3 PASS, không finding → merge. **P1 vòng 1 xong (8/8).** Rule P4 vòng 1: GPT-6.1-sol cũng chọn `unit_or_null_change` |
+| 26/10 23:05 | P3.5 + P4.1 | Người dùng duyệt sub-plan P4 (trần API 1 USD, LLM Qwen 3.7 Flash). P3.5 xong lần 1 → commit, merge main (conflict CHỈ dòng Trạng thái MASTER) → giao bổ sung kiểm tra validate cho 3 bảng mới. Giao P4.1 (lane A) song song. Thêm supervisor `gpt-6.1-sol` giám sát 2 lane theo yêu cầu người dùng |
