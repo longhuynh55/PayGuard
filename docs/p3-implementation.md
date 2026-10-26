@@ -1,6 +1,6 @@
 # P3 — Sub-plan triển khai monitoring
 
-> Trạng thái: **đã lập kế hoạch, chưa triển khai**. Hợp đồng: [monitoring.md](monitoring.md); đối soát recall: [evaluation.md](evaluation.md). File này sở hữu thứ tự task và nghiệm thu P3; không chép hợp đồng.
+> Trạng thái: **P3.1 round1-done (Vòng 1 đã bàn giao); P3.2–P3.4 chưa triển khai**. Hợp đồng: [monitoring.md](monitoring.md); đối soát recall: [evaluation.md](evaluation.md). File này sở hữu thứ tự task và nghiệm thu P3; không chép hợp đồng.
 > Format task và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md).
 
 ## Thứ tự hai vòng
@@ -22,7 +22,7 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 
 ## Các task
 
-### P3.1 — Job hằng ngày và metric (`todo`)
+### P3.1 — Job hằng ngày và metric (`round1-done` — Vòng 1 đã bàn giao)
 - **Mục tiêu:** với mỗi episode, mỗi ngày nghiệp vụ (giờ VN) tính metric cửa sổ 7 ngày so với reference 11/2025–1/2026.
 - **Phụ thuộc:** P2.5 (`model_scores`), artifact P1.
 - **Kiểm tra:** metric tại ngày d chỉ dùng dữ liệu `available_at <= as_of_time` của d; cùng input → cùng output.
