@@ -183,6 +183,8 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
         UNIQUE (episode_id, as_of_time, metric, feature, segment),
+        FOREIGN KEY (metric, episode_id, as_of_time, feature, segment)
+            REFERENCES daily_metrics (metric_id, episode_id, as_of_time, feature, segment),
         CHECK (event_at = as_of_time),
         CHECK (available_at = as_of_time)
     )
@@ -279,6 +281,21 @@ OPERATIONAL_DDL: tuple[str, ...] = (
      )
     BEGIN
         SELECT RAISE(ABORT, 'incident parent must belong to the same episode');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS incidents_alert_episode_insert
+    BEFORE INSERT ON incidents
+    WHEN EXISTS (
+        SELECT 1
+        FROM json_each(NEW.alert_ids_json) AS incident_alert_id
+        LEFT JOIN alerts AS alert
+          ON alert.alert_id = incident_alert_id.value
+         AND alert.episode_id = NEW.episode_id
+        WHERE alert.alert_id IS NULL
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'incident alerts must exist in the same episode');
     END
     """,
     """

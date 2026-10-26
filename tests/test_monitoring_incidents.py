@@ -351,6 +351,11 @@ def test_incidents_cli_reads_alerts_csv_and_writes_output(tmp_path: Path, capsys
         "episodes",
         {"episode_id": "ep-a", "role": "development"},
     )
+    insert_operational_record(
+        store.operational,
+        "daily_metrics",
+        _daily_metric("ep-a", 0),
+    )
     store.commit()
     operational_path = store.operational_path
     store.close()

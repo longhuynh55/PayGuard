@@ -95,10 +95,26 @@ def canonical_run_content(connection: sqlite3.Connection) -> dict[str, list[dict
     return content
 
 
-def canonical_run_fingerprint(connection: sqlite3.Connection) -> str:
-    """Hash the complete operational export, including locked episode roles."""
+def canonical_run_fingerprint(
+    connection: sqlite3.Connection,
+    *,
+    empty_tables: Sequence[str] = (),
+) -> str:
+    """Hash the operational table set, optionally treating derived outputs as empty.
+
+    ``empty_tables`` supports validating a generated-run fingerprint after later
+    stages have populated their output tables. Those tables were empty when the
+    smoke run was generated, so their current rows do not change its fingerprint.
+    """
+    if len(empty_tables) != len(set(empty_tables)):
+        raise ValueError("canonical run empty_tables must not contain duplicates")
+    if any(table not in OPERATIONAL_TABLES for table in empty_tables):
+        raise ValueError("canonical run empty_tables must name operational tables")
+    content = canonical_run_content(connection)
+    for table in empty_tables:
+        content[table] = []
     payload = json.dumps(
-        canonical_run_content(connection),
+        content,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
