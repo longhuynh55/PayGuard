@@ -13,6 +13,7 @@ import pytest
 
 from model.evaluate import score_monitoring_episodes, train_operational_model
 from monitoring.metrics import compute_daily_metrics, population_stability_index
+from monitoring.signals import compute_alerts
 from simulator.config import load_episode_config, load_simulator_config
 from simulator.episodes import generate_episodes
 from simulator.storage import StorePair, create_export_stores, insert_operational_record
@@ -241,6 +242,12 @@ def test_daily_metric_does_not_change_for_rows_available_after_as_of(
         decision_at=visible_time,
     )
     before = compute_daily_metrics(operational_store.operational, episode_ids=("ep-a",))
+    cutoff = "2026-02-10T16:59:59.999999Z"
+    alerts_before = compute_alerts(
+        before,
+        episode_id="ep-a",
+        as_of_time=cutoff,
+    )
     selected_before = [
         row for row in before if row["episode_id"] == "ep-a" and row["business_date"] == "2026-02-10"
     ]
@@ -276,10 +283,16 @@ def test_daily_metric_does_not_change_for_rows_available_after_as_of(
     )
 
     after = compute_daily_metrics(operational_store.operational, episode_ids=("ep-a",))
+    alerts_after = compute_alerts(
+        after,
+        episode_id="ep-a",
+        as_of_time=cutoff,
+    )
     selected_after = [
         row for row in after if row["episode_id"] == "ep-a" and row["business_date"] == "2026-02-10"
     ]
     assert selected_after == selected_before
+    assert alerts_after.alerts == alerts_before.alerts
 
 
 def test_episode_metrics_do_not_include_other_episode_rows(operational_store: StorePair) -> None:
@@ -418,6 +431,17 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     )
     with output_path.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
+    daily_metrics = []
+    for row in rows:
+        daily_metrics.append(
+            {
+                **row,
+                "value": float(row["value"]) if row["value"] else None,
+                "n_window": int(row["n_window"]),
+                "n_reference": int(row["n_reference"]),
+                "flags": json.loads(row["flags"]),
+            }
+        )
     assert result.stderr.startswith("metric_count=")
     assert len(rows) == len(generated.episodes) * 30 * 3
     assert {row["metric_id"] for row in rows} == {
@@ -436,3 +460,77 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert json.loads(first_day["flags"]) == ["window_incomplete"] or "window_incomplete" in json.loads(
         first_day["flags"]
     )
+
+    as_of_time = max(row["as_of_time"] for row in daily_metrics)
+    alert_results = {}
+    for episode in generated.episodes:
+        episode_rows = [
+            row for row in daily_metrics if row["episode_id"] == episode.episode_id
+        ]
+        alert_results[episode.episode_id] = compute_alerts(
+            episode_rows,
+            episode_id=episode.episode_id,
+            as_of_time=as_of_time,
+        )
+    alert_counts = {
+        episode_id: len(result.alerts)
+        for episode_id, result in alert_results.items()
+    }
+    print(f"P3.2 smoke alert counts: {alert_counts}")
+
+    clean_episode = next(item for item in generated.episodes if item.template == "clean")
+    clean_result = alert_results[clean_episode.episode_id]
+    # With two PSI metrics over 30 daily snapshots, at most five alerts is a
+    # deliberately small smoke false-alarm budget; it does not change the
+    # monitoring.md threshold if the clean episode exceeds it.
+    assert len(clean_result.alerts) <= 5, (
+        f"clean smoke generated {len(clean_result.alerts)} alerts; counts={alert_counts}"
+    )
+
+    pipeline_episode = next(
+        item for item in generated.episodes if item.template == "data_pipeline"
+    )
+    pipeline_effect = pipeline_episode.incident_summary.effect_available_at
+    pipeline_result = alert_results[pipeline_episode.episode_id]
+    affected_alerts = [
+        alert
+        for alert in pipeline_result.alerts
+        if alert["feature"] == "amount_avg_7d"
+        and alert["as_of_time"] >= pipeline_effect
+    ]
+    assert affected_alerts, (
+        f"data_pipeline smoke has no post-effect amount_avg_7d alert; "
+        f"count={len(pipeline_result.alerts)} report={pipeline_result.report}"
+    )
+
+    signals_output = tmp_path / "alerts.csv"
+    report_output = tmp_path / "signals_report.json"
+    signals_cli = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "monitoring",
+            "signals",
+            "--operational-db",
+            str(operational_path),
+            "--episode-id",
+            pipeline_episode.episode_id,
+            "--as-of-time",
+            as_of_time,
+            "--output",
+            str(signals_output),
+            "--report-output",
+            str(report_output),
+        ],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with signals_output.open(encoding="utf-8", newline="") as stream:
+        cli_alerts = list(csv.DictReader(stream))
+    signal_report = json.loads(report_output.read_text(encoding="utf-8"))
+    assert signals_cli.stderr.startswith("alert_count=")
+    assert len(cli_alerts) == len(pipeline_result.alerts)
+    assert signal_report["alert_count"] == len(cli_alerts)
