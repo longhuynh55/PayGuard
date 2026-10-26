@@ -10,8 +10,11 @@ import sys
 
 import joblib
 import numpy as np
+import pytest
 
-from model.conformal import decision_for_set, predict_sets
+from model.config import ConformalConfig
+from model.conformal import decision_for_set, fit_mondrian_conformal, predict_sets
+from model.evaluate import _metric_block
 from model.features import build_score_feature_matrix
 from simulator.asof import read_as_of
 from simulator.config import load_episode_config, load_simulator_config
@@ -21,6 +24,19 @@ from simulator.storage import create_export_stores, insert_operational_record
 
 ROOT = Path(__file__).resolve().parents[1]
 T0 = "2026-01-31T17:00:00.000000Z"
+
+
+@pytest.fixture
+def insufficient_support_conformal():
+    return fit_mondrian_conformal(
+        (0.1, 0.9),
+        (0, 1),
+        ConformalConfig(
+            alpha_legit=0.005,
+            alpha_fraud=0.20,
+            provenance="round-one test fixture",
+        ),
+    )
 
 
 def _cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -98,6 +114,18 @@ def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(tmp_path: Pat
     assert report["overall"]["sample_count"] == score_summary["score_count"]
     assert report["overall"]["pr_auc"] is not None
     assert set(report["overall"]["coverage_by_class"]) == {"legit", "fraud"}
+    assert report["as_of_time"] == "2026-03-02T17:00:00.000000Z"
+    assert report["label_policy_version"] == "mvp-h90-v1"
+    legit_support = report["overall"]["coverage_by_class"]["legit"]
+    assert legit_support["alpha"] == 0.005
+    assert legit_support["calibration_sample_count"] == 128
+    assert legit_support["required_calibration_sample_count"] == 199
+    assert legit_support["insufficient_support"] is True
+    fraud_support = report["overall"]["coverage_by_class"]["fraud"]
+    assert fraud_support["alpha"] == 0.20
+    assert fraud_support["calibration_sample_count"] == 24
+    assert fraud_support["required_calibration_sample_count"] == 4
+    assert fraud_support["insufficient_support"] is False
     assert "not a model result" in report["interpretation"]
     assert (model_directory / "reports" / "evaluation.json").is_file()
 
@@ -240,4 +268,26 @@ def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(tmp_path: Pat
         assert decision_for_set(conformal_set) == selected["decision_region"]
     finally:
         connection.close()
+
+
+def test_evaluator_reports_insufficient_support_for_both_calibration_classes(
+    insufficient_support_conformal,
+) -> None:
+    report = _metric_block(
+        [
+            {"txn_id": "legit-txn", "raw_score": 0.1, "calibrated_prob": 0.1},
+            {"txn_id": "fraud-txn", "raw_score": 0.9, "calibrated_prob": 0.9},
+        ],
+        {"legit-txn": 0, "fraud-txn": 1},
+        insufficient_support_conformal,
+    )
+
+    legit = report["coverage_by_class"]["legit"]
+    fraud = report["coverage_by_class"]["fraud"]
+    assert legit["alpha"] == 0.005
+    assert fraud["alpha"] == 0.20
+    assert legit["calibration_sample_count"] == 1
+    assert fraud["calibration_sample_count"] == 1
+    assert legit["insufficient_support"] is True
+    assert fraud["insufficient_support"] is True
 

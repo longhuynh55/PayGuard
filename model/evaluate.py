@@ -15,6 +15,7 @@ import numpy as np
 from sklearn.metrics import average_precision_score
 
 from model.conformal import (
+    ConformalReport,
     FittedMondrianConformal,
     decision_for_set,
     evaluate_conformal,
@@ -324,12 +325,19 @@ def _truth_for_episode(private: sqlite3.Connection, episode_id: str) -> dict[str
     return truth
 
 
-def _coverage_dict(report: Any) -> dict[str, dict[str, int | float | None]]:
+def _coverage_dict(report: ConformalReport) -> dict[str, dict[str, int | float | bool | None]]:
+    thresholds_by_class = {threshold.label: threshold for threshold in report.thresholds}
     return {
         label: {
             "covered_count": coverage.covered_count,
             "sample_count": coverage.sample_count,
             "rate": coverage.rate,
+            "alpha": thresholds_by_class[label].alpha,
+            "calibration_sample_count": thresholds_by_class[label].sample_count,
+            "required_calibration_sample_count": (
+                thresholds_by_class[label].required_calibration_count
+            ),
+            "insufficient_support": thresholds_by_class[label].insufficient_support,
         }
         for label, coverage in report.coverage_by_class.items()
     }
@@ -414,7 +422,9 @@ def evaluate_model_scores(
 
     report = {
         "run_id": Path(model_directory).parent.name,
+        "as_of_time": monitor_end,
         "model_version": model_metadata["model_version"],
+        "label_policy_version": model_metadata["label_policy_version"],
         "truth_basis": "private simulator transaction truth",
         "pr_auc_definition": "scikit-learn average_precision_score",
         "overall": _metric_block(pooled_rows, pooled_truth, conformal),
