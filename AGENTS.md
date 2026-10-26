@@ -33,6 +33,9 @@ Trả lời người dùng bằng tiếng Việt; code và commit bằng tiếng
 
 ## Trước khi báo xong — LUÔN chạy
 ```bash
+export UV_CACHE_DIR=/tmp/payguard-uv-cache
+uv run python -m simulator generate --profile smoke --out data/p1-smoke
+uv run python -m simulator validate --run data/p1-smoke
 python3 review/verify_plan_claims.py
 python3 review/check_links.py
 ```

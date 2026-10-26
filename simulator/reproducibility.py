@@ -19,6 +19,7 @@ P1_3_FINGERPRINT_TABLES = (
     "transaction_events",
 )
 FINGERPRINT_METADATA_KEY = "p1.3.canonical_fingerprint.v1"
+RUN_FINGERPRINT_METADATA_KEY = "p1.8.run_canonical_fingerprint.v1"
 EPISODE_FINGERPRINT_TABLES = (
     "customers",
     "merchants",
@@ -67,6 +68,37 @@ def canonical_fingerprint(
     """Return SHA-256 of canonical row content, never the SQLite file bytes."""
     payload = json.dumps(
         canonical_content(connection, tables),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_run_content(connection: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    """Return every operational row in stable table and primary-key order."""
+    content: dict[str, list[dict[str, Any]]] = {}
+    for table in sorted(OPERATIONAL_TABLES):
+        escaped = table.replace('"', '""')
+        column_info = connection.execute(f'PRAGMA table_info("{escaped}")').fetchall()
+        if not column_info:
+            raise ValueError(f"operational table does not exist: {table}")
+        columns = [row[1] for row in column_info]
+        primary_key = [row[1] for row in sorted(column_info, key=lambda row: row[5]) if row[5]]
+        if not primary_key:
+            raise ValueError(f"canonical table must have a primary key: {table}")
+        order_sql = ", ".join(f'"{column}"' for column in primary_key)
+        rows = connection.execute(
+            f'SELECT * FROM "{escaped}" ORDER BY {order_sql}'
+        ).fetchall()
+        content[table] = [{column: row[column] for column in columns} for row in rows]
+    return content
+
+
+def canonical_run_fingerprint(connection: sqlite3.Connection) -> str:
+    """Hash the complete operational export, including locked episode roles."""
+    payload = json.dumps(
+        canonical_run_content(connection),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
