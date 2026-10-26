@@ -93,6 +93,9 @@ def _write_truth(
 ) -> str:
     event_times = [row["event_at"] for row in affected_rows]
     available_times = [row["available_at"] for row in affected_rows]
+    affected_transaction_ids = sorted({row["txn_id"] for row in affected_rows})
+    if not affected_transaction_ids:
+        raise ValueError("incident truth requires at least one affected transaction")
     effect_available_at = min(available_times)
     intervention_start = _utc_datetime(effect_available_at)
     insert_private_record(
@@ -115,6 +118,18 @@ def _write_truth(
             "deadline_at": intervention_start + timedelta(days=INCIDENT_DEADLINE_DAYS),
             "accepted_actions_json": accepted_actions,
             "parent_scenario": None,
+        },
+    )
+    insert_private_record(
+        private,
+        "run_metadata",
+        {
+            "key": f"p1.6.incident_effect.v1:{incident_truth_id}",
+            "value_json": {
+                "incident_truth_id": incident_truth_id,
+                "episode_id": episode_id,
+                "affected_transaction_ids": affected_transaction_ids,
+            },
         },
     )
     return effect_available_at

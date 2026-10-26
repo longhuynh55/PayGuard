@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -323,9 +323,21 @@ def _validate_episode_manifest(
     return f"{len(non_base)} locked smoke episode roles and private manifest entries match"
 
 
-def _validate_incident_truth(private: sqlite3.Connection, metadata: dict[str, Any]) -> str:
-    """Check that each locked smoke template has its exact private truth contract."""
+def _validate_incident_truth(
+    operational: sqlite3.Connection,
+    private: sqlite3.Connection,
+    metadata: dict[str, Any],
+) -> str:
+    """Check private truth contracts against the operational effects they describe."""
+    simulator_config = validate_simulator_config(metadata["resolved_config"]["simulator"])
     episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
+    episode_start = datetime.combine(
+        simulator_config.timeline.t0_business_date.value,
+        time.min,
+        tzinfo=timezone,
+    ).astimezone(UTC)
+    episode_end = episode_start + timedelta(days=episode_config.protocol.duration_days.value)
     assignments = {
         assignment.episode_id: assignment
         for assignment in episode_config.profile("smoke").assignments
@@ -345,6 +357,44 @@ def _validate_incident_truth(private: sqlite3.Connection, metadata: dict[str, An
                 "without a private manifest"
             )
         truth_by_episode[truth["episode_id"]].append(truth)
+
+    effect_manifest_prefix = "p1.6.incident_effect.v1:"
+    effect_manifests: dict[str, dict[str, Any]] = {}
+    for row in private.execute(
+        "SELECT key, value_json FROM run_metadata WHERE substr(key, 1, ?) = ?",
+        (len(effect_manifest_prefix), effect_manifest_prefix),
+    ):
+        truth_id = row["key"][len(effect_manifest_prefix) :]
+        try:
+            effect_manifest = json.loads(row["value_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            _fail(f"incident effect reference {truth_id!r} is invalid JSON: {exc}")
+        if not isinstance(effect_manifest, dict):
+            _fail(f"incident effect reference {truth_id!r} must be a JSON object")
+        affected_ids = effect_manifest.get("affected_transaction_ids")
+        if (
+            not truth_id
+            or effect_manifest.get("incident_truth_id") != truth_id
+            or not isinstance(effect_manifest.get("episode_id"), str)
+            or not isinstance(affected_ids, list)
+            or not affected_ids
+            or any(not isinstance(txn_id, str) or not txn_id for txn_id in affected_ids)
+            or len(affected_ids) != len(set(affected_ids))
+        ):
+            _fail(f"incident effect reference {truth_id!r} has invalid incident or transaction IDs")
+        effect_manifests[truth_id] = effect_manifest
+
+    truth_ids = {
+        truth["incident_truth_id"]
+        for episode_truths in truth_by_episode.values()
+        for truth in episode_truths
+    }
+    if set(effect_manifests) != truth_ids:
+        _fail(
+            "private incident effect references differ from incident_truth rows "
+            f"(missing={sorted(truth_ids - set(effect_manifests))}, "
+            f"orphaned={sorted(set(effect_manifests) - truth_ids)})"
+        )
 
     expected_contracts = {
         "data_pipeline": {
@@ -378,6 +428,73 @@ def _validate_incident_truth(private: sqlite3.Connection, metadata: dict[str, An
                 f"found {len(truth_rows)}"
             )
         truth = truth_rows[0]
+        effect_manifest = effect_manifests[truth["incident_truth_id"]]
+        if effect_manifest["episode_id"] != episode_id:
+            _fail(
+                f"incident effect reference episode does not match incident truth for {episode_id}"
+            )
+        affected_ids = effect_manifest["affected_transaction_ids"]
+        affected_rows: list[dict[str, Any]] = []
+        for offset in range(0, len(affected_ids), 500):
+            batch = affected_ids[offset : offset + 500]
+            placeholders = ", ".join("?" for _ in batch)
+            affected_rows.extend(
+                dict(row)
+                for row in operational.execute(
+                    "SELECT txn_id, episode_id, event_at, available_at FROM transactions "
+                    f"WHERE txn_id IN ({placeholders})",
+                    tuple(batch),
+                )
+            )
+        actual_ids = {row["txn_id"] for row in affected_rows}
+        missing_ids = sorted(set(affected_ids) - actual_ids)
+        if missing_ids:
+            _fail(
+                f"incident effect reference for {episode_id} points to missing operational "
+                f"transactions: {missing_ids[:5]}"
+            )
+        wrong_episode_ids = sorted(
+            row["txn_id"] for row in affected_rows if row["episode_id"] != episode_id
+        )
+        if wrong_episode_ids:
+            _fail(
+                f"incident effect reference for {episode_id} points outside its episode: "
+                f"{wrong_episode_ids[:5]}"
+            )
+        for row in affected_rows:
+            event_at = datetime.fromisoformat(row["event_at"].replace("Z", "+00:00"))
+            available_at = datetime.fromisoformat(row["available_at"].replace("Z", "+00:00"))
+            if not episode_start <= event_at < episode_end:
+                _fail(
+                    f"incident affected transaction {row['txn_id']} event_at is outside "
+                    f"the episode future window for {episode_id}"
+                )
+            if not episode_start <= available_at < episode_end:
+                _fail(
+                    f"incident affected transaction {row['txn_id']} available_at is outside "
+                    f"the episode future window for {episode_id}"
+                )
+        expected_effect_start = min(row["event_at"] for row in affected_rows)
+        expected_effect_available = min(row["available_at"] for row in affected_rows)
+        expected_effect_end = max(row["event_at"] for row in affected_rows)
+        if truth["effect_start_at"] != expected_effect_start:
+            _fail(
+                f"incident truth effect_start_at does not match affected operational "
+                f"transactions for {episode_id} (expected {expected_effect_start})"
+            )
+        if truth["effect_available_at"] != expected_effect_available:
+            _fail(
+                f"incident truth effect_available_at does not match affected operational "
+                f"transactions for {episode_id} (expected {expected_effect_available})"
+            )
+        if (
+            truth["effect_end_at"] is not None
+            and truth["effect_end_at"] != expected_effect_end
+        ):
+            _fail(
+                f"incident truth effect_end_at does not match affected operational "
+                f"transactions for {episode_id} (expected {expected_effect_end})"
+            )
         if truth["cause"] != expected["cause"]:
             _fail(f"incident truth cause does not match {template!r} for {episode_id}")
         if truth["requires_intervention"] != expected["requires_intervention"]:
@@ -591,15 +708,20 @@ def _validate_asof(operational: sqlite3.Connection) -> str:
                         _fail(f"as-of reader returned base {table} data at/after T0")
                     if row["episode_id"] == episode_id and row["event_at"] < t0:
                         _fail(f"as-of reader returned episode {table} data before T0")
+                primary_key = _primary_key(operational, table)
+                selected_keys = ", ".join(f'"{column}"' for column in primary_key)
                 expected = {
-                    row[0]
+                    tuple(row[column] for column in primary_key)
                     for row in operational.execute(
-                        f'SELECT "{_primary_key(operational, table)}" FROM "{table}" WHERE available_at <= ? '
+                        f'SELECT {selected_keys} FROM "{table}" WHERE available_at <= ? '
                         "AND ((episode_id = 'base' AND event_at < ?) OR episode_id = ?)",
                         (as_of_time, t0, episode_id),
                     )
                 }
-                actual = {row.get(_primary_key(operational, table)) for row in rows}
+                actual = {
+                    tuple(row.get(column) for column in primary_key)
+                    for row in rows
+                }
                 if actual != expected:
                     _fail(
                         f"{table} as-of selection differs for episode={episode_id} "
@@ -613,12 +735,16 @@ def _validate_asof(operational: sqlite3.Connection) -> str:
     return f"read_as_of passed availability and episode isolation across {compared} table snapshots"
 
 
-def _primary_key(connection: sqlite3.Connection, table: str) -> str:
+def _primary_key(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
     columns = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
-    primary = [row["name"] for row in sorted(columns, key=lambda item: item["pk"]) if row["pk"]]
-    if len(primary) != 1:
-        _fail(f"as-of table {table} must have one primary-key column")
-    return primary[0]
+    primary = tuple(
+        row["name"]
+        for row in sorted(columns, key=lambda item: item["pk"])
+        if row["pk"]
+    )
+    if not primary:
+        _fail(f"as-of table {table} must have a primary key")
+    return primary
 
 
 def _validate_pending(private: sqlite3.Connection, metadata: dict[str, Any], operational: sqlite3.Connection) -> str:
@@ -855,7 +981,7 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))
-            _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(private, _load_run_metadata(private)))
+            _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(operational, private, _load_run_metadata(private)))
             _evaluate(checks, "private_label_truth_matches_observed_labels", lambda: _validate_private_label_truth(operational, private))
             _evaluate(checks, "pending_is_not_negative", lambda: _validate_pending(private, _load_run_metadata(private), operational))
             _evaluate(checks, "run_metadata_and_canonical_fingerprint", lambda: _validate_metadata(operational, private, _load_run_metadata(private)))

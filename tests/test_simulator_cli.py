@@ -6,10 +6,13 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
+
+from simulator.validate import validate_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -160,6 +163,51 @@ def test_validate_returns_nonzero_for_contract_violations(
         assert "available_at before event_at" in validation.stdout
     else:
         assert "incident_truth_contract" in validation.stdout
+
+
+def test_validate_rejects_incident_truth_shifted_outside_operational_effects(
+    tmp_path: Path, valid_smoke_run: Path
+) -> None:
+    run_dir = tmp_path / "shifted_incident_truth"
+    shutil.copytree(valid_smoke_run, run_dir)
+    private_database = run_dir / "private" / "evaluator.sqlite"
+    with sqlite3.connect(private_database) as connection:
+        row = connection.execute(
+            "SELECT incident_truth_id, effect_start_at, effect_end_at, effect_available_at, "
+            "intervention_start_at, deadline_at FROM incident_truth WHERE cause='data_pipeline'"
+        ).fetchone()
+        assert row is not None
+        fields = (
+            "effect_start_at",
+            "effect_end_at",
+            "effect_available_at",
+            "intervention_start_at",
+            "deadline_at",
+        )
+        shifted_values = [
+            (datetime.fromisoformat(value.replace("Z", "+00:00")) + timedelta(days=365))
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+            for value in row[1:]
+        ]
+        connection.execute(
+            "UPDATE incident_truth SET "
+            + ", ".join(f"{field}=?" for field in fields)
+            + " WHERE incident_truth_id=?",
+            (*shifted_values, row[0]),
+        )
+
+    result = validate_run(run_dir)
+    assert result["status"] == "failed"
+    incident_check = next(
+        check for check in result["checks"] if check["name"] == "incident_truth_contract"
+    )
+    assert incident_check["passed"] is False
+    assert "does not match affected operational transactions" in incident_check["detail"]
+
+    validation = _cli("validate", "--run", str(run_dir))
+    assert validation.returncode != 0, validation.stdout + validation.stderr
+    assert "FAIL incident_truth_contract" in validation.stdout
 
 
 def test_zero_report_probability_blocks_p2_handoff(tmp_path: Path) -> None:
