@@ -67,3 +67,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 08:15 | P1.5 r1 | Review vòng 1 PASS, không finding → merge (57 test trên main). Giao P1.6 vòng 1 |
 | 26/10 08:25 | P2.1 r1 | Mở luồng B song song (người dùng duyệt) |
 | 26/10 08:45 | P1.6 + P2.1 r1 | Cả hai review vòng 1 PASS, không finding → merge P1.6 rồi P2.1; conflict CHỈ ở bảng Trạng thái MASTER → gộp giữ cả hai. 64 test trên main. Sửa `review_task.sh` chọn sub-plan theo stage. Giao P1.7 (A) và P2.2 (B) |
+| 26/10 08:55 | P2.2 r1 | Review vòng 1 CHANGES_REQUIRED: coder xóa tiêu chí nghiệm thu "test as-of trên fixture và smoke" trong sub-plan (cấm nới nghiệm thu) → khôi phục + thêm test smoke P2.1→P2.2 (69 test) → review vòng 2 PASS → merge. Giao P2.3 (B); P1.7 đang review |
