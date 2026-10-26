@@ -54,7 +54,7 @@ codex exec \
   -s read-only \
   --ephemeral \
   -o "$out" \
-  "$prompt"
+  "$prompt" < /dev/null
 
 echo "Findings: $out"
 grep -m1 -E "^(PASS|CHANGES_REQUIRED)" "$out" || echo "WARNING: no verdict line found in $out" >&2
