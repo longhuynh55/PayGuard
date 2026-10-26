@@ -40,6 +40,7 @@ Quyết định Claude tự chọn khi chạy không người (người dùng đ
 
 | Thời điểm | Task | Câu hỏi | Đã chọn | Lý do |
 |---|---|---|---|---|
+| 26/10 09:00 | P2.3 | Ngưỡng support để dùng isotonic (dưới ngưỡng → sigmoid); `model.md` chỉ ghi "sigmoid nếu ít support" | **≥ 25 mẫu mỗi lớp** (không phải ≥ 100 mẫu tổng như coder đề xuất); smoke 24 fraud → sigmoid; test cả hai nhánh | Isotonic overfit khi lớp hiếm ít mẫu — điều kiện theo lớp thận trọng hơn tổng. Giả định chưa tune, đổi được ở vòng 2 |
 | 26/10 08:25 | P2.1 | Chạy song song để nhanh hơn? | **Người dùng duyệt:** 2 luồng — A: P1.6→P1.7→P1.8; B: P2.1→P2.2 trên main hiện tại. P2.1 dựng dữ liệu smoke bằng API simulator (`read_as_of`, snapshot nhãn), không đọc file artifact; luồng B KHÔNG sửa `simulator/`, `configs/simulator.yaml`, `docs/data.md` | Split fit/validation/calibration đều trước T0, P1.6–P1.8 không đổi lịch sử nền. Khi P1.8 xong, P2.1 vòng 2 chuyển sang đọc artifact CLI nếu format khác |
 | 26/10 03:00 | P1.4 | P1.3 vòng 1 chỉ có kênh QR, nhưng card testing là fraud trên thẻ | Thêm mã kênh `card` trong config cho giao dịch card testing; không đổi schema (cột `channel` đã có) | Thận trọng nhất: không đụng schema; kênh thẻ đầy đủ cho giao dịch hợp lệ vẫn để vòng 2 P1.3 |
 | 26/10 00:25 | P1.2 | Trạng thái vòng đời giao dịch (authorized/settled…) lộ tương lai nếu nằm trên cùng một hàng | Bảng append-only `transaction_events`, mỗi sự kiện có `available_at` riêng | Khớp mẫu label events append-only; hoãn cả hàng tới settlement sẽ ẩn giao dịch đang xử lý khỏi monitoring |
