@@ -124,6 +124,42 @@ def test_rule_cannot_close_when_runbook_is_disabled() -> None:
     assert "not enabled" in result["reason"]
 
 
+@pytest.mark.parametrize("source", ["rule", "agent"])
+@pytest.mark.parametrize(
+    ("cause", "runbook"),
+    [
+        ("legit_business_change", "unit_or_null_change"),
+        ("seasonal", "unit_or_null_change"),
+        ("seasonal", "small_sample"),
+        ("seasonal", "segment_concentration"),
+        ("seasonal", "invented_benign_runbook"),
+        ("legit_business_change", "seasonal_calendar"),
+        ("no_material_change", "seasonal_calendar"),
+    ],
+)
+def test_review_r1_only_seasonal_cause_and_runbook_may_close(
+    source: str, cause: str, runbook: str
+) -> None:
+    result = _gate(
+        _proposal(
+            "close",
+            cause=cause,
+            runbook=runbook,
+            checklist_results={runbook: {"status": "pass"}},
+        ),
+        source=source,
+        close_score=1.0 if source == "agent" else None,
+        config=_config(
+            close_enabled={runbook: True},
+            agent_close_disabled=False,
+            tau_agent=1.0,
+        ),
+    )
+
+    assert result["action"] == "human_review"
+    assert "seasonal cause" in result["reason"]
+
+
 def test_agent_can_close_with_tau_even_when_rule_runbook_close_is_disabled() -> None:
     result = _gate(
         _proposal("close", checklist_results=_pass()),
@@ -197,7 +233,7 @@ def test_close_without_passed_benign_checklist_or_recheck_reason_goes_to_human()
     )
 
     assert result["action"] == "human_review"
-    assert result["evidence_status"] == "sufficient"
+    assert result["evidence_status"] == "insufficient"
 
 
 def test_data_ticket_routes_without_benign_evidence_or_close_permissions() -> None:
@@ -215,6 +251,7 @@ def test_data_ticket_routes_without_benign_evidence_or_close_permissions() -> No
     )
 
     assert result["action"] == "data_ticket"
+    assert result["evidence_status"] == "sufficient"
     assert result["close_score"] is None
 
 
@@ -225,6 +262,20 @@ def test_data_ticket_requires_its_routing_checklist() -> None:
             cause="data_pipeline",
             runbook="unit_or_null_change",
             checklist_results={"unit_or_null_change": {"status": "pending"}},
+        )
+    )
+
+    assert result["action"] == "human_review"
+    assert result["evidence_status"] == "insufficient"
+
+
+def test_data_ticket_required_checklist_failure_is_insufficient() -> None:
+    result = _gate(
+        _proposal(
+            "data_ticket",
+            cause="data_pipeline",
+            runbook="unit_or_null_change",
+            checklist_results={"unit_or_null_change": {"status": "fail"}},
         )
     )
 
@@ -247,6 +298,62 @@ def test_data_ticket_escalates_when_fraud_signal_may_overlap() -> None:
 
     assert result["action"] == "human_review"
     assert "fraud signal" in result["reason"]
+
+
+@pytest.mark.parametrize("source", ["rule", "agent"])
+def test_review_r2_seasonal_close_escalates_for_same_segment_fraud_signal(
+    source: str,
+) -> None:
+    result = _gate(
+        _proposal(
+            "close",
+            checklist_results={
+                "seasonal_calendar": {"status": "pass"},
+                "fraud_signal": {
+                    "status": "pass",
+                    "scope_match": True,
+                    "window_complete": True,
+                },
+            },
+        ),
+        source=source,
+        close_score=1.0 if source == "agent" else None,
+        config=_config(
+            close_enabled={"seasonal_calendar": True},
+            agent_close_disabled=False,
+            tau_agent=1.0,
+        ),
+    )
+
+    assert result["action"] == "human_review"
+    assert "same segment" in result["reason"]
+
+
+@pytest.mark.parametrize("source", ["rule", "agent"])
+@pytest.mark.parametrize("runbook", ["seasonal_calendar", "unit_or_null_change"])
+def test_review_r2_runbook_escalation_precedes_other_action_branches(
+    source: str, runbook: str
+) -> None:
+    result = _gate(
+        _proposal(
+            "fraud_ops",
+            cause="fraud_surge",
+            runbook=None,
+            checklist_results={
+                runbook: {"status": "pass"},
+                "fraud_signal": {
+                    "status": "pass",
+                    "scope_match": True,
+                    "window_complete": True,
+                }
+            },
+        ),
+        source=source,
+        config=_config(agent_close_disabled=False, tau_agent=1.0),
+    )
+
+    assert result["action"] == "human_review"
+    assert f"{runbook!r}" in result["reason"]
 
 
 def test_fraud_ops_routes_with_structured_in_scope_signal_and_complete_window() -> None:
@@ -291,6 +398,85 @@ def test_fraud_ops_requires_signal_scope_and_complete_window(
     )
 
     assert result["action"] == "human_review"
+    assert result["evidence_status"] == "insufficient"
+
+
+@pytest.mark.parametrize(
+    ("action", "runbook", "checklist_name"),
+    [
+        ("data_ticket", "unit_or_null_change", "unit_or_null_change"),
+        ("fraud_ops", None, "fraud_signal"),
+    ],
+)
+@pytest.mark.parametrize(
+    "invalid_flag",
+    ["scope_match", "window_complete"],
+)
+def test_review_r3_false_scope_or_window_never_routes(
+    action: str, runbook: str | None, checklist_name: str, invalid_flag: str
+) -> None:
+    checklist = {"status": "pass", "scope_match": True, "window_complete": True}
+    checklist[invalid_flag] = False
+    result = _gate(
+        _proposal(
+            action,
+            cause="data_pipeline" if action == "data_ticket" else "fraud_surge",
+            runbook=runbook,
+            checklist_results={checklist_name: checklist},
+        )
+    )
+
+    assert result["action"] == "human_review"
+    assert result["evidence_status"] == "insufficient"
+
+
+@pytest.mark.parametrize("invalid_flag", ["scope_match", "window_complete"])
+def test_review_r4_false_scope_or_window_never_closes(
+    invalid_flag: str,
+) -> None:
+    checklist = {"status": "pass", "scope_match": True, "window_complete": True}
+    checklist[invalid_flag] = False
+    result = _gate(
+        _proposal("close", checklist_results={"seasonal_calendar": checklist}),
+        config=_config(close_enabled={"seasonal_calendar": True}),
+    )
+
+    assert result["action"] == "human_review"
+    assert result["evidence_status"] == "insufficient"
+
+
+def test_review_r4_only_incomplete_window_can_recheck_with_waiting_reason() -> None:
+    window_pending = _gate(
+        _proposal(
+            "close",
+            checklist_results={
+                "seasonal_calendar": {
+                    "status": "pass",
+                    "window_complete": False,
+                    "reason": "Wait for the seven-day window to close.",
+                }
+            },
+        ),
+        config=_config(close_enabled={"seasonal_calendar": True}),
+    )
+    scope_mismatch = _gate(
+        _proposal(
+            "close",
+            checklist_results={
+                "seasonal_calendar": {
+                    "status": "pass",
+                    "scope_match": False,
+                    "window_complete": False,
+                    "reason": "Wait for another day.",
+                }
+            },
+        ),
+        recheck_reason="Wait for another day.",
+        config=_config(close_enabled={"seasonal_calendar": True}),
+    )
+
+    assert window_pending["action"] == "recheck"
+    assert scope_mismatch["action"] == "human_review"
 
 
 @pytest.mark.parametrize("action", ["close", "recheck", "data_ticket", "fraud_ops", "human_review"])
@@ -411,6 +597,36 @@ def test_invalid_asof_episode_or_snapshot_schema_forces_human(
     assert result["action"] == "human_review"
 
 
+@pytest.mark.parametrize(
+    ("field_name", "bad_timestamp"),
+    [
+        ("opened_at", "not-a-timestamp"),
+        ("opened_at", "2026-02-10T16:00:00"),
+        ("event_at", "not-a-timestamp"),
+        ("available_at", "2026-02-10T16:00:00"),
+    ],
+)
+def test_review_r5_bad_snapshot_timestamp_returns_valid_human_decision(
+    field_name: str, bad_timestamp: str
+) -> None:
+    result = _gate(
+        _proposal("human_review"),
+        incident=_incident(**{field_name: bad_timestamp}),
+    )
+    scope = json.loads(result["scope_json"])
+
+    assert result["action"] == "human_review"
+    assert result["evidence_status"] == "insufficient"
+    assert scope == {
+        "feature": None,
+        "segment": None,
+        "start_at": None,
+        "end_at": _timestamp(),
+    }
+    assert field_name in result["reason"]
+    assert validate_decision_row(result) == result
+
+
 def test_conflicting_evidence_is_computed_and_forces_human_review() -> None:
     result = _gate(
         _proposal(
@@ -478,6 +694,27 @@ def test_decision_row_schema_rejects_nested_agent_evidence_status() -> None:
 
     with pytest.raises(DecisionSchemaError, match="unsupported fields"):
         validate_decision_row(result)
+
+
+def test_review_r7_decision_id_is_replayable_and_changes_with_result() -> None:
+    proposal = _proposal(
+        "fraud_ops",
+        cause="fraud_surge",
+        runbook=None,
+        checklist_results={
+            "fraud_signal": {
+                "status": "pass",
+                "scope_match": True,
+                "window_complete": True,
+            }
+        },
+    )
+    low_score = _gate(proposal, source="agent", close_score=0.2)
+    high_score = _gate(proposal, source="agent", close_score=0.9)
+    replayed_low_score = _gate(proposal, source="agent", close_score=0.2)
+
+    assert low_score["decision_id"] != high_score["decision_id"]
+    assert low_score == replayed_low_score
 
 
 def test_rule_decisions_keep_agent_score_null_and_record_usage() -> None:

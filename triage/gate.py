@@ -43,9 +43,8 @@ _CHECKLIST_FIELDS = frozenset(
         "evidence_status",
     }
 )
-_BENIGN_CAUSES = frozenset(
-    {"seasonal", "legit_business_change", "no_material_change"}
-)
+_BENIGN_CAUSES = frozenset({"seasonal"})
+_BENIGN_RUNBOOKS = frozenset({"seasonal_calendar"})
 _TIMESTAMP_FIELDS = ("opened_at", "event_at", "available_at")
 
 
@@ -230,6 +229,8 @@ def _normalize_checklists(value: Any) -> tuple[dict[str, dict[str, Any]], list[s
 def _evidence_status(
     checklist_results: Mapping[str, Mapping[str, Any]],
     *,
+    action: str,
+    runbook: str | None,
     tool_error: bool,
     snapshot_valid: bool,
     checklist_errors: Sequence[str],
@@ -237,15 +238,82 @@ def _evidence_status(
     statuses = [item["status"] for item in checklist_results.values()]
     if "conflicting" in statuses:
         return "conflicting"
+
+    if action == "close":
+        relevant_names = [runbook] if runbook else []
+    elif action == "data_ticket":
+        relevant_names = ["unit_or_null_change"]
+    elif action == "fraud_ops":
+        relevant_names = ["fraud_signal"]
+    elif action == "recheck":
+        relevant_names = [runbook] if runbook else list(checklist_results)
+    else:
+        relevant_names = list(checklist_results)
+
     if (
-        not statuses
-        or any(status in {"pending", "error"} for status in statuses)
+        not relevant_names
         or tool_error
         or not snapshot_valid
         or checklist_errors
     ):
         return "insufficient"
+
+    for name in relevant_names:
+        item = checklist_results.get(name)
+        if item is None or item["status"] != "pass":
+            return "insufficient"
+        if item.get("scope_match") is False or item.get("window_complete") is False:
+            return "insufficient"
+        if action == "fraud_ops" and (
+            item.get("scope_match") is not True
+            or item.get("window_complete") is not True
+        ):
+            return "insufficient"
+
+    if action in {"close", "data_ticket"} and runbook in {
+        "seasonal_calendar",
+        "unit_or_null_change",
+    }:
+        fraud_signal = checklist_results.get("fraud_signal")
+        if (
+            fraud_signal is not None
+            and fraud_signal["status"] not in {"fail", "not_applicable"}
+            and fraud_signal.get("scope_match") is not False
+            and (
+                fraud_signal["status"] != "pass"
+                or fraud_signal.get("scope_match") is not True
+                or fraud_signal.get("window_complete") is False
+            )
+        ):
+            return "insufficient"
     return "sufficient"
+
+
+def _mandatory_runbook_reasons(
+    runbook: str | None,
+    checklist_results: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    applicable_runbooks = {
+        name
+        for name in ("seasonal_calendar", "unit_or_null_change")
+        if name in checklist_results
+        and checklist_results[name]["status"] != "not_applicable"
+    }
+    if runbook in {"seasonal_calendar", "unit_or_null_change"}:
+        applicable_runbooks.add(runbook)
+    if not applicable_runbooks:
+        return []
+    fraud_result = checklist_results.get("fraud_signal")
+    if (
+        fraud_result is not None
+        and fraud_result.get("status") == "pass"
+        and fraud_result.get("scope_match") is True
+    ):
+        return [
+            f"Runbook {name!r} requires human review for a fraud signal in the same segment."
+            for name in sorted(applicable_runbooks)
+        ]
+    return []
 
 
 def _as_reasons(value: Any) -> tuple[list[str], bool]:
@@ -319,6 +387,7 @@ def _result_reason(
     proposal: Mapping[str, Any],
     explicit_recheck_reason: Any,
     checklist_results: Mapping[str, Mapping[str, Any]],
+    runbook: str | None,
 ) -> str | None:
     candidates: list[Any] = [explicit_recheck_reason, proposal.get("recheck_reason")]
     if requested_action == "recheck":
@@ -326,11 +395,12 @@ def _result_reason(
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
-    pending_reasons = [
-        item.get("reason")
-        for item in checklist_results.values()
-        if item["status"] == "pending" and isinstance(item.get("reason"), str)
-    ]
+    relevant = checklist_results.get(runbook) if runbook else None
+    pending_reasons = []
+    if relevant is not None and (
+        relevant["status"] == "pending" or relevant.get("window_complete") is False
+    ) and isinstance(relevant.get("reason"), str):
+        pending_reasons.append(relevant["reason"])
     if pending_reasons:
         return "; ".join(sorted(set(pending_reasons)))
     return None
@@ -417,16 +487,6 @@ def evaluate_gate(
                 result.get("reason") or f"Checklist {name!r} requires human review."
             )
 
-    evidence_status = _evidence_status(
-        normalized_checklists,
-        tool_error=tool_failure,
-        snapshot_valid=snapshot_valid,
-        checklist_errors=checklist_errors,
-    )
-    if evidence_status == "conflicting":
-        explicit_review_reasons.append("Checklist evidence is conflicting.")
-        mandatory_review = True
-
     cause = proposal.get("cause")
     if not _nonempty_text(cause):
         cause = "other"
@@ -448,6 +508,24 @@ def evaluate_gate(
     }:
         requested_action = "human_review"
         proposal_errors.append("Proposal has an unsupported action.")
+
+    evidence_status = _evidence_status(
+        normalized_checklists,
+        action=requested_action,
+        runbook=runbook,
+        tool_error=tool_failure,
+        snapshot_valid=snapshot_valid,
+        checklist_errors=checklist_errors,
+    )
+    if evidence_status == "conflicting":
+        explicit_review_reasons.append("Checklist evidence is conflicting.")
+        mandatory_review = True
+    runbook_review_reasons = _mandatory_runbook_reasons(
+        runbook, normalized_checklists
+    )
+    if runbook_review_reasons:
+        mandatory_review = True
+        explicit_review_reasons.extend(runbook_review_reasons)
 
     traces_value = proposal.get("tool_trace_ids", [])
     if not isinstance(traces_value, (list, tuple)) or any(
@@ -489,6 +567,7 @@ def evaluate_gate(
         proposal=proposal,
         explicit_recheck_reason=recheck_reason,
         checklist_results=normalized_checklists,
+        runbook=runbook,
     )
 
     if not snapshot_valid or tool_failure or proposal_errors or mandatory_review:
@@ -513,10 +592,15 @@ def evaluate_gate(
             fraud_result = normalized_checklists.get("fraud_signal")
             fraud_conflict = bool(
                 fraud_result
-                and fraud_result["status"] != "fail"
+                and fraud_result["status"] in {"pass", "pending"}
                 and fraud_result.get("scope_match") is not False
             )
-            if runbook != "unit_or_null_change" or unit_result.get("status") != "pass":
+            if (
+                runbook != "unit_or_null_change"
+                or unit_result.get("status") != "pass"
+                or unit_result.get("scope_match") is False
+                or unit_result.get("window_complete") is False
+            ):
                 decision_action = "human_review"
                 reasons.append(
                     "data_ticket requires a passing unit_or_null_change checklist."
@@ -545,9 +629,14 @@ def evaluate_gate(
                 )
     elif requested_action == "close":
         runbook_check = normalized_checklists.get(runbook, {}) if runbook else {}
-        if cause not in _BENIGN_CAUSES or not runbook:
+        if runbook not in _BENIGN_RUNBOOKS or cause not in _BENIGN_CAUSES:
             decision_action = "human_review"
-            reasons.append("No applicable benign runbook was identified.")
+            reasons.append(
+                "Only seasonal cause with the seasonal_calendar runbook may enter close."
+            )
+        elif runbook_check.get("scope_match") is False:
+            decision_action = "human_review"
+            reasons.append("The benign checklist does not match the incident scope.")
         elif runbook_check.get("status") != "pass" or evidence_status != "sufficient":
             if recheck_why:
                 decision_action = "recheck"
@@ -602,9 +691,14 @@ def evaluate_gate(
         incident_id = _fallback_incident_id(
             snapshot, episode_id=episode_id, as_of=normalized_as_of
         )
-    feature = snapshot.get("feature") if _nonempty_text(snapshot.get("feature")) else None
-    segment = snapshot.get("segment") if _nonempty_text(snapshot.get("segment")) else None
-    opened_at = snapshot.get("opened_at") if _nonempty_text(snapshot.get("opened_at")) else None
+    if snapshot_valid:
+        feature = snapshot["feature"]
+        segment = snapshot["segment"]
+        opened_at = snapshot["opened_at"]
+    else:
+        feature = None
+        segment = None
+        opened_at = None
     scope_json = _canonical_json(
         {
             "feature": feature,
@@ -619,26 +713,7 @@ def evaluate_gate(
         f"cause={cause}; proposed_action={requested_action}; "
         f"action={decision_action}; evidence_status={evidence_status}"
     )
-    identity = {
-        "schema_version": 1,
-        "incident_id": incident_id,
-        "episode_id": episode_id,
-        "decision_at": normalized_as_of,
-        "source": source,
-        "policy_version": policy.policy_version,
-        "cause": cause,
-        "runbook": runbook,
-        "action": decision_action,
-        "evidence_status": evidence_status,
-        "checklist_results_json": checklist_json,
-        "reason": reason,
-    }
-    decision_id = "decision-" + hashlib.sha256(
-        _canonical_json(identity).encode("utf-8")
-    ).hexdigest()[:24]
-
-    row = {
-        "decision_id": decision_id,
+    decision_payload = {
         "incident_id": incident_id,
         "episode_id": episode_id,
         "decision_at": normalized_as_of,
@@ -657,4 +732,9 @@ def evaluate_gate(
         "policy_version": policy.policy_version,
         **usage_fields,
     }
+    identity = {"schema_version": 1, "decision": decision_payload}
+    decision_id = "decision-" + hashlib.sha256(
+        _canonical_json(identity).encode("utf-8")
+    ).hexdigest()[:24]
+    row = {"decision_id": decision_id, **decision_payload}
     return validate_decision_row(row)
