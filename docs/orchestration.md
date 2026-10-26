@@ -66,3 +66,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 08:10 | P1.5 r1 | Coder xong 03:28 (57 test, commit `8e3f09f`). Review treo ~4h45 ở `Reading additional input from stdin` (codex exec chạy nền không đóng stdin) → kill, sửa `review_task.sh` thêm `< /dev/null`, chạy lại có `timeout 2400` |
 | 26/10 08:15 | P1.5 r1 | Review vòng 1 PASS, không finding → merge (57 test trên main). Giao P1.6 vòng 1 |
 | 26/10 08:25 | P2.1 r1 | Mở luồng B song song (người dùng duyệt) |
+| 26/10 08:45 | P1.6 + P2.1 r1 | Cả hai review vòng 1 PASS, không finding → merge P1.6 rồi P2.1; conflict CHỈ ở bảng Trạng thái MASTER → gộp giữ cả hai. 64 test trên main. Sửa `review_task.sh` chọn sub-plan theo stage. Giao P1.7 (A) và P2.2 (B) |
