@@ -73,6 +73,42 @@ _PUBLIC_FORBIDDEN_KEYS = {
 }
 _DOWNSTREAM_OUTPUT_TABLES = ("model_scores", "daily_metrics", "alerts", "incidents")
 _MONITORING_PRIVATE_MARKERS = _RESERVED_ID_TOKENS
+_MONITORING_PRIVATE_FIELD_MARKERS = _PUBLIC_FORBIDDEN_KEYS | {
+    "accepted_actions_json",
+    "affected_entities_json",
+    "affected_features_json",
+    "affected_segments_json",
+    "config_fingerprint",
+    "config_json",
+    "content_fingerprint",
+    "deadline_at",
+    "effect_end_at",
+    "effect_start_at",
+    "incident_effect",
+    "incident_truth",
+    "intervention_start_at",
+    "p1.6.incident_effect.v1",
+    "seed",
+    "template",
+    "txn_ids",
+}
+_MONITORING_PRIVATE_FIELD_PATTERNS = tuple(
+    re.compile(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])")
+    for marker in sorted(_MONITORING_PRIVATE_FIELD_MARKERS, key=len, reverse=True)
+)
+_MONITORING_QUALITY_FLAGS = frozenset(
+    {
+        "window_incomplete",
+        "small_window_sample",
+        "small_reference_sample",
+        "no_window_samples",
+        "no_reference_samples",
+    }
+)
+_MONITORING_COUNT_FLAG = re.compile(
+    r"^(?:window_censored_samples|reference_censored_samples|"
+    r"target_unavailable_at_decision|reference_targets_unavailable_at_decision)=[1-9][0-9]*$"
+)
 
 
 class ValidationError(ValueError):
@@ -703,6 +739,17 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
                 )
                 return
 
+    def check_private_fields(table: str, row_id: str, values: tuple[Any, ...]) -> None:
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            text = value.casefold()
+            if any(pattern.search(text) for pattern in _MONITORING_PRIVATE_FIELD_PATTERNS):
+                violations.append(
+                    f"{table} row {row_id} contains a private truth or injector field name"
+                )
+                return
+
     metrics = operational.execute("SELECT * FROM daily_metrics").fetchall()
     for source in metrics:
         row = dict(source)
@@ -721,11 +768,20 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
             flags = None
         if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
             violations.append(f"daily_metrics row {metric_id} flags must be a JSON string array")
+        elif any(
+            flag not in _MONITORING_QUALITY_FLAGS
+            and _MONITORING_COUNT_FLAG.fullmatch(flag) is None
+            for flag in flags
+        ):
+            violations.append(
+                f"daily_metrics row {metric_id} flags contain unsupported quality flags"
+            )
         check_neutral_text(
             "daily_metrics",
             metric_id,
             (metric_id, row["feature"], row["segment"], row["reference_window"], row["flags"]),
         )
+        check_private_fields("daily_metrics", metric_id, tuple(row.values()))
         key = (
             episode_id,
             as_of_time,
@@ -778,6 +834,7 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
             alert_id,
             (row["metric"], row["feature"], row["segment"], row["reference"]),
         )
+        check_private_fields("alerts", alert_id, tuple(row.values()))
         alerts_by_id[alert_id] = row
 
     incidents = operational.execute("SELECT * FROM incidents").fetchall()
@@ -785,8 +842,15 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
         row = dict(source)
         incident_id = str(row["incident_id"])
         episode_id = str(row["episode_id"])
+        opened_at = str(row["opened_at"])
+        event_at = str(row["event_at"])
+        available_at = str(row["available_at"])
         if episode_id == "base" or episode_id not in registered:
             violations.append(f"incident {incident_id} has an invalid episode")
+        if not opened_at <= event_at <= available_at:
+            violations.append(
+                f"incident {incident_id} must satisfy opened_at <= event_at <= available_at"
+            )
         incidents_by_key.add((incident_id, episode_id))
         try:
             alert_ids = json.loads(row["alert_ids_json"])
@@ -801,6 +865,19 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
             violations.append(f"incident {incident_id} alert_ids_json must be a unique nonempty string array")
             continue
 
+        known_alerts = [alerts_by_id[alert_id] for alert_id in alert_ids if alert_id in alerts_by_id]
+        expected_alert_order = [
+            alert["alert_id"]
+            for alert in sorted(
+                known_alerts,
+                key=lambda alert: (alert["as_of_time"], alert["alert_id"]),
+            )
+        ]
+        if len(known_alerts) == len(alert_ids) and alert_ids != expected_alert_order:
+            violations.append(
+                f"incident {incident_id} alert_ids_json is not ordered by as_of_time then alert_id"
+            )
+
         first_alert = alerts_by_id.get(alert_ids[0])
         for alert_id in alert_ids:
             alert = alerts_by_id.get(alert_id)
@@ -811,6 +888,10 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
                 violations.append(f"incident {incident_id} references an alert from another episode")
             if alert["feature"] != row["feature"] or alert["segment"] != row["segment"]:
                 violations.append(f"incident {incident_id} references an alert from another scope")
+            if alert["available_at"] > available_at:
+                violations.append(
+                    f"incident {incident_id} snapshot is available before alert {alert_id}"
+                )
         if first_alert is not None:
             if first_alert["episode_id"] != episode_id:
                 violations.append(f"incident {incident_id} first alert belongs to another episode")
@@ -839,6 +920,7 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
             incident_id,
             (row["feature"], row["segment"]),
         )
+        check_private_fields("incidents", incident_id, tuple(row.values()))
 
     if violations:
         _fail("; ".join(violations[:20]))

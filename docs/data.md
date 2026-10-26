@@ -217,40 +217,7 @@ Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phi
 | `window_end` | `TEXT` | Ngày cuối cửa sổ nghiệp vụ, gồm cả ngày này. |
 | `n_window` | `INTEGER` | Số feature value hữu hạn hoặc số model score trong cửa sổ, tùy metric. |
 | `n_reference` | `INTEGER` | Số feature value hữu hạn của base reference; bằng 0 với tỉ lệ review. |
-| `flags` | `TEXT` JSON array | Cờ chất lượng như `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
-
-### `alerts`
-
-`alerts` là đầu ra operational của P3.2, tạo từ `daily_metrics` của cùng episode và cùng snapshot. Khóa, FK, uniqueness, timestamp và các quan hệ được định nghĩa tại bảng operational ở mục 2.
-
-| Cột | Kiểu | Ý nghĩa |
-|---|---|---|
-| `alert_id` | `TEXT` | ID trung tính, tất định theo episode, snapshot và phạm vi metric. |
-| `episode_id` | `TEXT` | Episode được theo dõi. |
-| `as_of_time` | `TEXT` UTC | Snapshot metric dùng để tạo alert. |
-| `metric` | `TEXT` | `metric_id` nguồn trong `daily_metrics`. |
-| `feature`, `segment` | `TEXT` | Phạm vi feature/segment của metric nguồn. |
-| `value` | `REAL` | Giá trị metric được đánh giá. |
-| `reference` | `TEXT` | Cửa sổ reference của metric nguồn. |
-| `threshold` | `REAL` | Ngưỡng tín hiệu đã cấu hình. |
-| `event_at` | `TEXT` UTC | Bằng `as_of_time`; thời điểm nghiệp vụ của alert. |
-| `available_at` | `TEXT` UTC | Bằng `as_of_time`; thời điểm alert có thể được đọc. |
-
-### `incidents`
-
-`incidents` là snapshot operational của trạng thái gộp alert theo P3.3. Quy tắc gộp và tạo incident con thuộc [hợp đồng monitoring](monitoring.md); khóa và quan hệ episode được định nghĩa tại bảng operational ở mục 2.
-
-| Cột | Kiểu | Ý nghĩa |
-|---|---|---|
-| `incident_id` | `TEXT` | ID trung tính, tất định theo episode, alert đầu tiên, phạm vi và incident cha nếu có. |
-| `parent_incident_id` | `TEXT NULL` | ID incident cha cùng episode; NULL nếu không có incident cha. |
-| `episode_id` | `TEXT` | Episode được theo dõi. |
-| `alert_ids_json` | `TEXT` JSON array | Danh sách ID alert duy nhất thuộc incident và cùng episode. |
-| `feature`, `segment` | `TEXT` | Phạm vi chung của các alert trong incident. |
-| `opened_at` | `TEXT` UTC | Thời điểm của alert đầu tiên mở incident. |
-| `status` | `TEXT` | Trạng thái snapshot: `open`, `recheck`, `close`, `data_ticket`, `fraud_ops` hoặc `human_review`. |
-| `event_at` | `TEXT` UTC | Thời điểm nghiệp vụ của thay đổi trạng thái incident được ghi trong snapshot. |
-| `available_at` | `TEXT` UTC | Thời điểm snapshot incident có thể được đọc. |
+| `flags` | `TEXT` JSON array | Bộ cờ chất lượng vòng 1: `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`, `reference_targets_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
 
 P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
 

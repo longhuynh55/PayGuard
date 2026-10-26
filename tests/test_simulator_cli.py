@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -263,6 +264,180 @@ def test_validate_rejects_corrupt_monitoring_alerts(
         assert "as_of_time" in validated.stdout
     else:
         assert "another episode" in validated.stdout
+
+
+def test_validate_rejects_incident_snapshot_with_future_alert(
+    tmp_path: Path,
+    p3_monitoring_smoke_run: Path,
+) -> None:
+    run_dir = tmp_path / "future-alert-in-incident"
+    shutil.copytree(p3_monitoring_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        incident = dict(
+            connection.execute(
+                "SELECT * FROM incidents ORDER BY incident_id, event_at LIMIT 1"
+            ).fetchone()
+        )
+        incident_alert_ids = json.loads(incident["alert_ids_json"])
+        first_alert = dict(
+            connection.execute(
+                "SELECT * FROM alerts WHERE alert_id=?", (incident_alert_ids[0],)
+            ).fetchone()
+        )
+        source_metric = dict(
+            connection.execute(
+                "SELECT * FROM daily_metrics WHERE metric_id=? AND episode_id=? "
+                "AND as_of_time=? AND feature=? AND segment=?",
+                (
+                    first_alert["metric"],
+                    first_alert["episode_id"],
+                    first_alert["as_of_time"],
+                    first_alert["feature"],
+                    first_alert["segment"],
+                ),
+            ).fetchone()
+        )
+        future_as_of = (
+            datetime.fromisoformat(source_metric["as_of_time"].replace("Z", "+00:00"))
+            + timedelta(seconds=1)
+        ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+        future_metric = dict(source_metric)
+        future_metric.update(
+            as_of_time=future_as_of,
+            event_at=future_as_of,
+            available_at=future_as_of,
+        )
+        metric_columns = tuple(future_metric)
+        connection.execute(
+            f'INSERT INTO daily_metrics ({", ".join(metric_columns)}) '
+            f'VALUES ({", ".join("?" for _ in metric_columns)})',
+            tuple(future_metric[column] for column in metric_columns),
+        )
+
+        identity = {
+            "schema_version": 1,
+            "episode_id": first_alert["episode_id"],
+            "as_of_time": future_as_of,
+            "metric": first_alert["metric"],
+            "feature": first_alert["feature"],
+            "segment": first_alert["segment"],
+        }
+        canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        future_alert = dict(first_alert)
+        future_alert.update(
+            alert_id="alert-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24],
+            as_of_time=future_as_of,
+            event_at=future_as_of,
+            available_at=future_as_of,
+        )
+        alert_columns = tuple(future_alert)
+        connection.execute(
+            f'INSERT INTO alerts ({", ".join(alert_columns)}) '
+            f'VALUES ({", ".join("?" for _ in alert_columns)})',
+            tuple(future_alert[column] for column in alert_columns),
+        )
+
+        connection.execute("DROP TRIGGER incidents_no_update")
+        connection.execute(
+            "UPDATE incidents SET alert_ids_json=? WHERE incident_id=? AND event_at=?",
+            (
+                json.dumps(
+                    [*incident_alert_ids, future_alert["alert_id"]],
+                    separators=(",", ":"),
+                ),
+                incident["incident_id"],
+                incident["event_at"],
+            ),
+        )
+
+    validated = _cli("validate", "--run", str(run_dir))
+    assert validated.returncode != 0, validated.stdout + validated.stderr
+    assert "FAIL monitoring_output_contract" in validated.stdout
+    assert "snapshot is available before alert" in validated.stdout
+
+
+def test_validate_rejects_incident_snapshot_before_opened_at(
+    tmp_path: Path,
+    p3_monitoring_smoke_run: Path,
+) -> None:
+    run_dir = tmp_path / "incident-before-opened-at"
+    shutil.copytree(p3_monitoring_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+    with sqlite3.connect(database) as connection:
+        incident = connection.execute(
+            "SELECT incident_id, event_at, opened_at FROM incidents "
+            "ORDER BY incident_id, event_at LIMIT 1"
+        ).fetchone()
+        assert incident is not None
+        before_opened = (
+            datetime.fromisoformat(incident[2].replace("Z", "+00:00"))
+            - timedelta(seconds=1)
+        ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        connection.execute("DROP TRIGGER incidents_no_update")
+        connection.execute(
+            "UPDATE incidents SET event_at=?, available_at=? "
+            "WHERE incident_id=? AND event_at=?",
+            (before_opened, before_opened, incident[0], incident[1]),
+        )
+
+    validated = _cli("validate", "--run", str(run_dir))
+    assert validated.returncode != 0, validated.stdout + validated.stderr
+    assert "FAIL monitoring_output_contract" in validated.stdout
+    assert "opened_at <= event_at <= available_at" in validated.stdout
+
+
+@pytest.mark.parametrize(
+    "field,payload",
+    [
+        (
+            "flags",
+            json.dumps(
+                [
+                    "accepted_actions=data_ticket",
+                    "requires_intervention=1",
+                    "effect_available_at=2026-02-07T00:00:00.000000Z",
+                ],
+                separators=(",", ":"),
+            ),
+        ),
+        ("feature", "accepted_actions"),
+    ],
+)
+def test_validate_rejects_private_fields_in_monitoring_values(
+    tmp_path: Path,
+    p3_monitoring_smoke_run: Path,
+    field: str,
+    payload: str,
+) -> None:
+    run_dir = tmp_path / f"private-field-in-{field}"
+    shutil.copytree(p3_monitoring_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        metric = dict(
+            connection.execute(
+                "SELECT * FROM daily_metrics ORDER BY metric_id, as_of_time LIMIT 1"
+            ).fetchone()
+        )
+        metric["segment"] = "segment-private-marker-test"
+        metric[field] = payload if field == "flags" else payload
+        metric_columns = tuple(metric)
+        connection.execute(
+            f'INSERT INTO daily_metrics ({", ".join(metric_columns)}) '
+            f'VALUES ({", ".join("?" for _ in metric_columns)})',
+            tuple(metric[column] for column in metric_columns),
+        )
+
+    validated = _cli("validate", "--run", str(run_dir))
+    assert validated.returncode != 0, validated.stdout + validated.stderr
+    assert "FAIL monitoring_output_contract" in validated.stdout
+    if field == "flags":
+        assert "unsupported quality flags" in validated.stdout
+    else:
+        assert "private truth or injector field name" in validated.stdout
 
 
 def test_same_smoke_config_has_same_canonical_fingerprint(tmp_path: Path) -> None:
