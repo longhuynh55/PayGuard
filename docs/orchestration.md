@@ -40,6 +40,7 @@ Quyết định Claude tự chọn khi chạy không người (người dùng đ
 
 | Thời điểm | Task | Câu hỏi | Đã chọn | Lý do |
 |---|---|---|---|---|
+| 26/10 08:25 | P2.1 | Chạy song song để nhanh hơn? | **Người dùng duyệt:** 2 luồng — A: P1.6→P1.7→P1.8; B: P2.1→P2.2 trên main hiện tại. P2.1 dựng dữ liệu smoke bằng API simulator (`read_as_of`, snapshot nhãn), không đọc file artifact; luồng B KHÔNG sửa `simulator/`, `configs/simulator.yaml`, `docs/data.md` | Split fit/validation/calibration đều trước T0, P1.6–P1.8 không đổi lịch sử nền. Khi P1.8 xong, P2.1 vòng 2 chuyển sang đọc artifact CLI nếu format khác |
 | 26/10 03:00 | P1.4 | P1.3 vòng 1 chỉ có kênh QR, nhưng card testing là fraud trên thẻ | Thêm mã kênh `card` trong config cho giao dịch card testing; không đổi schema (cột `channel` đã có) | Thận trọng nhất: không đụng schema; kênh thẻ đầy đủ cho giao dịch hợp lệ vẫn để vòng 2 P1.3 |
 | 26/10 00:25 | P1.2 | Trạng thái vòng đời giao dịch (authorized/settled…) lộ tương lai nếu nằm trên cùng một hàng | Bảng append-only `transaction_events`, mỗi sự kiện có `available_at` riêng | Khớp mẫu label events append-only; hoãn cả hàng tới settlement sẽ ẩn giao dịch đang xử lý khỏi monitoring |
 | 26/10 00:17 | P1.2 | Engine lưu trữ: SQLite hay DuckDB (`docs/overview.md` ghi DuckDB) | Coder chọn **SQLite** (thư viện chuẩn) cho storage P1 | Không cần dependency; DuckDB đọc trực tiếp được file SQLite nên P2 vẫn có thể tính feature bằng DuckDB. Nếu muốn thống nhất DuckDB ngay → đổi ở vòng 2 P1.2 |
@@ -64,3 +65,4 @@ Sandbox `workspace-write` không ghi được `~/.cache/uv` → coder dùng `UV_
 | 26/10 03:25 | P1.4 r1 | Coder xong (50 test). Review vòng 1 CHANGES_REQUIRED: card testing dồn vào T0−1 nên fit/validation/calibration không có fraud; bộ đếm benign sai → coder sửa (51 test, chiến dịch 12/2/4 theo cohort) → review vòng 2 PASS → merge. Giao P1.5 |
 | 26/10 08:10 | P1.5 r1 | Coder xong 03:28 (57 test, commit `8e3f09f`). Review treo ~4h45 ở `Reading additional input from stdin` (codex exec chạy nền không đóng stdin) → kill, sửa `review_task.sh` thêm `< /dev/null`, chạy lại có `timeout 2400` |
 | 26/10 08:15 | P1.5 r1 | Review vòng 1 PASS, không finding → merge (57 test trên main). Giao P1.6 vòng 1 |
+| 26/10 08:25 | P2.1 r1 | Mở luồng B song song (người dùng duyệt) |
