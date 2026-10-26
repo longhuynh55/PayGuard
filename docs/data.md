@@ -277,3 +277,35 @@ Evaluator ghi JSON tại `reports/p3_4_detection_recall.json` tương đối v�
 | `incident_matches` | `OBJECT[]` JSON | Trạng thái và các truth ID được ghép cho từng incident. Vòng 1 chỉ có `matched`/`unmatched`. |
 
 Các object con có cấu trúc cố định: `detection_recall` gồm `detected`, `denominator`, `recall` (`REAL NULL`) và `missed_truth_ids`; mỗi phần tử `by_scenario` gồm `cause`, `template`, `detected`, `denominator`, `missed_truth_ids`, `recall` (`REAL NULL`) và `benign_truth_count`; `truth_counts` gồm `total`, `requires_intervention`, `benign`; `incident_counts` gồm `evaluated`, `matched`, `unmatched`, `benign_matched`; mỗi phần tử `incident_matches` gồm `incident_id`, `episode_id`, `feature`, `segment`, `incident_start_at`, `incident_end_at`, `status`, `matched_truth_ids`. `incident_start_at`/`incident_end_at` là mốc `available_at` sớm nhất/muộn nhất của các snapshot có thêm alert ID vào `alert_ids_json`; snapshot quyết định không mở rộng khoảng này. Timestamp dùng UTC; các mảng ID giữ thứ tự tất định.
+
+## 8. Đầu ra triage (`decisions`)
+
+`decisions` là bảng operational ghi một dòng cho mỗi lần gate chạy, kể cả khi kết quả là `recheck`. Bảng chỉ chứa kết luận triage, checklist/tool output và chi phí thực thi; không đọc hoặc lưu truth, template, cơ chế injector hay metadata private.
+
+| Cột | Kiểu | Null? | Ý nghĩa / ràng buộc |
+|---|---|---|---|
+| `decision_id` | `TEXT` | Không | ID trung tính, tất định, SHA-256 rút gọn từ ngữ cảnh quyết định operational; không chứa truth. |
+| `incident_id` | `TEXT` | Không | Incident snapshot được gate xử lý. |
+| `episode_id` | `TEXT` | Không | Episode operational, khác `base`. |
+| `decision_at` | `TEXT` UTC | Không | Bằng `as_of_time` của snapshot theo quyết định đã chốt. |
+| `as_of_time` | `TEXT` UTC | Không | Cutoff mà gate dùng để xác thực snapshot. |
+| `source` | `TEXT` | Không | `rule` hoặc `agent`. |
+| `runbook` | `TEXT` | Có | Runbook đề xuất; NULL nếu không áp dụng. |
+| `cause` | `TEXT` | Không | Nguyên nhân ứng viên từ rule/agent; không thay `evidence_status`. |
+| `evidence_status` | `TEXT` | Không | `sufficient`, `insufficient`, hoặc `conflicting`; do code tính từ checklist/tool output và tính hợp lệ của snapshot. |
+| `action` | `TEXT` | Không | `close`, `recheck`, `data_ticket`, `fraud_ops`, hoặc `human_review` sau gate. |
+| `scope_json` | `TEXT` JSON object | Không | Phạm vi incident gồm `feature`, `segment`, `start_at`, `end_at`; `start_at` lấy từ `opened_at`, `end_at` bằng `as_of_time`. |
+| `checklist_results_json` | `TEXT` JSON object | Không | Kết quả từng checklist item đã chuẩn hóa; không nhận `evidence_status` từ agent. |
+| `tool_trace_ids_json` | `TEXT` JSON array | Không | Các trace ID operational theo thứ tự được cung cấp; `[]` nếu không có. |
+| `conclusion` | `TEXT` | Không | Tóm tắt cause đề xuất, action đề xuất, action sau gate và evidence status. |
+| `reason` | `TEXT` | Không | Lý do cho action sau gate, gồm lý do chờ nếu action là `recheck`. |
+| `close_score` | `REAL` | Có | Score agent do code cung cấp, trong `[0, 1]`; NULL nếu không có score. Rule không ghi score. |
+| `policy_version` | `TEXT` | Không | Phiên bản policy dùng cho lần gate. |
+| `input_tokens` | `INTEGER` | Có | Token đầu vào nếu có; không âm. |
+| `output_tokens` | `INTEGER` | Có | Token đầu ra nếu có; không âm. |
+| `total_tokens` | `INTEGER` | Có | Tổng token nếu có; không âm. |
+| `cost_usd` | `REAL` | Có | Chi phí USD nếu có; không âm. |
+
+Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID giống nhau, kết quả khác tạo ID khác. Các trường JSON phải parse đúng kiểu đã nêu. Bảng thuộc phía operational; evaluator được nối ở P4.5, còn module triage không import evaluator.
+
+`scope_json` có bốn khóa `feature`, `segment`, `start_at`, `end_at`; giá trị là TEXT hoặc NULL khi snapshot lỗi không cung cấp được phạm vi. `checklist_results_json` là object ánh xạ tên checklist sang object kết quả; mỗi kết quả có `status` ∈ `pass`, `fail`, `pending`, `conflicting`, `error`, `not_applicable`, và có thể có `reason`, `scope_match`, `window_complete`, `requires_human_review`, `details`. Ba cờ là BOOLEAN; `details` là JSON. `evidence_status` không phải đầu vào checklist được lưu. `tool_trace_ids_json` là mảng các TEXT ID không rỗng.
