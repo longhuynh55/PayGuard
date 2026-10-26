@@ -255,3 +255,24 @@ Khóa chính logic là `alert_id`; mỗi alert ứng với tối đa một dòng
 | `available_at` | `TEXT` UTC | Thời điểm snapshot khả dụng; lấy từ alert khi alert làm thay đổi snapshot, hoặc bằng `decision_at` khi quyết định làm thay đổi trạng thái. |
 
 Khóa chính logic là `(incident_id, event_at)`; các cập nhật cùng incident tại cùng thời điểm được gộp thành một snapshot tất định. Bảng append-only để giữ trạng thái theo thời gian; truy vấn tại `as_of_time` chỉ đọc `available_at <= as_of_time` và đúng `episode_id`, rồi chọn snapshot mới nhất theo `event_at` cho mỗi `incident_id`. `parent_incident_id` tham chiếu ID ổn định trong cùng episode, không tham chiếu một phiên bản snapshot cụ thể. Bảng không chứa quyết định gốc hay thay đổi chúng; P4 cung cấp quyết định qua interface của monitoring.
+
+### Báo cáo evaluator P3.4 (private)
+
+Evaluator ghi JSON tại `reports/p3_4_detection_recall.json` tương đối với thư mục private DB. Công thức và cách diễn giải metric thuộc [evaluation.md](evaluation.md); bảng dưới đây định nghĩa riêng cấu trúc báo cáo.
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `schema_version` | `INTEGER` | Phiên bản cấu trúc JSON. |
+| `as_of_time` | `TEXT` UTC | Cutoff dùng để lọc snapshot incident theo `available_at`. |
+| `matching_scope` | `TEXT` | Tên phạm vi matcher được dùng. |
+| `deferred_to_round2` | `TEXT[]` JSON | Phần matcher chưa triển khai trong vòng 1. |
+| `feature_mapping` | `OBJECT` JSON | Mapping tường minh từ feature monitoring sang feature truth. |
+| `detection_recall` | `OBJECT` JSON | Tổng số sự cố cần can thiệp được phát hiện. |
+| `by_scenario` | `OBJECT[]` JSON | Số đếm theo cặp `cause`/`template`; `recall` là NULL khi mẫu số bằng 0. |
+| `truth_counts` | `OBJECT` JSON | Tổng số truth, truth cần can thiệp và truth benign trong episode đã chọn. |
+| `incident_counts` | `OBJECT` JSON | Tổng số incident đã xét, matched, unmatched và matched với truth benign. |
+| `unmatched_incident_ids` | `TEXT[]` JSON | Incident unmatched; không được xem là benign. |
+| `benign_incident_ids` | `TEXT[]` JSON | Incident khớp ít nhất một truth benign. |
+| `incident_matches` | `OBJECT[]` JSON | Trạng thái và các truth ID được ghép cho từng incident. Vòng 1 chỉ có `matched`/`unmatched`. |
+
+Các object con có cấu trúc cố định: `detection_recall` gồm `detected`, `denominator`, `recall` (`REAL NULL`) và `missed_truth_ids`; mỗi phần tử `by_scenario` gồm `cause`, `template`, `detected`, `denominator`, `missed_truth_ids`, `recall` (`REAL NULL`) và `benign_truth_count`; `truth_counts` gồm `total`, `requires_intervention`, `benign`; `incident_counts` gồm `evaluated`, `matched`, `unmatched`, `benign_matched`; mỗi phần tử `incident_matches` gồm `incident_id`, `episode_id`, `feature`, `segment`, `incident_start_at`, `incident_end_at`, `status`, `matched_truth_ids`. `incident_start_at`/`incident_end_at` là mốc `available_at` sớm nhất/muộn nhất của các snapshot có thêm alert ID vào `alert_ids_json`; snapshot quyết định không mở rộng khoảng này. Timestamp dùng UTC; các mảng ID giữ thứ tự tất định.
