@@ -1,6 +1,6 @@
 # P2 — Sub-plan triển khai fraud model
 
-> Trạng thái: **P2.1 round1-done (Vòng 1 đã bàn giao); P2.2 round1-done (Vòng 1 đã bàn giao); P2.3–P2.5 chưa triển khai**. Hợp đồng model: [model.md](model.md); dữ liệu và snapshot nhãn: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P2; không chép hợp đồng.
+> Trạng thái: **P2.1 round1-done (Vòng 1 đã bàn giao); P2.2 round1-done (Vòng 1 đã bàn giao); P2.3 round1-done (Vòng 1 đã bàn giao); P2.4–P2.5 chưa triển khai**. Hợp đồng model: [model.md](model.md); dữ liệu và snapshot nhãn: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P2; không chép hợp đồng.
 > Format task, trạng thái và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md).
 
 ## Thứ tự hai vòng
@@ -9,7 +9,7 @@
 |---|---|---|
 | P2.1 Đọc operational data + audit split | ✅ round1-done | — |
 | P2.2 Feature as-of | Tối thiểu: vài feature tần suất/số tiền theo cửa sổ | Đủ feature, gồm phía người nhận |
-| P2.3 Model + calibration | LightGBM + isotonic | Logistic regression baseline, tuning trên validation |
+| P2.3 Model + calibration | ✅ round1-done — LightGBM + isotonic | Logistic regression baseline, tuning trên validation |
 | P2.4 Conformal giao dịch | Đầy đủ (Mondrian trên score thô) | — |
 | P2.5 Đánh giá + `model_scores` | Xuất `model_scores` cho smoke; PR-AUC, coverage theo lớp | Observed-label vs oracle, trước/sau drift, reliability diagram |
 
@@ -39,11 +39,12 @@ data/<run>/model/   model artifact, model_scores, reports/  (không đưa vào g
 - **Ma trận vòng 1:** fit/validation/calibration có số dòng khớp split; test cờ cửa sổ, nguồn dữ liệu và tính tất định xanh.
 - **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
-### P2.3 — Model và calibration (`todo`)
+### P2.3 — Model và calibration (`round1-done`, Vòng 1 đã bàn giao)
 - **Mục tiêu:** LightGBM tất định trên tập fit; early stopping trên validation; isotonic trên tháng 10.
 - **Phụ thuộc:** P2.2.
 - **Kiểm tra:** cùng seed → cùng score; isotonic fit chỉ trên calibration; reliability diagram KHÔNG tính trên tháng 10.
 - **Hoàn tất:** model artifact + metadata (`model_version`, `label_policy_version`, seed).
+- **Trạng thái:** round1-done — Vòng 1 đã bàn giao.
 
 ### P2.4 — Conformal giao dịch (`todo`)
 - **Mục tiêu:** Mondrian conformal trên **score thô**, ba vùng legit / fraud / review.
