@@ -51,6 +51,8 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Hoàn tất:** CLI `python -m triage run` cho smoke.
 - **Trạng thái:** vòng 1 hoàn tất 27/10/2026. CLI tiêu thụ `daily_metrics` và `alerts` đã có trong operational DB, chạy incident grouping tăng dần theo snapshot; acceptance, replay và validate đạt.
 
+- **Backlog P4.3 (không chặn, [findings r2](../review/findings/P4.3-r2.md)):** test replay ở `tests/test_simulator_cli.py:285` ghi đè `before` sau lần chạy lại.
+
 ### P4.4 — Agent một bước
 - **Mục tiêu:** incident rule không xử lý được → một lượt agent gọi một `run_sql` (không UQ), đề xuất nguyên nhân/hành động; gate quyết định.
 - **Phụ thuộc:** P4.3. Chia hai phần để chạy song song: **P4.4a** (client LLM + tool `run_sql`, chỉ phụ thuộc P3.5/P1.2) làm trước song song với P4.1–P4.3; **P4.4b** (vòng agent nối gate) sau P4.3.
