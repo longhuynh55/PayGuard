@@ -291,9 +291,6 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     assert "P4 triage completed" in first.stdout
 
     with sqlite3.connect(database) as connection:
-        before = connection.execute(
-            "SELECT * FROM decisions ORDER BY decision_id"
-        ).fetchall()
         pipeline = connection.execute(
             "SELECT decision_id FROM decisions WHERE action='data_ticket' "
             "AND cause='data_pipeline' AND source='rule'"

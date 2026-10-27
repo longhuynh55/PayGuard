@@ -207,6 +207,19 @@ def test_result_byte_limit_returns_structured_error(p1_2_store) -> None:
     assert result.error and result.error.code == "sql_result_too_large"
 
 
+def test_blob_result_returns_structured_error_and_keeps_sql_trace(p1_2_store) -> None:
+    blob_result = _run(p1_2_store, "SELECT x'41' AS value", question="Return a binary value")
+    hex_result = _run(p1_2_store, "SELECT hex(x'41') AS value", question="Return a hex value")
+
+    assert not blob_result.ok
+    assert blob_result.error and blob_result.error.code == "sql_unsupported_type"
+    assert blob_result.rows == []
+    assert blob_result.trace.sql == "SELECT x'41' AS value"
+    assert blob_result.trace.llm is not None
+    assert hex_result.ok
+    assert hex_result.rows == [{"value": "41"}]
+
+
 def test_duplicate_aliases_never_overwrite_an_existing_alias(p1_2_store) -> None:
     result = _run(
         p1_2_store,
