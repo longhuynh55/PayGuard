@@ -55,6 +55,19 @@ class DecisionSchemaError(ValueError):
     """Raised when a decision row does not match the operational contract."""
 
 
+def normalize_decision_real_columns(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize SQLite REAL decision values before hashing or persistence."""
+
+    normalized = dict(row)
+    for field_name in ("close_score", "cost_usd"):
+        value = normalized.get(field_name)
+        if value is not None and not isinstance(value, bool) and isinstance(
+            value, (int, float)
+        ):
+            normalized[field_name] = float(value)
+    return normalized
+
+
 def _utc_timestamp(value: Any, field_name: str) -> datetime:
     if not isinstance(value, str):
         raise DecisionSchemaError(f"{field_name} must be a UTC timestamp")
@@ -104,7 +117,9 @@ def validate_decision_row(row: Mapping[str, Any]) -> dict[str, Any]:
             f"decision row columns do not match schema (missing={missing}, extra={extra})"
         )
 
-    copied = {column: row[column] for column in DECISION_COLUMNS}
+    copied = normalize_decision_real_columns(
+        {column: row[column] for column in DECISION_COLUMNS}
+    )
     for field_name in (
         "decision_id",
         "incident_id",

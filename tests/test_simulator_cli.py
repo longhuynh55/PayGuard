@@ -272,6 +272,11 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     first_result = run_triage(run_dir)
     assert first_result["decision_rows_total"] > 0
 
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT * FROM decisions ORDER BY decision_id"
+        ).fetchall()
+
     first = _module_cli("triage", "run", "--run", str(run_dir))
     assert first.returncode == 0, first.stdout + first.stderr
     assert "P4 triage completed" in first.stdout

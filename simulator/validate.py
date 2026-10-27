@@ -31,6 +31,7 @@ from simulator.schema import (
     T0_UTC_TEXT,
 )
 from simulator.storage import StorageError, utc_timestamp
+from triage.decisions import normalize_decision_real_columns
 
 
 RUN_METADATA_KEY = "p1.8.run_metadata.v1"
@@ -1031,7 +1032,9 @@ def _validate_decisions(operational: sqlite3.Connection) -> str:
             )
         identity = {
             "schema_version": 1,
-            "decision": {key: row[key] for key in decision_columns if key != "decision_id"},
+            "decision": normalize_decision_real_columns(
+                {key: row[key] for key in decision_columns if key != "decision_id"}
+            ),
         }
         expected_id = "decision-" + _canonical_json_hash(identity)[:24]
         if decision_id != expected_id:

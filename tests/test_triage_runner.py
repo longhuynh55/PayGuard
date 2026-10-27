@@ -11,6 +11,7 @@ from monitoring.incidents import OperationalDecisionSource, compute_incidents
 from monitoring.store import persist_monitoring_rows
 from simulator.asof import read_as_of
 from simulator.storage import create_export_stores, insert_operational_record
+from simulator.validate import _validate_decisions
 from triage.decisions import persist_decisions
 from triage.gate import GateConfig, evaluate_gate
 
@@ -174,6 +175,61 @@ def test_decision_effect_is_delayed_one_snapshot_and_later_alert_is_child(tmp_pa
         assert all(row["incident_id"] != children[0]["incident_id"] for row in day_0_incidents)
         day_1_latest = _latest(next_result)
         assert day_1_latest[parent_id]["status"] != "open"
+    finally:
+        stores.close()
+
+
+def test_zero_cost_decision_id_is_stable_after_sqlite_real_storage(tmp_path) -> None:
+    stores = create_export_stores(tmp_path / "stores")
+    try:
+        operational = stores.operational
+        insert_operational_record(
+            operational, "episodes", {"episode_id": "ep-a", "role": "development"}
+        )
+        assert persist_monitoring_rows(
+            operational, "daily_metrics", [_metric(DAY_0)]
+        ) == 1
+        alert = _alert("alert-a", DAY_0)
+        assert persist_monitoring_rows(operational, "alerts", [alert]) == 1
+        incident_rows = compute_incidents([alert], episode_id="ep-a").incidents
+        incident = next(row for row in incident_rows if row["available_at"] == DAY_0)
+        assert persist_monitoring_rows(operational, "incidents", [incident]) == 1
+
+        proposal = {
+            "cause": "other",
+            "runbook": None,
+            "action": "human_review",
+            "checklist_results": {},
+            "reason": "agent_not_configured",
+        }
+        config = GateConfig(policy_version="test-v1", close_enabled={})
+        zero_integer = evaluate_gate(
+            incident,
+            proposal,
+            source="agent",
+            expected_episode_id="ep-a",
+            as_of_time=DAY_0,
+            config=config,
+            usage={"cost_usd": 0},
+        )
+        zero_float = evaluate_gate(
+            incident,
+            proposal,
+            source="agent",
+            expected_episode_id="ep-a",
+            as_of_time=DAY_0,
+            config=config,
+            usage={"cost_usd": 0.0},
+        )
+
+        assert zero_integer == zero_float
+        assert zero_integer["cost_usd"] == 0.0
+        assert type(zero_integer["cost_usd"]) is float
+        assert persist_decisions(operational, (zero_integer,)) == 1
+        assert persist_decisions(operational, (zero_float,)) == 0
+        assert _validate_decisions(operational) == (
+            "1 decisions have neutral IDs, same-episode UTC as-of fields, and no truth columns"
+        )
     finally:
         stores.close()
 
