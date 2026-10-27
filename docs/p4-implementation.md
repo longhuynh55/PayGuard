@@ -62,6 +62,8 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Kiểm tra:** truth của quyết định = sự cố có `effect_available_at <= decision_at` và giao phạm vi; `close` không bao giờ đạt routing; mẫu số 0 → NA; unmatched không thành benign. Triage KHÔNG import evaluator.
 - **Hoàn tất:** bảng kết quả smoke (dù còn xấu) trong thư mục private.
 
+- **Backlog P4.5 (không chặn, [findings r1](../review/findings/P4.5-r1.md)):** thêm test riêng cho `effect_available_at <= decision_at < intervention_start_at` và hai biên intervention/deadline.
+
 ### P4.6 — Đo token trên 3 case
 - **Mục tiêu:** chạy agent một bước với LLM thật trên 3 incident cố định, ghi token và chi phí.
 - **Phụ thuộc:** P4.4. **Cần người dùng:** API key và trần chi phí tạm (MASTER mục 5).
