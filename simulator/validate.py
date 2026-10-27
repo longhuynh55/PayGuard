@@ -968,6 +968,7 @@ def _validate_decisions(operational: sqlite3.Connection) -> str:
         "reason",
         "close_score",
         "policy_version",
+        "model_slug",
         "input_tokens",
         "output_tokens",
         "total_tokens",

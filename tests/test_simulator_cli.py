@@ -315,6 +315,109 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     assert "PASS decision_output_contract" in validated.stdout
 
 
+def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
+    tmp_path: Path,
+    valid_smoke_run: Path,
+) -> None:
+    run_dir = tmp_path / "p4-fake-agent-smoke"
+    shutil.copytree(valid_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+
+    from monitoring.metrics import compute_daily_metrics
+    from monitoring.signals import compute_alerts
+    from monitoring.store import persist_monitoring_rows
+    from simulator.config import load_episode_config, load_simulator_config
+
+    simulator_config = load_simulator_config()
+    episode_config = load_episode_config()
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        episode_ids = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
+            )
+        )
+        metrics = compute_daily_metrics(
+            connection,
+            simulator_config=simulator_config,
+            episode_config=episode_config,
+            episode_ids=episode_ids,
+        )
+        persist_monitoring_rows(connection, "daily_metrics", metrics)
+        cutoff = max(row["as_of_time"] for row in metrics)
+        for episode_id in episode_ids:
+            episode_metrics = [
+                row for row in metrics if row["episode_id"] == episode_id
+            ]
+            alerts = compute_alerts(
+                episode_metrics,
+                episode_id=episode_id,
+                as_of_time=cutoff,
+            )
+            persist_monitoring_rows(connection, "alerts", alerts.alerts)
+
+    first = _module_cli(
+        "triage",
+        "run",
+        "--run",
+        str(run_dir),
+        "--agent-provider",
+        "fake",
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT * FROM decisions ORDER BY decision_id"
+        ).fetchall()
+        rule_pipeline = connection.execute(
+            "SELECT COUNT(*) FROM decisions WHERE source='rule' AND action='data_ticket' "
+            "AND cause='data_pipeline'"
+        ).fetchone()[0]
+        agent_rows = connection.execute(
+            "SELECT episode_id, tool_trace_ids_json, input_tokens, output_tokens, total_tokens, "
+            "cost_usd, model_slug, action FROM decisions WHERE source='agent' "
+            "ORDER BY episode_id"
+        ).fetchall()
+
+    assert rule_pipeline == 2
+    assert len(agent_rows) >= 3
+    assert {row[0] for row in agent_rows} == {"ep-0001", "ep-0003", "ep-0005"}
+    for _, trace_ids, input_tokens, output_tokens, total_tokens, cost_usd, model_slug, action in agent_rows:
+        assert len(json.loads(trace_ids)) == 1
+        assert input_tokens > 0 and output_tokens > 0 and total_tokens == input_tokens + output_tokens
+        assert cost_usd > 0
+        assert model_slug == "fake/payguard-p4-round1"
+        assert action == "human_review"
+
+    replay = _module_cli(
+        "triage",
+        "run",
+        "--run",
+        str(run_dir),
+        "--agent-provider",
+        "fake",
+    )
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    with sqlite3.connect(database) as connection:
+        after = connection.execute(
+            "SELECT * FROM decisions ORDER BY decision_id"
+        ).fetchall()
+    assert after == before
+
+    evaluated = _module_cli("evaluation", "decisions", "--run", str(run_dir))
+    assert evaluated.returncode == 0, evaluated.stdout + evaluated.stderr
+    report_path = run_dir / "private" / "reports" / "p4_5_decisions.json"
+    assert report_path.is_file()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["decision_counts"]["total"] == len(before)
+
+    validated = _cli("validate", "--run", str(run_dir))
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+    assert "PASS decision_output_contract" in validated.stdout
+
+
 @pytest.mark.parametrize("violation", ["available_at_differs", "cross_episode_alert"])
 def test_validate_rejects_corrupt_monitoring_alerts(
     tmp_path: Path,

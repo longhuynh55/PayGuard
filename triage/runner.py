@@ -93,9 +93,41 @@ def _proposal_for_incident(
     )
     # Evidence is code-owned. A proposal may choose cause/action, but cannot
     # replace the operational checklist or supply evidence_status.
+    agent_checklists = proposal.pop("_agent_checklist_results", {})
+    if isinstance(agent_checklists, Mapping):
+        checklists = {
+            **checklists,
+            **{
+                name: result
+                for name, result in agent_checklists.items()
+                if isinstance(name, str) and isinstance(result, Mapping)
+            },
+        }
     proposal["checklist_results"] = checklists
     proposal.pop("evidence_status", None)
     return "agent", proposal
+
+
+def _decision_already_recorded(
+    operational: sqlite3.Connection,
+    incident: Mapping[str, Any],
+    *,
+    as_of_time: str,
+    policy_version: str,
+    model_slug: str | None,
+) -> bool:
+    """Avoid repeating an already persisted call for the same policy and model."""
+    return operational.execute(
+        "SELECT 1 FROM decisions WHERE incident_id = ? AND episode_id = ? "
+        "AND as_of_time = ? AND policy_version = ? AND model_slug IS ? LIMIT 1",
+        (
+            incident.get("incident_id"),
+            incident.get("episode_id"),
+            as_of_time,
+            policy_version,
+            model_slug,
+        ),
+    ).fetchone() is not None
 
 
 def run_triage(
@@ -213,6 +245,19 @@ def run_triage(
                     and row["available_at"] == as_of_time
                 ]
                 for incident in current_open:
+                    provider_model_slug = getattr(provider, "model_slug", None)
+                    if provider_model_slug is not None and not isinstance(
+                        provider_model_slug, str
+                    ):
+                        provider_model_slug = None
+                    if _decision_already_recorded(
+                        operational,
+                        incident,
+                        as_of_time=as_of_time,
+                        policy_version=gate_config.policy_version,
+                        model_slug=provider_model_slug,
+                    ):
+                        continue
                     source, proposal = _proposal_for_incident(
                         operational,
                         incident,
@@ -221,6 +266,21 @@ def run_triage(
                         triage_config=triage_config,
                         agent_provider=provider,
                     )
+                    tool_error = proposal.pop("_tool_error", False)
+                    tool_error_reason = proposal.pop("_tool_error_reason", None)
+                    usage = proposal.pop("_usage", None)
+                    model_slug = proposal.pop("_model_slug", provider_model_slug)
+                    if not isinstance(tool_error, bool):
+                        tool_error = True
+                        tool_error_reason = "Agent returned an invalid tool-error status."
+                    if usage is not None and not isinstance(usage, Mapping):
+                        tool_error = True
+                        tool_error_reason = "Agent returned invalid LLM usage metadata."
+                        usage = None
+                    if model_slug is not None and not isinstance(model_slug, str):
+                        tool_error = True
+                        tool_error_reason = "Agent returned an invalid model slug."
+                        model_slug = None
                     decision = evaluate_gate(
                         incident,
                         proposal,
@@ -228,6 +288,10 @@ def run_triage(
                         expected_episode_id=episode_id,
                         as_of_time=as_of_time,
                         config=gate_config,
+                        tool_error=tool_error,
+                        tool_error_reason=tool_error_reason,
+                        usage=usage,
+                        model_slug=model_slug,
                     )
                     decisions_inserted += persist_decisions(operational, (decision,))
 

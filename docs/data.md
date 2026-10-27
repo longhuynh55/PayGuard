@@ -308,6 +308,7 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 | `reason` | `TEXT` | Không | Lý do cho action sau gate, gồm lý do chờ nếu action là `recheck`. |
 | `close_score` | `REAL` | Có | Score agent do code cung cấp, trong `[0, 1]`; NULL nếu không có score. Rule không ghi score. |
 | `policy_version` | `TEXT` | Không | Phiên bản policy dùng cho lần gate. |
+| `model_slug` | `TEXT` | Có | Canonical slug của model agent đã cấu hình cho lượt điều tra; NULL với rule hoặc khi agent không cấu hình. |
 | `input_tokens` | `INTEGER` | Có | Token đầu vào nếu có; không âm. |
 | `output_tokens` | `INTEGER` | Có | Token đầu ra nếu có; không âm. |
 | `total_tokens` | `INTEGER` | Có | Tổng token nếu có; không âm. |

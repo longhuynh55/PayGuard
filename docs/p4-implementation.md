@@ -1,6 +1,6 @@
 # P4 — Sub-plan triển khai triage (rule, gate, agent)
 
-> Trạng thái: **người dùng duyệt 26/10/2026; vòng 1 đang triển khai**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
+> Trạng thái: **người dùng duyệt 26/10/2026; P4.4b và nối DB cho P4.5 vòng 1 đã bàn giao 28/10; P4.6 còn lại**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
 > Format task và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md). Mốc ★ và ngân sách LLM: [MASTER_PLAN.md](../MASTER_PLAN.md) mục 3 và 5.
 
 ## Thứ tự hai vòng
@@ -12,8 +12,8 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 | P4.1 `decisions` + gate — vòng 1 hoàn tất ✅ | Schema `decisions`, gate phân nhánh theo hành động, `evidence_status` do code tính | Recheck tối đa 2 lần cách 1 ngày; xung đột nhiều rule |
 | P4.2 Rule — vòng 1 hoàn tất ✅ | `unit_or_null_change` → `data_ticket`; checklist operational đúng episode và đúng `available_at` của snapshot incident; fixture từng nhánh và smoke đều đạt | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
-| P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a vòng 1 đã bàn giao** (client LLM + tool `run_sql`). | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
-| P4.5 Evaluator cho `decisions` — vòng 1 đã bàn giao ✅ | Timely routing recall, unsafe truth rate, chấm theo `decision_at` qua interface trong bộ nhớ; báo cáo private | Utility, baseline, bootstrap theo episode (P5) |
+| P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a và P4.4b vòng 1 đã bàn giao**. | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
+| P4.5 Evaluator cho `decisions` — vòng 1 đã bàn giao ✅ | Timely routing recall, unsafe truth rate, chấm theo `decision_at`; CLI đọc decisions từ DB operational read-only; báo cáo private | Utility, baseline, bootstrap theo episode (P5) |
 | P4.6 Đo token | 3 incident cố định, ghi token/chi phí thật vào MASTER mục 5 | Khóa trần USD → số episode |
 
 ## Bố trí file dự kiến
@@ -60,12 +60,14 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Kiểm tra:** tool chỉ có kết nối read-only tới DB operational qua as-of, không nhìn thấy đường dẫn hay bảng private; agent không được `close` ở vòng 1; LLM sai format/tool lỗi/hết ngân sách → `human_review`. Test dùng LLM giả lập tất định; gọi API thật chỉ ở P4.6.
 - **Hoàn tất:** trace tool có ID trong `tool_trace_ids`; token/chi phí ghi vào `decisions`.
 - **P4.4a vòng 1 đã bàn giao (review r2 PASS, 27/10):** client OpenRouter + `run_sql` read-only as-of, test offline. Backlog vòng 2 (không chặn): kết quả BLOB bị báo `snapshot_error` và mất SQL trong trace ([findings r2](../review/findings/P4.4a-r2.md)).
+- **P4.4b vòng 1 đã bàn giao (28/10):** agent gọi một `run_sql` rồi một proposal JSON; CLI mặc định `UnconfiguredAgent`, lựa chọn `fake` tất định, OpenRouter chỉ khi chọn rõ `--agent-provider openrouter`. Gate giữ `agent_close_disabled`, trace/usage/model slug được ghi vào decisions. Smoke có 2 `data_pipeline` qua rule và các incident còn lại qua fake agent; replay ổn định, P4.5 tạo báo cáo private.
 
 ### P4.5 — Evaluator cho `decisions`
 - **Mục tiêu:** chấm `decisions` theo [evaluation.md](evaluation.md) mục 3–4: timely routing recall, unsafe truth rate, dangerous closure rate.
 - **Phụ thuộc:** P4.3, P3.4.
 - **Kiểm tra:** truth của quyết định = sự cố có `effect_available_at <= decision_at` và giao phạm vi; `close` không bao giờ đạt routing; mẫu số 0 → NA; unmatched không thành benign. Triage KHÔNG import evaluator.
 - **Hoàn tất:** bảng kết quả smoke (dù còn xấu) trong thư mục private.
+- **Nối DB vòng 1 đã bàn giao (28/10):** `python -m evaluation decisions --run <run-dir>` mở DB operational read-only, dùng các episode operational và ghi report dưới private.
 
 - **Backlog P4.5 (không chặn, [findings r1](../review/findings/P4.5-r1.md)):** thêm test riêng cho `effect_available_at <= decision_at < intervention_start_at` và hai biên intervention/deadline.
 
@@ -82,7 +84,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 
 ## Nghiệm thu P4 vòng 1
 - [x] Gate đúng từng nhánh của [triage.md](triage.md) mục 2; `evidence_status` do code tính.
-- [ ] Một rule + agent một bước chạy end-to-end trên smoke; không tool nào đọc được truth.
-- [ ] Evaluator chấm `decisions` theo `decision_at`; bảng kết quả ★.
+- [x] Một rule + agent một bước chạy end-to-end trên smoke; không tool nào đọc được truth.
+- [x] Evaluator chấm `decisions` theo `decision_at`; bảng kết quả smoke được ghi private.
 - [ ] Token thật của 3 case ghi vào MASTER mục 5.
-- [ ] Test runtime xanh.
+- [x] Test runtime xanh.
