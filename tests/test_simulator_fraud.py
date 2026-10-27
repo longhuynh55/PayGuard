@@ -389,16 +389,21 @@ def test_fraud_metadata_is_private_and_operational_schema_has_no_truth(tmp_path:
         "daily_metrics",
         "alerts",
         "incidents",
+        "decisions",
     }
     assert set(generated["schema"]) == expected_schema
     forbidden = ("truth", "mechanism", "cause", "accepted_actions", "generator", "seed", "injector")
     for table, columns in generated["schema"].items():
         assert not any(part in table.lower() for part in forbidden)
+        table_forbidden = forbidden if table != "decisions" else (
+            "truth", "mechanism", "accepted_actions", "generator", "seed", "injector"
+        )
         assert not any(
             part in column.lower()
             for column in columns
-            for part in forbidden
+            for part in table_forbidden
         )
+    assert "cause" in generated["schema"]["decisions"]
 
     operational_values = [
         value

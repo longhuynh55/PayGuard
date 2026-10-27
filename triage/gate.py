@@ -10,7 +10,11 @@ import json
 import math
 from typing import Any
 
-from triage.decisions import CHECKLIST_RESULT_STATUSES, validate_decision_row
+from triage.decisions import (
+    CHECKLIST_RESULT_STATUSES,
+    normalize_decision_real_columns,
+    validate_decision_row,
+)
 
 
 _INCIDENT_FIELDS = frozenset(
@@ -719,6 +723,8 @@ def evaluate_gate(
         "episode_id": episode_id,
         "decision_at": normalized_as_of,
         "as_of_time": normalized_as_of,
+        "event_at": normalized_as_of,
+        "available_at": normalized_as_of,
         "source": source,
         "runbook": runbook,
         "cause": cause,
@@ -733,6 +739,7 @@ def evaluate_gate(
         "policy_version": policy.policy_version,
         **usage_fields,
     }
+    decision_payload = normalize_decision_real_columns(decision_payload)
     identity = {"schema_version": 1, "decision": decision_payload}
     decision_id = "decision-" + hashlib.sha256(
         _canonical_json(identity).encode("utf-8")

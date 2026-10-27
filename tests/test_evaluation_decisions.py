@@ -94,6 +94,8 @@ def _decision(
         "episode_id": EPISODE_ID,
         "decision_at": decision_at,
         "as_of_time": decision_at,
+        "event_at": decision_at,
+        "available_at": decision_at,
         "source": "rule",
         "runbook": "unit_or_null_change",
         "cause": "data_pipeline",

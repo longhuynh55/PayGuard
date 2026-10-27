@@ -209,9 +209,68 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         CHECK (parent_incident_id IS NULL OR parent_incident_id <> incident_id)
     )
     """,
+    f"""
+    CREATE TABLE IF NOT EXISTS decisions (
+        decision_id TEXT NOT NULL PRIMARY KEY CHECK (
+            decision_id GLOB 'decision-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+            || '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+            || '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+            || '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+        ),
+        incident_id TEXT NOT NULL CHECK (length(incident_id) > 0),
+        episode_id TEXT NOT NULL REFERENCES episodes(episode_id) CHECK (episode_id <> 'base'),
+        decision_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='decision_at')}),
+        as_of_time TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='as_of_time')}),
+        event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
+        available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        source TEXT NOT NULL CHECK (source IN ('rule', 'agent')),
+        runbook TEXT NULL,
+        cause TEXT NOT NULL CHECK (length(cause) > 0),
+        evidence_status TEXT NOT NULL CHECK (
+            evidence_status IN ('sufficient', 'insufficient', 'conflicting')
+        ),
+        action TEXT NOT NULL CHECK (
+            action IN ('close', 'recheck', 'data_ticket', 'fraud_ops', 'human_review')
+        ),
+        scope_json TEXT NOT NULL CHECK (
+            json_valid(scope_json) AND json_type(scope_json) = 'object'
+        ),
+        checklist_results_json TEXT NOT NULL CHECK (
+            json_valid(checklist_results_json)
+            AND json_type(checklist_results_json) = 'object'
+        ),
+        tool_trace_ids_json TEXT NOT NULL CHECK (
+            json_valid(tool_trace_ids_json) AND json_type(tool_trace_ids_json) = 'array'
+        ),
+        conclusion TEXT NOT NULL CHECK (length(conclusion) > 0),
+        reason TEXT NOT NULL CHECK (length(reason) > 0),
+        close_score REAL NULL CHECK (
+            close_score IS NULL OR (close_score >= 0.0 AND close_score <= 1.0)
+        ),
+        policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
+        input_tokens INTEGER NULL CHECK (
+            input_tokens IS NULL OR (typeof(input_tokens) = 'integer' AND input_tokens >= 0)
+        ),
+        output_tokens INTEGER NULL CHECK (
+            output_tokens IS NULL OR (typeof(output_tokens) = 'integer' AND output_tokens >= 0)
+        ),
+        total_tokens INTEGER NULL CHECK (
+            total_tokens IS NULL OR (typeof(total_tokens) = 'integer' AND total_tokens >= 0)
+        ),
+        cost_usd REAL NULL CHECK (
+            cost_usd IS NULL OR (
+                typeof(cost_usd) IN ('integer', 'real') AND cost_usd >= 0.0
+            )
+        ),
+        CHECK (decision_at = as_of_time),
+        CHECK (event_at = decision_at),
+        CHECK (available_at = decision_at)
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS daily_metrics_episode_asof ON daily_metrics (episode_id, event_at, available_at)",
     "CREATE INDEX IF NOT EXISTS alerts_episode_asof ON alerts (episode_id, event_at, available_at)",
     "CREATE INDEX IF NOT EXISTS incidents_episode_asof ON incidents (episode_id, event_at, available_at)",
+    "CREATE INDEX IF NOT EXISTS decisions_episode_asof ON decisions (episode_id, event_at, available_at)",
     """
     CREATE INDEX IF NOT EXISTS model_scores_episode_asof
     ON model_scores (episode_id, event_at, available_at)
@@ -235,7 +294,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
             SELECT RAISE(ABORT, '{table} is append-only');
         END
         """
-        for table in ("daily_metrics", "alerts", "incidents")
+        for table in ("daily_metrics", "alerts", "incidents", "decisions")
     ),
     *(
         f"""
@@ -259,6 +318,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
                 "AND metric = NEW.metric AND feature = NEW.feature AND segment = NEW.segment)",
             ),
             ("incidents", "incident_id = NEW.incident_id AND event_at = NEW.event_at"),
+            ("decisions", "decision_id = NEW.decision_id"),
         )
     ),
     *(
@@ -269,7 +329,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
             SELECT RAISE(ABORT, '{table} is append-only');
         END
         """
-        for table in ("daily_metrics", "alerts", "incidents")
+        for table in ("daily_metrics", "alerts", "incidents", "decisions")
     ),
     """
     CREATE TRIGGER IF NOT EXISTS incidents_parent_episode_insert
@@ -522,6 +582,7 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "daily_metrics",
         "alerts",
         "incidents",
+        "decisions",
     }
 )
 AS_OF_TABLES: frozenset[str] = frozenset(
@@ -536,6 +597,7 @@ AS_OF_TABLES: frozenset[str] = frozenset(
         "daily_metrics",
         "alerts",
         "incidents",
+        "decisions",
     }
 )
 PRIVATE_TABLES: frozenset[str] = frozenset(
@@ -555,6 +617,7 @@ OPERATIONAL_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "daily_metrics": frozenset({"as_of_time", "event_at", "available_at"}),
     "alerts": frozenset({"as_of_time", "event_at", "available_at"}),
     "incidents": frozenset({"opened_at", "event_at", "available_at"}),
+    "decisions": frozenset({"decision_at", "as_of_time", "event_at", "available_at"}),
 }
 PRIVATE_TIMESTAMP_COLUMNS: dict[str, frozenset[str]] = {
     "incident_truth": frozenset(

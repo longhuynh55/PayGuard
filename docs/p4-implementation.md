@@ -46,7 +46,10 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Mục tiêu:** chạy gate theo ngày nghiệp vụ trên incident đọc qua `read_as_of`; quyết định ghi vào `decisions` và quay lại monitoring qua `DecisionSource` để tạo incident con đúng [monitoring.md](monitoring.md) mục 2.
 - **Phụ thuộc:** P4.1, P4.2.
 - **Kiểm tra:** tại t gate chỉ thấy incident/alert có `available_at <= t`; quyết định cuối không mở lại incident; chạy lại → `decisions` y hệt.
+- **Độ trễ snapshot đã chốt:** ngày `d`, monitoring ghi snapshot incident đang mở tại `as_of_time(d)`, gate đọc snapshot đó qua `read_as_of`, rồi mới ghi decision với `decision_at = available_at = as_of_time(d)`. Vì monitoring ngày `d` chạy trước gate, `DecisionSource` chỉ áp decision này ở lần monitoring kế tiếp (snapshot ngày nghiệp vụ `d+1`); incident chuyển trạng thái tại snapshot `d+1`, và alert từ snapshot đó trở đi có thể tạo incident con.
+- **Mặc định agent:** incident không khớp runbook được chuyển qua interface agent; tới khi P4.4b nối agent, fallback là `human_review` với lý do `agent_not_configured`. `evidence_status` vẫn do gate tính từ checklist/tool output.
 - **Hoàn tất:** CLI `python -m triage run` cho smoke.
+- **Trạng thái:** vòng 1 hoàn tất 27/10/2026. CLI tiêu thụ `daily_metrics` và `alerts` đã có trong operational DB, chạy incident grouping tăng dần theo snapshot; acceptance, replay và validate đạt.
 
 ### P4.4 — Agent một bước
 - **Mục tiêu:** incident rule không xử lý được → một lượt agent gọi một `run_sql` (không UQ), đề xuất nguyên nhân/hành động; gate quyết định.

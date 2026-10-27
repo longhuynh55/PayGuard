@@ -270,15 +270,20 @@ def test_operational_catalog_has_no_truth_or_generator_columns(p1_2_store) -> No
         "daily_metrics",
         "alerts",
         "incidents",
+        "decisions",
     }
     forbidden_parts = ("truth", "mechanism", "cause", "accepted_actions", "generator", "seed", "injector")
     for table, columns in schema.items():
         assert not any(part in table.lower() for part in forbidden_parts)
+        table_forbidden = forbidden_parts if table != "decisions" else (
+            "truth", "mechanism", "accepted_actions", "generator", "seed", "injector"
+        )
         assert not any(
             part in column.lower()
             for column in columns
-            for part in forbidden_parts
+            for part in table_forbidden
         )
+    assert "cause" in schema["decisions"]
     assert "incident_truth" not in schema
     assert "incident_truth" in {
         row[0]

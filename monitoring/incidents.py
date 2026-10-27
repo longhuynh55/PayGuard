@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 import csv
 import hashlib
 import io
 import json
 import math
 from pathlib import Path
+import sqlite3
 from typing import Any, Protocol, TextIO
+from zoneinfo import ZoneInfo
 
 from monitoring.signals import ALERT_COLUMNS
+from simulator.asof import read_as_of
 from simulator.storage import utc_timestamp
 
 
@@ -61,6 +64,56 @@ class InMemoryDecisionSource:
             for row in self.decisions
             if row.get("episode_id") in (None, episode_id)
         )
+
+
+@dataclass(frozen=True)
+class OperationalDecisionSource:
+    """Read P4 decisions as-of and apply them at the next Vietnam daily snapshot.
+
+    The monitoring job for a business day runs before triage writes its decision.
+    A decision at the day's cutoff therefore changes the incident at the next
+    daily cutoff, while remaining immutable in the operational decisions table.
+    """
+
+    operational: sqlite3.Connection
+    t0: str
+    as_of_time: str
+
+    def decisions_for_episode(self, episode_id: str) -> tuple[dict[str, Any], ...]:
+        cutoff, normalized_cutoff = _parse_timestamp(
+            self.as_of_time, field_name="decision source as_of_time"
+        )
+        visible = read_as_of(
+            self.operational,
+            "decisions",
+            episode_id=episode_id,
+            t0=self.t0,
+            as_of_time=normalized_cutoff,
+        )
+        rows: list[dict[str, Any]] = []
+        for source_row in visible:
+            row = dict(source_row)
+            effective_at = _next_business_snapshot(row["available_at"])
+            effective_dt, _ = _parse_timestamp(
+                effective_at, field_name="decision effective_at"
+            )
+            if effective_dt <= cutoff:
+                # The monitoring reducer consumes the effective incident event time.
+                # The stored decision_at remains unchanged in the operational table.
+                row["decision_at"] = effective_at
+                rows.append(row)
+        return tuple(rows)
+
+
+def _next_business_snapshot(value: str) -> str:
+    available_at, _ = _parse_timestamp(value, field_name="decision available_at")
+    zone = ZoneInfo("Asia/Ho_Chi_Minh")
+    local = available_at.astimezone(zone)
+    snapshot_date = local.date()
+    if local.timetz().replace(tzinfo=None) >= time.max:
+        snapshot_date += timedelta(days=1)
+    next_snapshot = datetime.combine(snapshot_date, time.max, tzinfo=zone)
+    return utc_timestamp(next_snapshot)
 
 
 @dataclass(frozen=True)

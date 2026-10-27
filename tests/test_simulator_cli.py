@@ -218,6 +218,103 @@ def test_validate_accepts_populated_monitoring_tables(p3_monitoring_smoke_run: P
     assert "FAIL" not in validated.stdout
 
 
+def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
+    tmp_path: Path, valid_smoke_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "p4-smoke"
+    shutil.copytree(valid_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+
+    from monitoring.metrics import compute_daily_metrics
+    from monitoring.signals import compute_alerts
+    from monitoring.store import persist_monitoring_rows
+    from simulator.config import load_episode_config, load_simulator_config
+
+    simulator_config = load_simulator_config()
+    episode_config = load_episode_config()
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        episode_ids = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
+            )
+        )
+        metrics = compute_daily_metrics(
+            connection,
+            simulator_config=simulator_config,
+            episode_config=episode_config,
+            episode_ids=episode_ids,
+        )
+        persist_monitoring_rows(connection, "daily_metrics", metrics)
+        cutoff = max(row["as_of_time"] for row in metrics)
+        for episode_id in episode_ids:
+            episode_metrics = [
+                row for row in metrics if row["episode_id"] == episode_id
+            ]
+            alerts = compute_alerts(
+                episode_metrics,
+                episode_id=episode_id,
+                as_of_time=cutoff,
+            )
+            persist_monitoring_rows(connection, "alerts", alerts.alerts)
+
+    def forbidden_episode_loader(*args, **kwargs):
+        raise AssertionError("triage must not load configs/episodes.yaml")
+
+    import monitoring.metrics as monitoring_metrics_module
+    import simulator.config as simulator_config_module
+    from triage.runner import run_triage
+
+    monkeypatch.setattr(simulator_config_module, "load_episode_config", forbidden_episode_loader)
+    monkeypatch.setattr(monitoring_metrics_module, "load_episode_config", forbidden_episode_loader)
+    first_result = run_triage(run_dir)
+    assert first_result["decision_rows_total"] > 0
+
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT * FROM decisions ORDER BY decision_id"
+        ).fetchall()
+
+    first = _module_cli("triage", "run", "--run", str(run_dir))
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "P4 triage completed" in first.stdout
+
+    with sqlite3.connect(database) as connection:
+        before = connection.execute(
+            "SELECT * FROM decisions ORDER BY decision_id"
+        ).fetchall()
+        pipeline = connection.execute(
+            "SELECT decision_id FROM decisions WHERE action='data_ticket' "
+            "AND cause='data_pipeline' AND source='rule'"
+        ).fetchall()
+        agent_reviews = connection.execute(
+            "SELECT reason, evidence_status FROM decisions "
+            "WHERE action='human_review' AND source='agent'"
+        ).fetchall()
+        decision_columns = {
+            row[1] for row in connection.execute('PRAGMA table_info("decisions")')
+        }
+    assert len(pipeline) == 2
+    assert agent_reviews
+    assert all("agent_not_configured" in reason for reason, _ in agent_reviews)
+    assert all(status in {"sufficient", "insufficient", "conflicting"} for _, status in agent_reviews)
+    assert not decision_columns.intersection(
+        {"truth", "incident_truth", "mechanism", "template", "seed", "accepted_actions_json"}
+    )
+
+    with sqlite3.connect(database) as connection:
+        after = connection.execute(
+            "SELECT * FROM decisions ORDER BY decision_id"
+        ).fetchall()
+    assert after == before
+
+    validated = _cli("validate", "--run", str(run_dir))
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+    assert "PASS decision_output_contract" in validated.stdout
+
+
 @pytest.mark.parametrize("violation", ["available_at_differs", "cross_episode_alert"])
 def test_validate_rejects_corrupt_monitoring_alerts(
     tmp_path: Path,

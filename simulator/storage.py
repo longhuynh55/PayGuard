@@ -182,6 +182,8 @@ def _insert(
         "conformal_set",
         "flags",
         "alert_ids_json",
+        "checklist_results_json",
+        "tool_trace_ids_json",
     }
     for key in keys:
         value = record[key]
