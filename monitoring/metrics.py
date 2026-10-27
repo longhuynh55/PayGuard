@@ -18,7 +18,7 @@ import yaml
 
 from model.features import ScoreFeatureMatrix, build_score_feature_matrix
 from simulator.asof import read_as_of
-from simulator.config import EpisodeConfig, SimulatorConfig, load_episode_config, load_simulator_config
+from simulator.config import SimulatorConfig, load_simulator_config
 from simulator.storage import utc_timestamp
 
 
@@ -373,20 +373,18 @@ def compute_daily_metrics(
     operational: sqlite3.Connection,
     *,
     simulator_config: SimulatorConfig | None = None,
-    episode_config: EpisodeConfig | None = None,
     simulator_config_path: str | Path = "configs/simulator.yaml",
-    episode_config_path: str | Path = "configs/episodes.yaml",
     monitoring_config_path: str | Path = "configs/monitoring.yaml",
     episode_ids: tuple[str, ...] | list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the 30-day daily metric table without reading outside ``read_as_of``.
+    """Build the configured daily metric table without reading outside ``read_as_of``.
 
     PSI uses the fixed base reference. The model review rate is a raw window
     proportion because P2.5 stores ``model_scores`` for post-T0 episodes only.
     """
     monitoring_config = _load_monitoring_config(monitoring_config_path)
     simulator_config = simulator_config or load_simulator_config(simulator_config_path)
-    episode_config = episode_config or load_episode_config(episode_config_path)
+    duration_days = simulator_config.episode.duration_days.value
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     t0_date = simulator_config.timeline.t0_business_date.value
     if monitoring_config.reference_as_of_date != t0_date:
@@ -447,7 +445,7 @@ def compute_daily_metrics(
         reference_target_ids = [str(row["txn_id"]) for row in available_reference_targets]
 
         last_business_date = t0_date + timedelta(
-            days=episode_config.protocol.duration_days.value - 1
+            days=duration_days - 1
         )
         last_as_of = _daily_as_of(last_business_date, timezone)
         episode_snapshot = read_as_of(
@@ -482,7 +480,7 @@ def compute_daily_metrics(
         )
         episode_feature_rows = _feature_rows_by_txn_id(episode_features)
 
-        for day_offset in range(episode_config.protocol.duration_days.value):
+        for day_offset in range(duration_days):
             business_date = t0_date + timedelta(days=day_offset)
             as_of_time = _daily_as_of(business_date, timezone)
             window_start = business_date - timedelta(days=monitoring_config.window_days - 1)
