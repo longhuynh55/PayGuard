@@ -13,7 +13,7 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 | P4.2 Rule — vòng 1 hoàn tất ✅ | `unit_or_null_change` → `data_ticket`; checklist operational đúng episode và đúng `available_at` của snapshot incident; fixture từng nhánh và smoke đều đạt | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
 | P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a vòng 1 đã bàn giao** (client LLM + tool `run_sql`). | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
-| P4.5 Evaluator cho `decisions` | Timely routing recall, unsafe truth rate, chấm theo `decision_at` trên smoke | Utility, baseline, bootstrap theo episode (P5) |
+| P4.5 Evaluator cho `decisions` — vòng 1 đã bàn giao ✅ | Timely routing recall, unsafe truth rate, chấm theo `decision_at` qua interface trong bộ nhớ; báo cáo private | Utility, baseline, bootstrap theo episode (P5) |
 | P4.6 Đo token | 3 incident cố định, ghi token/chi phí thật vào MASTER mục 5 | Khóa trần USD → số episode |
 
 ## Bố trí file dự kiến

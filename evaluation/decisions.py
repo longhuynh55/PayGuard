@@ -1,0 +1,369 @@
+"""Private-side evaluation for P4 decisions."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from datetime import datetime
+import json
+from pathlib import Path
+from typing import Any
+
+from evaluation.matcher import (
+    EvaluationMatcherError,
+    PrivateEvaluationData,
+    load_private_evaluation_data,
+    match_incidents,
+    normalize_as_of_time,
+)
+from evaluation.recall import EvaluationResult
+from triage.decisions import DecisionSchemaError, validate_decision_row
+
+
+AUTO_ROUTING_ACTIONS = frozenset({"fraud_ops", "data_ticket"})
+HUMAN_ROUTING_ACTION = "human_review"
+ROUTING_ACTIONS = AUTO_ROUTING_ACTIONS | {HUMAN_ROUTING_ACTION}
+
+
+class DecisionEvaluationError(ValueError):
+    """Raised when decisions or selected private truth violate their contracts."""
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def _datetime(value: str, *, field: str) -> datetime:
+    normalized = normalize_as_of_time(value)
+    try:
+        return datetime.fromisoformat(normalized[:-1] + "+00:00")
+    except ValueError as exc:  # normalize_as_of_time normally catches this first.
+        raise DecisionEvaluationError(f"{field} is not a valid timestamp") from exc
+
+
+def _json_array(value: Any, *, field: str, truth_id: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise DecisionEvaluationError(
+                f"{field} must be valid JSON for truth {truth_id!r}"
+            ) from exc
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise DecisionEvaluationError(
+            f"{field} must be an array of non-empty strings for truth {truth_id!r}"
+        )
+    return tuple(value)
+
+
+def _validated_decisions(
+    decisions: Iterable[Mapping[str, Any]], *, episode_ids: tuple[str, ...]
+) -> tuple[dict[str, Any], ...]:
+    selected_episode_ids = set(episode_ids)
+    seen_decision_ids: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for index, source in enumerate(decisions):
+        try:
+            row = validate_decision_row(source)
+        except DecisionSchemaError as exc:
+            raise DecisionEvaluationError(f"invalid decision row {index}: {exc}") from exc
+        decision_id = row["decision_id"]
+        if decision_id in seen_decision_ids:
+            raise DecisionEvaluationError(f"duplicate decision_id: {decision_id!r}")
+        seen_decision_ids.add(decision_id)
+        if row["episode_id"] not in selected_episode_ids:
+            raise DecisionEvaluationError(
+                f"decision {decision_id!r} is outside the selected episode set"
+            )
+
+        decision_at = normalize_as_of_time(row["decision_at"])
+        scope = json.loads(row["scope_json"])
+        scope_end = scope["end_at"]
+        if scope_end is not None and normalize_as_of_time(scope_end) != decision_at:
+            raise DecisionEvaluationError(
+                f"decision {decision_id!r} scope end_at must equal decision_at"
+            )
+        scope_start = scope["start_at"]
+        if scope_start is not None and scope_end is not None:
+            if _datetime(scope_start, field="scope_json.start_at") > _datetime(
+                scope_end, field="scope_json.end_at"
+            ):
+                raise DecisionEvaluationError(
+                    f"decision {decision_id!r} scope start_at is after end_at"
+                )
+        row["decision_at"] = decision_at
+        normalized.append(row)
+
+    return tuple(
+        sorted(
+            normalized,
+            key=lambda row: (row["episode_id"], row["decision_at"], row["decision_id"]),
+        )
+    )
+
+
+def _scope_snapshots(decision: Mapping[str, Any]) -> tuple[dict[str, Any], ...] | None:
+    """Represent the decision's explicit scope interval for the P3 matcher."""
+    scope = json.loads(decision["scope_json"])
+    feature = scope["feature"]
+    segment = scope["segment"]
+    start_at = scope["start_at"]
+    end_at = scope["end_at"]
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (feature, segment, start_at, end_at)
+    ):
+        return None
+
+    common = {
+        "incident_id": f"decision-scope:{decision['decision_id']}",
+        "episode_id": decision["episode_id"],
+        "feature": feature,
+        "segment": segment,
+        "opened_at": start_at,
+    }
+    if start_at == end_at:
+        return (
+            {
+                **common,
+                "event_at": start_at,
+                "available_at": start_at,
+                "alert_ids_json": '["scope-point"]',
+            },
+        )
+    return (
+        {
+            **common,
+            "event_at": start_at,
+            "available_at": start_at,
+            "alert_ids_json": '["scope-start"]',
+        },
+        {
+            **common,
+            "event_at": end_at,
+            "available_at": end_at,
+            "alert_ids_json": '["scope-start", "scope-end"]',
+        },
+    )
+
+
+def _match_decisions(
+    decisions: tuple[dict[str, Any], ...],
+    *,
+    context: PrivateEvaluationData,
+) -> tuple[dict[str, Any], ...]:
+    truth_by_episode: dict[str, tuple[dict[str, Any], ...]] = {
+        episode_id: tuple(
+            truth for truth in context.truth_rows if truth["episode_id"] == episode_id
+        )
+        for episode_id in context.episode_ids
+    }
+    matches: list[dict[str, Any]] = []
+    for decision in decisions:
+        match_record: dict[str, Any] = {
+            "decision_id": decision["decision_id"],
+            "incident_id": decision["incident_id"],
+            "episode_id": decision["episode_id"],
+            "decision_at": decision["decision_at"],
+            "status": "unmatched",
+            "matched_truth_ids": [],
+        }
+        snapshots = _scope_snapshots(decision)
+        if snapshots is not None:
+            try:
+                match = match_incidents(
+                    snapshots,
+                    truth_by_episode[decision["episode_id"]],
+                    episode_ids=context.episode_ids,
+                    episode_end_at=context.episode_end_at,
+                    as_of_time=decision["decision_at"],
+                )[0]
+            except EvaluationMatcherError as exc:
+                raise DecisionEvaluationError(
+                    f"could not match decision {decision['decision_id']!r}: {exc}"
+                ) from exc
+            match_record["status"] = match["status"]
+            match_record["matched_truth_ids"] = sorted(match["matched_truth_ids"])
+        matches.append(match_record)
+    return tuple(matches)
+
+
+def _build_report(
+    *,
+    decisions: tuple[dict[str, Any], ...],
+    matches: tuple[dict[str, Any], ...],
+    truth_rows: tuple[dict[str, Any], ...],
+    episode_ids: tuple[str, ...],
+) -> dict[str, Any]:
+    truth_by_id = {str(row["incident_truth_id"]): row for row in truth_rows}
+    required_truth_ids = {
+        str(row["incident_truth_id"])
+        for row in truth_rows
+        if row["requires_intervention"] == 1
+    }
+    matched_by_decision = {match["decision_id"]: match for match in matches}
+
+    timely_truth_ids: set[str] = set()
+    auto_routed_truth_ids: set[str] = set()
+    human_review_truth_ids: set[str] = set()
+    unsafe_truth_ids: set[str] = set()
+    triaged_incident_ids: set[str] = set()
+    dangerous_incident_ids: set[str] = set()
+    unmatched_closures: list[str] = []
+    ambiguous_closures: list[str] = []
+
+    for decision in decisions:
+        match = matched_by_decision[decision["decision_id"]]
+        action = decision["action"]
+        if action == "close" and match["status"] == "unmatched":
+            unmatched_closures.append(decision["decision_id"])
+        elif action == "close" and match["status"] == "ambiguous_match":
+            ambiguous_closures.append(decision["decision_id"])
+
+        if match["status"] != "matched":
+            continue
+
+        decision_at = _datetime(decision["decision_at"], field="decision_at")
+        for truth_id in match["matched_truth_ids"]:
+            truth = truth_by_id[truth_id]
+            if truth["requires_intervention"] != 1:
+                continue
+            incident_id = str(decision["incident_id"])
+            triaged_incident_ids.add(incident_id)
+            if action == "close":
+                unsafe_truth_ids.add(truth_id)
+                dangerous_incident_ids.add(incident_id)
+
+            truth_start = _datetime(
+                truth["intervention_start_at"],
+                field=f"truth {truth_id!r} intervention_start_at",
+            )
+            truth_deadline = _datetime(
+                truth["deadline_at"], field=f"truth {truth_id!r} deadline_at"
+            )
+            if truth_deadline < truth_start:
+                raise DecisionEvaluationError(
+                    f"truth {truth_id!r} deadline_at precedes intervention_start_at"
+                )
+            accepted_actions = set(
+                _json_array(
+                    truth["accepted_actions_json"],
+                    field="accepted_actions_json",
+                    truth_id=truth_id,
+                )
+            )
+            timely = (
+                action in ROUTING_ACTIONS
+                and action in accepted_actions
+                and truth_start <= decision_at <= truth_deadline
+            )
+            if not timely:
+                continue
+            timely_truth_ids.add(truth_id)
+            if action in AUTO_ROUTING_ACTIONS:
+                auto_routed_truth_ids.add(truth_id)
+            elif action == HUMAN_ROUTING_ACTION:
+                human_review_truth_ids.add(truth_id)
+
+    lower_bound_observed = bool(unmatched_closures or ambiguous_closures)
+    matched_count = sum(match["status"] == "matched" for match in matches)
+    unmatched_count = sum(match["status"] == "unmatched" for match in matches)
+    ambiguous_count = sum(match["status"] == "ambiguous_match" for match in matches)
+
+    def routing_bucket(routed_ids: set[str]) -> dict[str, Any]:
+        return {
+            "routed": len(routed_ids),
+            "denominator": len(required_truth_ids),
+            "recall": _ratio(len(routed_ids), len(required_truth_ids)),
+            "truth_ids": sorted(routed_ids),
+        }
+
+    return {
+        "schema_version": 1,
+        "matching_scope": "decision_scope_effect_available_at",
+        "episode_ids": list(episode_ids),
+        "decision_counts": {
+            "total": len(decisions),
+            "matched": matched_count,
+            "unmatched": unmatched_count,
+            "ambiguous": ambiguous_count,
+            "close": sum(decision["action"] == "close" for decision in decisions),
+            "unmatched_closures": len(unmatched_closures),
+            "ambiguous_closures": len(ambiguous_closures),
+            "unmatched_closure_decision_ids": sorted(unmatched_closures),
+            "ambiguous_closure_decision_ids": sorted(ambiguous_closures),
+        },
+        "truth_counts": {
+            "total": len(truth_rows),
+            "requires_intervention": len(required_truth_ids),
+            "benign": len(truth_rows) - len(required_truth_ids),
+        },
+        "timely_routing_recall": {
+            **routing_bucket(timely_truth_ids),
+            "missing_truth_ids": sorted(required_truth_ids - timely_truth_ids),
+            "automatic_routing": routing_bucket(auto_routed_truth_ids),
+            "human_review": routing_bucket(human_review_truth_ids),
+        },
+        "unsafe_truth_rate": {
+            "unsafe": len(unsafe_truth_ids),
+            "denominator": len(required_truth_ids),
+            "rate": _ratio(len(unsafe_truth_ids), len(required_truth_ids)),
+            "unsafe_truth_ids": sorted(unsafe_truth_ids),
+            "lower_bound_observed": lower_bound_observed,
+            "basis": "observed_lower_bound" if lower_bound_observed else "matched_truth_only",
+        },
+        "dangerous_closure_rate": {
+            "dangerous_closures": len(dangerous_incident_ids),
+            "denominator": len(triaged_incident_ids),
+            "rate": _ratio(len(dangerous_incident_ids), len(triaged_incident_ids)),
+            "dangerous_incident_ids": sorted(dangerous_incident_ids),
+            "triaged_incident_ids": sorted(triaged_incident_ids),
+        },
+        "decision_matches": [
+            {
+                **match,
+                "matched_truth_ids": sorted(match["matched_truth_ids"]),
+            }
+            for match in matches
+        ],
+    }
+
+
+def evaluate_decisions(
+    decisions: Iterable[Mapping[str, Any]],
+    *,
+    private_db_path: str | Path,
+    episode_ids: Iterable[str],
+) -> EvaluationResult:
+    """Score in-memory operational decisions and write a private-side report.
+
+    Decisions are supplied by the caller; only the evaluator opens the private
+    database, through the same read-only truth loader used by P3.4.
+    """
+    context = load_private_evaluation_data(
+        private_db_path,
+        episode_ids=episode_ids,
+    )
+    normalized_decisions = _validated_decisions(
+        decisions,
+        episode_ids=context.episode_ids,
+    )
+    matches = _match_decisions(normalized_decisions, context=context)
+    report = _build_report(
+        decisions=normalized_decisions,
+        matches=matches,
+        truth_rows=context.truth_rows,
+        episode_ids=context.episode_ids,
+    )
+
+    private_root = Path(private_db_path).expanduser().resolve().parent
+    report_path = private_root / "reports" / "p4_5_decisions.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+        + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+    return EvaluationResult(report=report, report_path=report_path)
