@@ -89,3 +89,7 @@ Mỗi lần gate chạy (kể cả recheck) ghi một dòng: `decision_id`, `inc
 ## 7. Xong khi
 
 Có kiểm tra cho đóng benign, routing pipeline không cần benign/score, routing fraud có bằng chứng, xung đột bắt buộc chuyển người, thiếu bằng chứng/tool lỗi/hết ngân sách/recheck; chạy hết episode trong trần chi phí. Báo lỗi rule/agent và các ca ngoài runbook benign riêng.
+
+## 8. Trace `run_sql` P4.4a
+
+Mỗi lần gọi `run_sql` trả `tool_trace_id` tất định và trace tạm thời gồm SQL đã sinh (NULL nếu chưa có), số dòng trả về, cờ cắt ở giới hạn dòng, fingerprint snapshot as-of, lỗi có cấu trúc hoặc NULL, và record LLM. Record LLM có model trả về, canonical slug, provider, prompt/completion/reasoning tokens, chi phí USD, độ trễ và cache key theo mục 5. ID trace được dẫn xuất từ câu hỏi, episode, `as_of_time`, fingerprint snapshot và cache key; cùng đầu vào tạo cùng ID. Trace không chứa API key, đường dẫn DB hoặc dữ liệu từ bảng private.

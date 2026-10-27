@@ -12,7 +12,7 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 | P4.1 `decisions` + gate — vòng 1 hoàn tất ✅ | Schema `decisions`, gate phân nhánh theo hành động, `evidence_status` do code tính | Recheck tối đa 2 lần cách 1 ngày; xung đột nhiều rule |
 | P4.2 Rule — vòng 1 hoàn tất ✅ | `unit_or_null_change` → `data_ticket`; checklist operational đúng episode và đúng `available_at` của snapshot incident; fixture từng nhánh và smoke đều đạt | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
-| P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`) | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
+| P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a vòng 1 đã bàn giao** (client LLM + tool `run_sql`). | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
 | P4.5 Evaluator cho `decisions` | Timely routing recall, unsafe truth rate, chấm theo `decision_at` trên smoke | Utility, baseline, bootstrap theo episode (P5) |
 | P4.6 Đo token | 3 incident cố định, ghi token/chi phí thật vào MASTER mục 5 | Khóa trần USD → số episode |
 
@@ -53,6 +53,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **P4.4a:** `triage/llm.py` — client OpenRouter đọc `OPENROUTER_API_KEY` từ môi trường/`.env`, model và sampling (gồm cấu hình reasoning) từ `configs/llm.yaml` (file riêng để không đụng `configs/triage.yaml` của P4.1), ghi canonical slug + token + chi phí + độ trễ cho mỗi lần gọi, kiểm tra JSON, lỗi/rỗng/hết token/hết ngân sách → kết quả lỗi có cấu trúc (không ném ra ngoài), trần chi phí cộng dồn; client giả lập tất định cho test. `triage/tools.py` — `run_sql(question)` sinh 1 SQL qua client, chỉ chạy SELECT trên kết nối SQLite read-only tới DB operational, chỉ thấy view as-of của đúng episode tại `as_of_time` (dựng từ `read_as_of`), không thấy bảng/đường dẫn private; giới hạn số dòng và thời gian chạy; mỗi lần gọi có `tool_trace_id`.
 - **Kiểm tra:** tool chỉ có kết nối read-only tới DB operational qua as-of, không nhìn thấy đường dẫn hay bảng private; agent không được `close` ở vòng 1; LLM sai format/tool lỗi/hết ngân sách → `human_review`. Test dùng LLM giả lập tất định; gọi API thật chỉ ở P4.6.
 - **Hoàn tất:** trace tool có ID trong `tool_trace_ids`; token/chi phí ghi vào `decisions`.
+- **P4.4a vòng 1 đã bàn giao (review r2 PASS, 27/10):** client OpenRouter + `run_sql` read-only as-of, test offline. Backlog vòng 2 (không chặn): kết quả BLOB bị báo `snapshot_error` và mất SQL trong trace ([findings r2](../review/findings/P4.4a-r2.md)).
 
 ### P4.5 — Evaluator cho `decisions`
 - **Mục tiêu:** chấm `decisions` theo [evaluation.md](evaluation.md) mục 3–4: timely routing recall, unsafe truth rate, dangerous closure rate.

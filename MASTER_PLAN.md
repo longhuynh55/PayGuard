@@ -40,7 +40,7 @@
 | P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1 vòng 1 hoàn tất: P1.1–P1.2, P1.3–P1.8 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3, P1.4, P1.6, P1.7 và P1.8 vòng 2 chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ✅ P3 vòng 1 hoàn tất: P3.1–P3.4 và P3.5 `round1-done` (Vòng 1 đã bàn giao; chi tiết P3.4 và P3.5 tại [sub-plan](docs/p3-implementation.md)); phần vòng 2 chưa triển khai |
-| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1 và P4.2 vòng 1 hoàn tất ✅; P4.4a đang làm song song; P4.3, P4.4b–P4.6 còn lại |
+| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1, P4.4a vòng 1 hoàn tất ✅; P4.2 đang sửa sau review r1; P4.3, P4.4b–P4.6 còn lại |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
@@ -104,6 +104,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 27/10/2026 | Người dùng chốt runbook `unit_or_null_change`: tỉ số trung vị sau ÷ trước dùng dải log ×/÷2 quanh {100, 1/100, 1000} thay ± 5% (± 5% không đạt được với cỡ mẫu ngày nhỏ; xem [triage](docs/triage.md) mục 3). Tạo policy version mới |
 | 26/10/2026 | Người dùng chốt LLM agent: Qwen 3.7 Flash qua OpenRouter (`qwen/qwen3.7-flash`, API key trong `.env`, không commit); thay DeepSeek V4 Flash. Rule P4 vòng 1 `unit_or_null_change` (planner và GPT-6.1-sol cùng đề xuất). `decision_at = as_of_time` |
 | 26/10/2026 | Làm rõ cửa sổ incident P3.3: mốc 2 ngày tính từ alert gần nhất; alert sau quyết định cuối chỉ tạo incident con trong 2 ngày, xa hơn là incident độc lập. Cập nhật kiểm chứng protocol và triển khai vòng 1. |
 | 25/10/2026 | Claude tự điều phối theo docs/orchestration.md: goal P1→P2→P3 (vòng 1 cả ba tới ★, rồi vòng 2), chạy liên tục; tự merge khi review PASS + test xanh; dừng hỏi người dùng theo bảng ranh giới |
