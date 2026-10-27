@@ -59,12 +59,13 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Hoàn tất:** smoke P1→P3 ghi 3 bảng vào DB operational; test as-of + tái lập; cập nhật Trạng thái MASTER.
 - **Vòng 1 đã bàn giao:** DDL và `read_as_of` allowlist có đủ ba bảng; CLI `metrics`, `signals`, `incidents` lưu snapshot operational và vẫn xuất CSV. Metric giữ nguyên phép tính, thêm `event_at`/`available_at = as_of_time`; ghi lặp cùng khóa chỉ chấp nhận payload giống hệt. Smoke `simulator generate` → P2 train/score → ba CLI monitoring → `simulator validate` đạt khi `model_scores`, `daily_metrics`, `alerts`, `incidents` đã có dữ liệu. Validator đối chiếu schema/khóa/FK, as-of theo episode, quan hệ alert-metric-incident, timestamp snapshot, ID băm trung tính và ranh giới truth; test làm lệch `available_at` hoặc chuyển alert sang episode khác đều bị từ chối. Test P3.4 giữ nguyên recall smoke **2/2 = 1.0**.
 
-### P3.6 — Tách tham số vận hành khỏi cấu hình injector (người dùng duyệt 27/10)
+### P3.6 — Tách tham số vận hành khỏi cấu hình injector (`round1-done` — Vòng 1 đã bàn giao)
 - **Mục tiêu:** monitoring (và mọi module ngoài simulator/evaluator) KHÔNG nạp `configs/episodes.yaml`, vì file này chứa mapping episode → template của injector (private theo [data.md](data.md)). Phát hiện ở review P4.3 r1: `monitoring/metrics.py` nạp file này chỉ để lấy `duration_days`.
 - **Phụ thuộc:** P3.1, P4.3 (runner triage đã bỏ đường đọc này).
 - **Phạm vi:** lấy độ dài episode (30 ngày, cố định theo hợp đồng MVP) từ một nguồn công khai — ví dụ cấu hình công khai không chứa template/seed/mapping, hoặc dữ liệu operational đọc qua `read_as_of`; simulator vẫn kiểm tra hai nguồn khớp nhau. KHÔNG đổi phép tính metric, ngưỡng, quy tắc gộp incident; KHÔNG đổi giá trị 30 ngày.
 - **Kiểm tra:** test chặn loader `configs/episodes.yaml` (patch để raise) mà monitoring metrics/signals/incidents và `python -m triage run` vẫn chạy trên smoke; output metric/alert/incident smoke giống hệt trước khi sửa; `simulator validate` đạt.
 - **Hoàn tất:** test + cập nhật Trạng thái MASTER.
+- **Vòng 1 đã bàn giao:** `monitoring` lấy `episode.duration_days` từ cấu hình công khai có provenance trong [`configs/simulator.yaml`](../configs/simulator.yaml); simulator kiểm tra khóa này khớp `protocol.duration_days`. Monitoring không còn nhận hay nạp `configs/episodes.yaml`. Đối chiếu theo từng dòng trên smoke: `daily_metrics`, `alerts` và `incidents` giữ nguyên.
 
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.

@@ -697,7 +697,6 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(tmp_p
         metrics = compute_daily_metrics(
             store.operational,
             simulator_config=simulator_config,
-            episode_config=episode_config,
             episode_ids=episode_ids,
         )
         persist_monitoring_rows(store.operational, "daily_metrics", metrics)

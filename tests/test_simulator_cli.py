@@ -228,10 +228,22 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     from monitoring.metrics import compute_daily_metrics
     from monitoring.signals import compute_alerts
     from monitoring.store import persist_monitoring_rows
-    from simulator.config import load_episode_config, load_simulator_config
+    from simulator.config import load_simulator_config
 
     simulator_config = load_simulator_config()
-    episode_config = load_episode_config()
+    import simulator.config as simulator_config_module
+    import monitoring.metrics as monitoring_metrics_module
+
+    def forbidden_episode_loader(*args, **kwargs):
+        raise AssertionError("monitoring and triage must not load configs/episodes.yaml")
+
+    monkeypatch.setattr(simulator_config_module, "load_episode_config", forbidden_episode_loader)
+    monkeypatch.setattr(
+        monitoring_metrics_module,
+        "load_episode_config",
+        forbidden_episode_loader,
+        raising=False,
+    )
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -244,7 +256,6 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
         metrics = compute_daily_metrics(
             connection,
             simulator_config=simulator_config,
-            episode_config=episode_config,
             episode_ids=episode_ids,
         )
         persist_monitoring_rows(connection, "daily_metrics", metrics)
@@ -259,18 +270,16 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
                 as_of_time=cutoff,
             )
             persist_monitoring_rows(connection, "alerts", alerts.alerts)
+            from monitoring.incidents import compute_incidents
 
-    def forbidden_episode_loader(*args, **kwargs):
-        raise AssertionError("triage must not load configs/episodes.yaml")
+            compute_incidents(alerts.alerts, episode_id=episode_id)
 
-    import monitoring.metrics as monitoring_metrics_module
-    import simulator.config as simulator_config_module
     from triage.runner import run_triage
+    from triage.__main__ import main as triage_main
 
-    monkeypatch.setattr(simulator_config_module, "load_episode_config", forbidden_episode_loader)
-    monkeypatch.setattr(monitoring_metrics_module, "load_episode_config", forbidden_episode_loader)
     first_result = run_triage(run_dir)
     assert first_result["decision_rows_total"] > 0
+    assert triage_main(["run", "--run", str(run_dir)]) == 0
 
     with sqlite3.connect(database) as connection:
         before = connection.execute(
