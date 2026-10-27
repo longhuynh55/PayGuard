@@ -11,6 +11,7 @@ from simulator.config import (
     load_episode_config,
     load_simulator_config,
     validate_episode_config,
+    validate_episode_duration_match,
     validate_simulator_config,
 )
 
@@ -29,8 +30,28 @@ def test_checked_in_configs_load_and_validate() -> None:
 
     assert simulator.timeline.storage_timezone.value == "UTC"
     assert simulator.timeline.business_timezone.value == "Asia/Ho_Chi_Minh"
+    assert simulator.episode.duration_days.value == 30
     assert simulator.transactions.minimum_amount.unit == "integer VND"
     assert episodes.protocol.duration_days.value == 30
+    validate_episode_duration_match(simulator, episodes)
+
+
+def test_public_episode_duration_drift_is_rejected_and_protocol_match_is_checked() -> None:
+    simulator_data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    simulator_data["episode"]["duration_days"]["value"] = 29
+
+    with pytest.raises(ConfigValidationError, match="episode duration_days is fixed at 30"):
+        validate_simulator_config(simulator_data)
+
+    simulator = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+    episodes = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    mismatched_duration = simulator.episode.duration_days.model_copy(update={"value": 29})
+    mismatched_episode = simulator.episode.model_copy(
+        update={"duration_days": mismatched_duration}
+    )
+    mismatched_simulator = simulator.model_copy(update={"episode": mismatched_episode})
+    with pytest.raises(ConfigValidationError, match="must match episodes protocol.duration_days"):
+        validate_episode_duration_match(mismatched_simulator, episodes)
 
 
 def test_missing_required_fields_are_reported() -> None:
