@@ -42,6 +42,8 @@ class LLMConfig:
     input_usd_per_million: float
     output_usd_per_million: float
     max_result_rows: int
+    max_result_bytes: int
+    max_sqlite_value_bytes: int
     sql_timeout_seconds: float
 
     @property
@@ -138,6 +140,8 @@ def load_llm_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LLMConfig:
             input_usd_per_million=float(pricing["input_usd_per_million"]),
             output_usd_per_million=float(pricing["output_usd_per_million"]),
             max_result_rows=int(tool["max_result_rows"]),
+            max_result_bytes=int(tool["max_result_bytes"]),
+            max_sqlite_value_bytes=int(tool["max_sqlite_value_bytes"]),
             sql_timeout_seconds=float(tool["sql_timeout_seconds"]),
         )
     except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
@@ -156,6 +160,8 @@ def load_llm_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LLMConfig:
         or config.input_usd_per_million < 0
         or config.output_usd_per_million < 0
         or config.max_result_rows < 1
+        or config.max_result_bytes < 1
+        or config.max_sqlite_value_bytes < 1
         or config.sql_timeout_seconds <= 0
     ):
         raise LLMConfigError("configs/llm.yaml contains out-of-range values")
@@ -302,14 +308,24 @@ class LLMClient:
 
         model = _optional_text(response.get("model"))
         provider = _optional_text(response.get("provider"))
-        if response.get("error"):
+        if response.get("error") is not None:
             record = self._record_from_response(response, cache_key, started)
             self._spent_cost_usd += record.cost_usd
+            if self._spent_cost_usd > self.config.max_total_cost_usd:
+                return LLMResult(
+                    record,
+                    error=LLMError("cost_limit_exceeded", "LLM cost ceiling was exceeded by this call."),
+                )
             return LLMResult(record, error=LLMError("provider_error", "OpenRouter rejected the request."))
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
             record = self._record_from_response(response, cache_key, started)
             self._spent_cost_usd += record.cost_usd
+            if self._spent_cost_usd > self.config.max_total_cost_usd:
+                return LLMResult(
+                    record,
+                    error=LLMError("cost_limit_exceeded", "LLM cost ceiling was exceeded by this call."),
+                )
             return LLMResult(record, error=LLMError("invalid_response", "OpenRouter returned no chat completion."))
 
         choice = choices[0]
@@ -415,6 +431,21 @@ class LLMClient:
             status = int(exc.code)
             retryable = status in {408, 429} or status >= 500
             code = "http_error" if status < 500 else "provider_unavailable"
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                error_payload = None
+            finally:
+                exc.close()
+            if isinstance(error_payload, Mapping):
+                usage = error_payload.get("usage")
+                has_usage = isinstance(usage, Mapping) and any(
+                    key in usage for key in ("prompt_tokens", "completion_tokens", "cost")
+                )
+                if has_usage:
+                    preserved = dict(error_payload)
+                    preserved.setdefault("error", {"message": f"HTTP {status}"})
+                    return preserved
             raise _RequestFailure(code, f"OpenRouter returned HTTP {status}.", retryable=retryable) from None
         except (TimeoutError, urllib.error.URLError) as exc:
             reason = getattr(exc, "reason", None)
@@ -428,8 +459,6 @@ class LLMClient:
             parsed = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise _RequestFailure("invalid_response", "OpenRouter returned invalid JSON.") from None
-        if isinstance(parsed, Mapping) and parsed.get("error"):
-            return {"error": True}
         return parsed
 
 

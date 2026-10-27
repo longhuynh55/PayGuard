@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 from dataclasses import replace
+from unittest.mock import patch
 
 from triage.llm import FakeLLMClient, LLMClient, load_llm_config, resolve_openrouter_api_key
 
@@ -103,6 +106,65 @@ def test_cumulative_cost_ceiling_blocks_over_budget_results_and_later_calls() ->
     assert third.error and third.error.code == "cost_limit_exceeded"
     assert len(client.requests) == 2
     assert client.spent_cost_usd == 1.05
+
+
+def test_http_json_error_preserves_usage_and_applies_cost_ceiling() -> None:
+    error_body = json.dumps(
+        {
+            "error": {"message": "provider error"},
+            "model": "qwen/qwen3.7-flash-20260727",
+            "provider": "Alibaba",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 10, "cost": 0.75},
+        }
+    ).encode("utf-8")
+    client = LLMClient(api_key="offline-dummy-key")
+
+    with patch("urllib.request.urlopen", side_effect=lambda *_args, **_kwargs: io.BytesIO(error_body)) as urlopen:
+        first = _call(client)
+        second = _call(client)
+        third = _call(client)
+
+    assert first.error and first.error.code == "provider_error"
+    assert first.record.model == "qwen/qwen3.7-flash-20260727"
+    assert first.record.provider == "Alibaba"
+    assert first.record.prompt_tokens == 10
+    assert first.record.completion_tokens == 10
+    assert first.record.cost_usd == 0.75
+    assert second.error and second.error.code == "cost_limit_exceeded"
+    assert second.record.cost_usd == 0.75
+    assert client.spent_cost_usd == 1.5
+    assert third.error and third.error.code == "cost_limit_exceeded"
+    assert urlopen.call_count == 2
+
+
+def test_http_error_body_with_usage_is_counted_without_network() -> None:
+    error_body = json.dumps(
+        {
+            "error": {"message": "provider error"},
+            "model": "qwen/qwen3.7-flash-20260727",
+            "provider": "Alibaba",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 10, "cost": 0.75},
+        }
+    ).encode("utf-8")
+
+    def http_error(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/chat/completions",
+            402,
+            "Payment Required",
+            {},
+            io.BytesIO(error_body),
+        )
+
+    client = LLMClient(api_key="offline-dummy-key")
+    with patch("urllib.request.urlopen", side_effect=http_error):
+        result = _call(client)
+
+    assert result.error and result.error.code == "provider_error"
+    assert result.record.model == "qwen/qwen3.7-flash-20260727"
+    assert result.record.provider == "Alibaba"
+    assert result.record.cost_usd == 0.75
+    assert client.spent_cost_usd == 0.75
 
 
 def test_api_key_is_not_in_records_or_logs(caplog, monkeypatch) -> None:

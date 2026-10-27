@@ -43,7 +43,9 @@ pricing:
 
 tool:
   max_result_rows: 1000
+  max_result_bytes: 4194304
+  max_sqlite_value_bytes: 16777216
   sql_timeout_seconds: 2
   provenance:
     kind: assumption
-    reference: Initial bounded read-only SQL defaults for P4.4a, untuned.
+    reference: Initial bounded read-only SQL defaults for P4.4a, untuned; result/value limits also bound generated SQL values.

@@ -169,3 +169,50 @@ def test_sql_execution_time_limit_returns_structured_error(p1_2_store) -> None:
     )
 
     assert result.error and result.error.code == "sql_timeout"
+
+
+def test_single_expensive_sql_function_cannot_escape_deadline(p1_2_store) -> None:
+    from dataclasses import replace
+
+    config = replace(FakeLLMClient().config, sql_timeout_seconds=0.001)
+    result = run_sql(
+        "Return the size of a generated value",
+        "ep-a",
+        AS_OF,
+        operational_db=p1_2_store.operational_path,
+        client=FakeLLMClient(
+            response={"sql": "SELECT length(hex(zeroblob(5000000))) AS n"},
+            config=config,
+        ),
+    )
+
+    assert result.error and result.error.code == "sql_timeout"
+
+
+def test_result_byte_limit_returns_structured_error(p1_2_store) -> None:
+    from dataclasses import replace
+
+    config = replace(FakeLLMClient().config, max_result_bytes=64)
+    result = run_sql(
+        "Return a long value",
+        "ep-a",
+        AS_OF,
+        operational_db=p1_2_store.operational_path,
+        client=FakeLLMClient(
+            response={"sql": "SELECT printf('%0100d', 1) AS value"},
+            config=config,
+        ),
+    )
+
+    assert result.error and result.error.code == "sql_result_too_large"
+
+
+def test_duplicate_aliases_never_overwrite_an_existing_alias(p1_2_store) -> None:
+    result = _run(
+        p1_2_store,
+        "SELECT 1 AS x, 2 AS x, 3 AS x_2",
+        question="Preserve all output columns",
+    )
+
+    assert result.ok
+    assert result.rows == [{"x": 1, "x_3": 2, "x_2": 3}]

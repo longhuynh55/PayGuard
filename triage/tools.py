@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ from simulator.asof import read_as_of
 from simulator.schema import AS_OF_TABLES, OPERATIONAL_TABLES, PRIVATE_TABLES, T0_UTC_TEXT
 from simulator.storage import utc_timestamp
 
-from triage.llm import LLMCallRecord, LLMClient, LLMConfig, LLMError
+from triage.llm import LLMCallRecord, LLMClient, LLMConfig, LLMError, LLMResult
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,14 @@ class ToolResult:
     @property
     def error(self) -> ToolError | None:
         return self.trace.error
+
+
+class _SQLTimeout(Exception):
+    """The configured SQL deadline elapsed while executing or fetching."""
+
+
+class _SQLResultTooLarge(Exception):
+    """The materialized SQL result exceeded its configured byte limit."""
 
 
 def run_sql(
@@ -180,24 +189,66 @@ def run_sql(
 
         _attach_asof_snapshot(connection, schemas, snapshots)
         connection.execute("PRAGMA query_only = ON")
+        connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, tool_config.max_sqlite_value_bytes)
         deadline = time.monotonic() + tool_config.sql_timeout_seconds
-        timed_out = False
+        timeout_event = threading.Event()
 
         def interrupt_after_deadline() -> int:
-            nonlocal timed_out
-            if time.monotonic() >= deadline:
-                timed_out = True
+            if timeout_event.is_set() or time.monotonic() >= deadline:
+                timeout_event.set()
                 return 1
             return 0
 
+        def interrupt_running_query() -> None:
+            timeout_event.set()
+            try:
+                connection.interrupt()
+            except sqlite3.Error:
+                pass
+
+        def check_deadline() -> None:
+            if timeout_event.is_set() or time.monotonic() >= deadline:
+                timeout_event.set()
+                raise _SQLTimeout
+
         connection.set_authorizer(_snapshot_only_authorizer)
-        connection.set_progress_handler(interrupt_after_deadline, 1000)
-        cursor = connection.execute(sql)
-        columns = _unique_column_names(cursor.description or ())
-        fetched = cursor.fetchmany(tool_config.max_result_rows + 1)
-        truncated = len(fetched) > tool_config.max_result_rows
-        limited = fetched[: tool_config.max_result_rows]
-        rows = [dict(zip(columns, tuple(row), strict=True)) for row in limited]
+        connection.set_progress_handler(interrupt_after_deadline, 100)
+        watchdog = threading.Timer(tool_config.sql_timeout_seconds, interrupt_running_query)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            cursor = connection.execute(sql)
+            check_deadline()
+            columns = _unique_column_names(cursor.description or ())
+            rows: list[dict[str, Any]] = []
+            result_bytes = 0
+            truncated = False
+            for index in range(tool_config.max_result_rows + 1):
+                row = cursor.fetchone()
+                check_deadline()
+                if row is None:
+                    break
+                if index == tool_config.max_result_rows:
+                    truncated = True
+                    break
+                materialized_row = dict(zip(columns, tuple(row), strict=True))
+                row_bytes = len(
+                    json.dumps(
+                        materialized_row,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                result_bytes += row_bytes
+                if result_bytes > tool_config.max_result_bytes:
+                    raise _SQLResultTooLarge
+                rows.append(materialized_row)
+                check_deadline()
+        finally:
+            watchdog.cancel()
+            connection.set_progress_handler(None, 0)
+        check_deadline()
         trace = ToolTrace(
             trace_id,
             sql,
@@ -208,28 +259,42 @@ def run_sql(
             llm_result.record,
         )
         return ToolResult(rows, trace)
+    except _SQLTimeout:
+        return _sql_failure(
+            question,
+            episode_id,
+            normalized_as_of,
+            snapshot_hash,
+            locals().get("llm_result"),
+            "sql_timeout",
+            "SQL execution exceeded its time limit.",
+        )
+    except _SQLResultTooLarge:
+        return _sql_failure(
+            question,
+            episode_id,
+            normalized_as_of,
+            snapshot_hash,
+            locals().get("llm_result"),
+            "sql_result_too_large",
+            "SQL result exceeded its size limit.",
+        )
     except sqlite3.Error:
-        code = "sql_timeout" if "timed_out" in locals() and timed_out else "sql_execution_error"
+        timeout_event = locals().get("timeout_event")
+        code = "sql_timeout" if timeout_event is not None and timeout_event.is_set() else "sql_execution_error"
         message = (
             "SQL execution exceeded its time limit."
             if code == "sql_timeout"
             else "SQL could not be executed on the approved snapshot."
         )
-        error = ToolError(code, message)
-        llm_record = locals().get("llm_result")
-        trace_id = _trace_id(
+        return _sql_failure(
             question,
             episode_id,
             normalized_as_of,
-            snapshot_hash or "snapshot_error",
-            llm_record.record.cache_key if llm_record else "no_llm_call",
-        )
-        sql = None
-        if llm_record and llm_record.ok and isinstance(llm_record.value, Mapping):
-            candidate = llm_record.value.get("sql")
-            sql = candidate if isinstance(candidate, str) else None
-        return ToolResult(
-            [], ToolTrace(trace_id, sql, 0, False, snapshot_hash, error, llm_record.record if llm_record else None)
+            snapshot_hash,
+            locals().get("llm_result"),
+            code,
+            message,
         )
     except Exception:
         # Do not return exception text: it can contain filesystem paths or schema details.
@@ -350,14 +415,57 @@ def _snapshot_only_authorizer(
 
 
 def _unique_column_names(description: tuple[Any, ...]) -> list[str]:
-    seen: dict[str, int] = {}
+    raw_names = [str(column[0] or f"column_{index + 1}") for index, column in enumerate(description)]
+    reserved = set(raw_names)
+    used: set[str] = set()
     names: list[str] = []
-    for index, column in enumerate(description):
-        raw = str(column[0] or f"column_{index + 1}")
-        count = seen.get(raw, 0)
-        seen[raw] = count + 1
-        names.append(raw if count == 0 else f"{raw}_{count + 1}")
+    for raw in raw_names:
+        name = raw
+        suffix = 2
+        while name in used:
+            name = f"{raw}_{suffix}"
+            suffix += 1
+            while name in reserved or name in used:
+                name = f"{raw}_{suffix}"
+                suffix += 1
+        used.add(name)
+        names.append(name)
     return names
+
+
+def _sql_failure(
+    question: str,
+    episode_id: str,
+    as_of_time: str,
+    snapshot_hash: str | None,
+    llm_result: LLMResult | None,
+    code: str,
+    message: str,
+) -> ToolResult:
+    cache_key = llm_result.record.cache_key if llm_result is not None else "no_llm_call"
+    trace_id = _trace_id(
+        question,
+        episode_id,
+        as_of_time,
+        snapshot_hash or "snapshot_error",
+        cache_key,
+    )
+    sql = None
+    if llm_result is not None and llm_result.ok and isinstance(llm_result.value, Mapping):
+        candidate = llm_result.value.get("sql")
+        sql = candidate if isinstance(candidate, str) else None
+    return ToolResult(
+        [],
+        ToolTrace(
+            trace_id,
+            sql,
+            0,
+            False,
+            snapshot_hash,
+            ToolError(code, message),
+            llm_result.record if llm_result is not None else None,
+        ),
+    )
 
 
 def _llm_error(error: LLMError | None) -> ToolError:
