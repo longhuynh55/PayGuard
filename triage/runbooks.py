@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from fractions import Fraction
+import json
 import math
 from pathlib import Path
 import sqlite3
@@ -296,7 +298,7 @@ def _daily_amounts(
     customer_segments = {row["customer_id"]: row["segment"] for row in customers}
     grouped: dict[str, dict[date, list[int | None]]] = {}
     for row in transactions:
-        if row["episode_id"] != episode_id:
+        if row["episode_id"] not in {"base", episode_id}:
             continue
         if segment != "all":
             customer_segment = customer_segments.get(row["customer_id"])
@@ -352,9 +354,13 @@ def _compare_transition(
 
     before_null_count = len(before_amounts) - len(before_non_null)
     after_null_count = len(after_amounts) - len(after_non_null)
-    before_null_rate = before_null_count / len(before_amounts)
-    after_null_rate = after_null_count / len(after_amounts)
-    null_rate_change = after_null_rate - before_null_rate
+    before_null_rate_exact = Fraction(before_null_count, len(before_amounts))
+    after_null_rate_exact = Fraction(after_null_count, len(after_amounts))
+    null_rate_change_exact = after_null_rate_exact - before_null_rate_exact
+    null_rate_threshold_exact = Fraction(str(policy.null_rate_increase))
+    before_null_rate = float(before_null_rate_exact)
+    after_null_rate = float(after_null_rate_exact)
+    null_rate_change = float(null_rate_change_exact)
     return {
         "before_start_business_date": min(before_days).isoformat(),
         "before_last_business_date": max(before_days).isoformat(),
@@ -369,11 +375,93 @@ def _compare_transition(
         "before_null_rate": before_null_rate,
         "after_null_rate": after_null_rate,
         "null_rate_increase": null_rate_change,
+        "null_rate_increase_exact": (
+            f"{null_rate_change_exact.numerator}/{null_rate_change_exact.denominator}"
+        ),
         "null_rate_threshold": policy.null_rate_increase,
-        "null_rate_threshold_met": null_rate_change >= policy.null_rate_increase,
+        "null_rate_threshold_met": null_rate_change_exact >= null_rate_threshold_exact,
         "abrupt_change_within_one_day": True,
         "transition_boundary_days": policy.comparison_period_days,
     }
+
+
+def _incident_metric_window(
+    incident: Mapping[str, Any],
+    *,
+    alerts: list[dict[str, Any]],
+    metrics: list[dict[str, Any]],
+) -> tuple[tuple[date, date] | None, dict[str, Any]]:
+    """Resolve the windows of the source metrics referenced by this incident."""
+
+    alert_ids = json.loads(incident["alert_ids_json"])
+    if not isinstance(alert_ids, list) or not alert_ids or any(
+        not isinstance(alert_id, str) or not alert_id.strip() for alert_id in alert_ids
+    ):
+        return None, {"error": "The incident does not contain a valid alert ID list."}
+
+    alerts_by_id = {str(row["alert_id"]): row for row in alerts}
+    metric_windows: list[dict[str, Any]] = []
+    missing_alert_ids: list[str] = []
+    missing_source_alert_ids: list[str] = []
+    invalid_source_alert_ids: list[str] = []
+    for alert_id in alert_ids:
+        alert = alerts_by_id.get(alert_id)
+        if alert is None or alert.get("episode_id") != incident["episode_id"]:
+            missing_alert_ids.append(alert_id)
+            continue
+        source_rows = [
+            row
+            for row in metrics
+            if row.get("episode_id") == incident["episode_id"]
+            and row.get("metric_id") == alert.get("metric")
+            and row.get("as_of_time") == alert.get("as_of_time")
+            and row.get("feature") == alert.get("feature")
+            and row.get("segment") == alert.get("segment")
+        ]
+        if not source_rows:
+            missing_source_alert_ids.append(alert_id)
+            continue
+        source = source_rows[0]
+        try:
+            window_start = date.fromisoformat(source["window_start"])
+            window_end = date.fromisoformat(source["window_end"])
+        except (TypeError, ValueError):
+            invalid_source_alert_ids.append(alert_id)
+            continue
+        if window_start.isoformat() != source["window_start"] or (
+            window_end.isoformat() != source["window_end"] or window_start > window_end
+        ):
+            invalid_source_alert_ids.append(alert_id)
+            continue
+        metric_windows.append(
+            {
+                "alert_id": alert_id,
+                "metric_id": source["metric_id"],
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+            }
+        )
+
+    source_details: dict[str, Any] = {
+        "alert_ids": list(alert_ids),
+        "metric_windows": metric_windows,
+        "missing_alert_ids": missing_alert_ids,
+        "missing_source_alert_ids": missing_source_alert_ids,
+        "invalid_source_alert_ids": invalid_source_alert_ids,
+    }
+    if (
+        missing_alert_ids
+        or missing_source_alert_ids
+        or invalid_source_alert_ids
+        or len(metric_windows) != len(alert_ids)
+    ):
+        return None, source_details
+
+    window_start = min(date.fromisoformat(item["window_start"]) for item in metric_windows)
+    window_end = max(date.fromisoformat(item["window_end"]) for item in metric_windows)
+    source_details["window_start"] = window_start.isoformat()
+    source_details["window_end"] = window_end.isoformat()
+    return (window_start, window_end), source_details
 
 
 def _scope_amount_transactions(
@@ -382,6 +470,8 @@ def _scope_amount_transactions(
     as_of_time: str,
     transactions: list[dict[str, Any]],
     customers: list[dict[str, Any]],
+    alerts: list[dict[str, Any]],
+    metrics: list[dict[str, Any]],
     zone: ZoneInfo,
     policy: _UnitOrNullPolicy,
     t0_date: date,
@@ -403,6 +493,33 @@ def _scope_amount_transactions(
             },
         )
 
+    incident_window, source_window_details = _incident_metric_window(
+        incident, alerts=alerts, metrics=metrics
+    )
+    if incident_window is None:
+        return _result(
+            "pending",
+            reason="The incident alert source metrics do not provide a complete readable observation window.",
+            scope_match=True,
+            window_complete=False,
+            details={
+                "episode_id": incident["episode_id"],
+                "as_of_time": as_of_time,
+                "incident_feature": feature,
+                "incident_segment": segment,
+                "incident_metric_window": source_window_details,
+                "compared_day_pair_count": 0,
+                "evaluation_status": "insufficient",
+                "change_detection": {
+                    "median_ratio": "insufficient",
+                    "null_rate_increase": "insufficient",
+                    "abrupt_change_within_one_day": "insufficient",
+                    "post_change_window": "insufficient",
+                },
+            },
+        )
+    window_start, window_end = incident_window
+
     daily_by_channel = _daily_amounts(
         transactions,
         customers,
@@ -417,6 +534,8 @@ def _scope_amount_transactions(
         observed_days_by_channel[channel] = observed_days
         post_t0_days = [day for day in observed_days if day >= t0_date]
         for after_day in post_t0_days:
+            if not window_start <= after_day <= window_end:
+                continue
             earlier_days = [day for day in observed_days if day < after_day]
             if not earlier_days:
                 continue
@@ -481,6 +600,7 @@ def _scope_amount_transactions(
             "as_of_time": as_of_time,
             "incident_feature": feature,
             "incident_segment": segment,
+            "incident_metric_window": source_window_details,
             "change_detection": checks,
             "matched_transition": change,
             "channel": change["channel"],
@@ -516,6 +636,7 @@ def _scope_amount_transactions(
                 "as_of_time": as_of_time,
                 "incident_feature": feature,
                 "incident_segment": segment,
+                "incident_metric_window": source_window_details,
                 "observed_business_dates_by_channel": {
                     channel: [day.isoformat() for day in days]
                     for channel, days in observed_days_by_channel.items()
@@ -541,6 +662,7 @@ def _scope_amount_transactions(
             "as_of_time": as_of_time,
             "incident_feature": feature,
             "incident_segment": segment,
+            "incident_metric_window": source_window_details,
             "compared_day_pair_count": len(comparisons),
             "comparisons": comparisons,
             "change_detection": {
@@ -764,6 +886,8 @@ def check_unit_or_null_change(
                 as_of_time=as_of,
                 transactions=transactions,
                 customers=customers,
+                alerts=alerts,
+                metrics=metrics,
                 zone=zone,
                 policy=policy,
                 t0_date=t0_date,

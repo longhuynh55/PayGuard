@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,6 +17,7 @@ from simulator.config import load_episode_config, load_simulator_config
 from simulator.episodes import generate_episodes
 from simulator.storage import create_export_stores, insert_operational_record, utc_timestamp
 from triage.gate import GateConfig, evaluate_gate
+from triage import runbooks as runbook_module
 from triage.runbooks import check_unit_or_null_change, load_triage_config
 
 
@@ -44,23 +45,24 @@ def _daily_metric(
     value: float | None = 0.3,
     reference_window: str = "2025-11-01/2026-01-31",
     n_reference: int = 100,
+    window_start: str | None = None,
+    window_end: str | None = None,
 ) -> dict[str, object]:
+    business_date = datetime.fromisoformat(as_of_time.replace("Z", "+00:00"))
+    business_date = business_date.astimezone(_ZONE).date()
     return {
         "metric_id": metric_id,
         "episode_id": episode_id,
         "as_of_time": as_of_time,
         "event_at": as_of_time,
         "available_at": as_of_time,
-        "business_date": datetime.fromisoformat(as_of_time.replace("Z", "+00:00"))
-        .astimezone(_ZONE)
-        .date()
-        .isoformat(),
+        "business_date": business_date.isoformat(),
         "feature": feature,
         "segment": segment,
         "value": value,
         "reference_window": reference_window,
-        "window_start": "2026-01-25",
-        "window_end": "2026-01-31",
+        "window_start": window_start or (business_date - timedelta(days=6)).isoformat(),
+        "window_end": window_end or business_date.isoformat(),
         "n_window": 30,
         "n_reference": n_reference,
         "flags": [],
@@ -114,6 +116,15 @@ def _seed_observations(
     after_amount: int | None = 1_000_000,
     as_of_time: str | None = None,
     after_null_count: int = 0,
+    before_null_count: int = 0,
+    before_count: int = 10,
+    after_count: int = 10,
+    before_day: date = _PRE_DAY,
+    change_day: date = _CHANGE_DAY,
+    before_episode_id: str | None = None,
+    additional_days: tuple[tuple[date, int | None], ...] = (),
+    source_window_start: str | None = None,
+    source_window_end: str | None = None,
     segment: str = "consumer",
     extra_episode_rows: bool = False,
     fraud_metric_id: str | None = None,
@@ -148,15 +159,19 @@ def _seed_observations(
         },
     )
 
-    for day, day_amount, stored_episode in (
-        (_PRE_DAY, before_amount, episode_id),
-        (_CHANGE_DAY, after_amount, episode_id),
-    ):
-        for index in range(10):
+    observations = [
+        (before_day, before_amount, before_episode_id or episode_id, before_count, before_null_count),
+        (change_day, after_amount, episode_id, after_count, after_null_count),
+        *((day, amount, episode_id, 10, 0) for day, amount in additional_days),
+    ]
+    for day, day_amount, stored_episode, sample_count, null_count in observations:
+        for index in range(sample_count):
             amount = day_amount
-            if day == _CHANGE_DAY and index < after_null_count:
+            if index < null_count:
                 amount = None
-            event_at = _local_timestamp(day, 12, index)
+            event_at = utc_timestamp(
+                datetime.combine(day, time(12), tzinfo=_ZONE) + timedelta(minutes=index)
+            )
             insert_operational_record(
                 operational,
                 "transactions",
@@ -173,7 +188,12 @@ def _seed_observations(
                 },
             )
 
-    metric = _daily_metric(episode_id, as_of_time)
+    metric = _daily_metric(
+        episode_id,
+        as_of_time,
+        window_start=source_window_start,
+        window_end=source_window_end,
+    )
     alert = _alert(episode_id, f"alert-{episode_id}", as_of_time)
     insert_operational_record(operational, "daily_metrics", metric)
     insert_operational_record(operational, "alerts", alert)
@@ -189,6 +209,8 @@ def _seed_observations(
         value=0.2,
         reference_window="not_applicable",
         n_reference=0,
+        window_start=source_window_start,
+        window_end=source_window_end,
     )
     insert_operational_record(operational, "daily_metrics", review_metric)
 
@@ -202,6 +224,8 @@ def _seed_observations(
             value=1.0,
             reference_window="not_applicable",
             n_reference=0,
+            window_start=source_window_start,
+            window_end=source_window_end,
         )
         fraud_alert = _alert(
             episode_id,
@@ -278,6 +302,9 @@ def test_median_ratio_targets_route_data_ticket(tmp_path, ratio: float) -> None:
         assert unit["scope_match"] is True
         assert unit["window_complete"] is True
         assert unit["details"]["change_detection"]["median_ratio"]["matched_target"] == ratio
+        incident_window = unit["details"]["incident_metric_window"]
+        after_day = unit["details"]["matched_transition"]["after_start_business_date"]
+        assert incident_window["window_start"] <= after_day <= incident_window["window_end"]
         assert _gate(incident, checks)["action"] == "data_ticket"
     finally:
         store.close()
@@ -326,6 +353,145 @@ def test_null_rate_increase_of_at_least_twenty_percentage_points_passes(tmp_path
         assert result["status"] == "pass"
         assert result["details"]["matched_transition"]["null_rate_increase"] == pytest.approx(0.2)
         assert result["details"]["change_detection"]["null_rate_increase"]["status"] == "pass"
+    finally:
+        store.close()
+
+
+def test_null_rate_exactly_twenty_points_from_nonzero_baseline_passes(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=10_000,
+        before_null_count=1,
+        after_null_count=3,
+    )
+    try:
+        result = check_unit_or_null_change(store.operational, incident)["unit_or_null_change"]
+        transition = result["details"]["matched_transition"]
+        assert result["status"] == "pass"
+        assert transition["before_null_rate"] == 0.1
+        assert transition["after_null_rate"] == 0.3
+        assert transition["null_rate_increase_exact"] == "1/5"
+        assert transition["null_rate_threshold_met"] is True
+    finally:
+        store.close()
+
+
+def test_null_rate_increase_just_below_twenty_points_does_not_pass(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=10_000,
+        before_null_count=1,
+        before_count=10,
+        after_null_count=29,
+        after_count=100,
+    )
+    try:
+        result = check_unit_or_null_change(store.operational, incident)["unit_or_null_change"]
+        comparison = result["details"]["comparisons"][0]
+        assert result["status"] == "not_applicable"
+        assert comparison["before_null_rate"] == 0.1
+        assert comparison["after_null_rate"] == 0.29
+        assert comparison["null_rate_increase_exact"] == "19/100"
+        assert comparison["null_rate_threshold_met"] is False
+    finally:
+        store.close()
+
+
+def test_recovered_historical_change_is_outside_a_new_incident_window(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        additional_days=(
+            (date(2026, 2, 3), 10_000),
+            (date(2026, 2, 4), 10_000),
+            (date(2026, 2, 5), 10_000),
+        ),
+        as_of_time=_business_end(date(2026, 2, 5)),
+        source_window_start="2026-02-04",
+        source_window_end="2026-02-05",
+    )
+    try:
+        result = check_unit_or_null_change(store.operational, incident)["unit_or_null_change"]
+        assert result["status"] == "not_applicable"
+        assert result["scope_match"] is False
+        assert result["details"]["incident_metric_window"]["window_start"] == "2026-02-04"
+        assert result["details"]["compared_day_pair_count"] == 2
+        assert all(
+            item["after_start_business_date"] in {"2026-02-04", "2026-02-05"}
+            for item in result["details"]["comparisons"]
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("before_amount", "after_amount", "before_null_count", "after_null_count", "expected_check"),
+    [
+        (10_000, 1_000_000, 0, 0, "median_ratio"),
+        (10_000, 10_000, 1, 3, "null_rate_increase"),
+    ],
+)
+def test_base_history_at_t0_boundary_contributes_to_change_detection(
+    tmp_path,
+    before_amount: int,
+    after_amount: int,
+    before_null_count: int,
+    after_null_count: int,
+    expected_check: str,
+) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=before_amount,
+        after_amount=after_amount,
+        before_null_count=before_null_count,
+        after_null_count=after_null_count,
+        before_day=date(2026, 1, 31),
+        change_day=date(2026, 2, 1),
+        before_episode_id="base",
+        as_of_time=_business_end(date(2026, 2, 2)),
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        result = checks["unit_or_null_change"]
+        assert result["status"] == "pass"
+        transition = result["details"]["matched_transition"]
+        assert transition["before_last_business_date"] == "2026-01-31"
+        assert transition["after_start_business_date"] == "2026-02-01"
+        assert result["details"]["change_detection"][expected_check]["status"] == "pass"
+        assert _gate(incident, checks)["action"] == "data_ticket"
+    finally:
+        store.close()
+
+
+def test_missing_incident_source_metrics_are_insufficient_not_historical_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    store, incident = _fixture(
+        tmp_path, before_amount=10_000, after_amount=1_000_000
+    )
+    original_read_as_of = runbook_module.read_as_of
+
+    def read_without_source_metrics(connection, table, **kwargs):
+        rows = original_read_as_of(connection, table, **kwargs)
+        return [] if table == "daily_metrics" else rows
+
+    monkeypatch.setattr(runbook_module, "read_as_of", read_without_source_metrics)
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        result = checks["unit_or_null_change"]
+        assert result["status"] == "pending"
+        assert result["scope_match"] is True
+        assert result["window_complete"] is False
+        assert result["details"]["evaluation_status"] == "insufficient"
+        assert result["details"]["incident_metric_window"]["missing_source_alert_ids"] == [
+            "alert-ep-fixture"
+        ]
+        decision = _gate(incident, checks)
+        assert decision["action"] == "human_review"
+        assert decision["evidence_status"] == "insufficient"
     finally:
         store.close()
 
