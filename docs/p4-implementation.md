@@ -10,7 +10,7 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 | Task | Vòng 1 — luồng mỏng tới ★ | Vòng 2 (P4a/P4b/P4c đầy đủ) |
 |---|---|---|
 | P4.1 `decisions` + gate — vòng 1 hoàn tất ✅ | Schema `decisions`, gate phân nhánh theo hành động, `evidence_status` do code tính | Recheck tối đa 2 lần cách 1 ngày; xung đột nhiều rule |
-| P4.2 Rule | Một runbook: `unit_or_null_change` → `data_ticket` | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
+| P4.2 Rule — vòng 1 hoàn tất ✅ | `unit_or_null_change` → `data_ticket`; checklist operational đúng episode và đúng `available_at` của snapshot incident; fixture từng nhánh và smoke đều đạt | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
 | P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a vòng 1 đã bàn giao** (client LLM + tool `run_sql`). | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
 | P4.5 Evaluator cho `decisions` | Timely routing recall, unsafe truth rate, chấm theo `decision_at` trên smoke | Utility, baseline, bootstrap theo episode (P5) |
@@ -36,7 +36,10 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 ### P4.2 — Runbook `unit_or_null_change`
 - **Mục tiêu:** checklist theo [triage.md](triage.md) mục 3 cho đổi đơn vị/NULL hàng loạt → đề xuất `data_ticket`.
 - **Phụ thuộc:** P4.1.
-- **Kiểm tra:** ngưỡng khởi đầu trong `configs/triage.yaml` có provenance, KHÔNG chỉnh trên episode test; chưa đủ 1 ngày sau điểm đổi → `insufficient`; có signal fraud cùng segment → chuyển người. Smoke: 2 incident `data_pipeline` được routing `data_ticket`; incident clean/seasonal không khớp → chuyển agent.
+- **Kiểm tra:** ngưỡng khởi đầu trong `configs/triage.yaml` có provenance, KHÔNG chỉnh trên episode test; chưa đủ 1 ngày sau điểm đổi → `insufficient`; có signal fraud cùng segment → chuyển người. Mọi đầu vào operational đọc bằng `read_as_of` theo đúng episode và `as_of_time` của snapshot incident.
+- **Cửa sổ bằng chứng:** chỉ xét transition có ngày sau nằm trong khoảng từ `window_start` nhỏ nhất tới `window_end` lớn nhất của các metric nguồn được nối từ `alert_ids_json` của snapshot incident; nếu không đọc được metric nguồn thì bằng chứng `insufficient`. Không suy cửa sổ chỉ từ `opened_at`.
+- **Giới hạn signal fraud vòng 1 (quyết định người dùng 27/10):** kiểm tra signal fraud hiện có trong alerts/metrics operational tại snapshot bằng allowlist tường minh `fraud_side_metrics` trong `configs/triage.yaml`; chỉ alert có metric ID được allowlist mới là signal. Chuyển ra 24 h, người gửi lần đầu, số tiền sát 10 triệu và `review_rate` chưa có reference phải hiện thành `unavailable` cùng lý do trong checklist. `unavailable` không phải bằng chứng không có fraud và không chặn `data_ticket`; signal fraud khả dụng cùng segment vẫn bắt buộc chuyển người. Vòng 1 không thêm metric fraud mới.
+- **Smoke:** 2 incident `data_pipeline` được gate routing `data_ticket`; incident clean/seasonal có checklist `not_applicable` để P4.4b chuyển agent. Vòng 1 không bật `close_enabled`.
 - **Hoàn tất:** runbook + test trên fixture và smoke. Các runbook còn lại ở vòng 2; vòng 1 KHÔNG bật `close_enabled` cho runbook nào.
 
 ### P4.3 — Vòng lặp quyết định ↔ incident

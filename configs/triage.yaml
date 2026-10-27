@@ -1,4 +1,4 @@
-policy_version: payguard.triage.p4.round1.v1
+policy_version: payguard.triage.p4.round1.v2
 
 # Round 1 deliberately grants no automatic close authority. These are policy
 # defaults, not values tuned from development, calibration, or test episodes.
@@ -12,7 +12,59 @@ agent_close_disabled: true
 tau_agent: null
 
 provenance:
-  policy_version: "P4.1 round 1 implementation; no episode-based tuning."
+  policy_version: "P4.1 gate plus P4.2 round 1 runbook; no episode-based tuning."
   close_enabled: "P4.2 round 1 sub-plan: no runbook has close_enabled authority."
   agent_close_disabled: "P4.4 round 1 sub-plan: agent cannot close."
   tau_agent: "Unset while agent closing is disabled; calibration selection is deferred."
+
+runbooks:
+  unit_or_null_change:
+    median_ratio_targets:
+      value: [100, 0.01, 1000]
+      unit: after-day median divided by before-day median
+      rationale: Initial ratios for the contracted amount unit and decimal shifts.
+      provenance:
+        kind: source
+        reference: "docs/triage.md section 3; initial values, not tuned on test episodes."
+    median_ratio_multiplicative_band:
+      value: 2
+      unit: multiplicative factor around each target ratio
+      rationale: Accept an order-of-magnitude amount-unit shift despite up to twofold natural median variation across days.
+      provenance:
+        kind: user_decision
+        reference: "docs/triage.md section 3; user decision 27/10/2026."
+    null_rate_increase:
+      value: 0.20
+      unit: absolute fraction (20 percentage points)
+      rationale: Accept an increase of at least twenty percentage points.
+      provenance:
+        kind: source
+        reference: "docs/triage.md section 3; initial value, not tuned on test episodes."
+    comparison_period_days:
+      value: 1
+      unit: consecutive local business days
+      rationale: Daily adjacent observations test for a change within one day.
+      provenance:
+        kind: contract
+        reference: "docs/triage.md section 3."
+    minimum_post_change_days:
+      value: 1
+      unit: complete local business days after the change date
+      rationale: Do not route until at least one full post-change business day is observed.
+      provenance:
+        kind: contract
+        reference: "docs/triage.md section 3."
+
+fraud_side_metrics:
+  items:
+    - key: outgoing_transfers_24h
+      metric_id: null
+    - key: first_time_sender
+      metric_id: null
+    - key: amount_near_10m
+      metric_id: null
+    - key: model_review_rate
+      metric_id: model.review_rate
+  provenance:
+    kind: user_decision
+    reference: "P4.2 decision 27/10: only allowlisted operational fraud alerts count; missing metrics or alerts are unavailable, not negative evidence."
