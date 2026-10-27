@@ -67,6 +67,8 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Hoàn tất:** test + cập nhật Trạng thái MASTER.
 - **Vòng 1 đã bàn giao:** `monitoring` lấy `episode.duration_days` từ cấu hình công khai có provenance trong [`configs/simulator.yaml`](../configs/simulator.yaml); simulator kiểm tra khóa này khớp `protocol.duration_days`. Monitoring không còn nhận hay nạp `configs/episodes.yaml`. Đối chiếu theo từng dòng trên smoke: `daily_metrics`, `alerts` và `incidents` giữ nguyên.
 
+- **Backlog P3.6 (không chặn, [findings r1](../review/findings/P3.6-r1.md)):** `load_episode_config` gọi `load_simulator_config()` với đường dẫn tương đối (phụ thuộc thư mục chạy; `generate --config X` đối chiếu file mặc định) → chuyển kiểm tra khớp `duration_days` sang `simulator generate`/`validate`; `model score`/`model evaluate` (P2) vẫn nạp `configs/episodes.yaml` chỉ để lấy `duration_days` → chuyển sang khóa công khai.
+
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.
 - [x] Incident con hoạt động đúng; không mở lại incident đã quyết định.
