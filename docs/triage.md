@@ -43,7 +43,7 @@ as_of_time, policy_version, tool_trace_ids
 | Runbook | Kiểm tra bắt buộc | Cửa sổ phải hoàn tất | Bắt buộc chuyển người khi |
 |---|---|---|---|
 | `seasonal_calendar` → benign | Ngày ảnh hưởng trong `business_calendar` giao với cửa sổ alert; (a) **vị trí:** độ lệch theo ngày tập trung vào ngày ảnh hưởng, các ngày còn lại trong dải tham chiếu; (b) **độ lớn:** khớp kỳ vọng tổng hợp từ nền từng ngày theo công thức bên dưới; (c) hướng và segment khớp `expected_effect` / `scope` | Cửa sổ 7 ngày đã đóng tại `as_of_time` | Bất kỳ metric phía fraud nào (chuyển ra 24 h, người gửi lần đầu, số tiền sát 10 triệu, tỉ lệ review của model) có signal trong cùng segment |
-| `unit_or_null_change` → `data_ticket` | Tỉ số trung vị sau ÷ trước thuộc {≈100, ≈1/100, ≈1000} ± 5%, hoặc tỉ lệ NULL tăng ≥ 20 điểm %; thay đổi đột ngột trong 1 ngày | Ít nhất 1 ngày sau điểm đổi | Cùng lúc có signal fraud trong segment |
+| `unit_or_null_change` → `data_ticket` | Tỉ số trung vị sau ÷ trước nằm trong dải log ×/÷2 quanh {100, 1/100, 1000} (tức `[target/2, target×2]`; bản đầu ± 5%, đổi 27/10), hoặc tỉ lệ NULL tăng ≥ 20 điểm %; thay đổi đột ngột trong 1 ngày | Ít nhất 1 ngày sau điểm đổi | Cùng lúc có signal fraud trong segment |
 | `small_sample` → `insufficient` | Số giao dịch trong segment < n_min | — | Hết 2 lần recheck vẫn < n_min |
 | `segment_concentration` → chỉ khoanh vùng | Một segment chiếm ≥ 70% đóng góp PSI | Cửa sổ đã đóng | Không tự quyết định; chỉ thu hẹp phạm vi cho runbook khác/agent |
 
@@ -51,7 +51,8 @@ as_of_time, policy_version, tool_trace_ids
 - **Kỳ vọng cửa sổ có trọng số:** hợp đồng `expected_effect` do [data.md](data.md) sở hữu. Với count/tổng tiền, nền ngày d là B_d và thay đổi tương đối r_d (0 ngoài ngày ảnh hưởng): kỳ vọng tổng = `sum(B_d * (1 + r_d))`. Relative lift = `sum(B_d * r_d) / sum(B_d)` khi tổng nền > 0; không chia đều cho 7 nếu các ngày có nền khác nhau.
 - Với tỷ lệ/trung bình, tính riêng tử dự kiến `sum(N_d * (1 + a_d))` và mẫu dự kiến `sum(D_d * (1 + b_d))`, rồi mới chia. Không trung bình đều các tỷ lệ theo ngày. Mẫu số <= 0, thiếu nền hoặc thiếu khai báo metric → `insufficient`. So sánh observed với expected bằng tolerance chốt trên development: `abs_tol + rel_tol * abs(expected - baseline)` trên đơn vị metric; nền bằng 0 không tính relative lift, chỉ so giá trị tuyệt đối với tolerance đã khai báo. PSI/KS không dùng trực tiếp các công thức cộng này.
 - Ví dụ nền `[1000,10,10,10,10,10,10]`, ngày đầu tăng 40%: expected lift tuần = 400/1060 = 37,74%, không phải 40%/7 = 5,71%. Các dải theo ngày không được fit lại bằng test. Checklist không bảo đảm bắt được fraud trùng đúng ngày ảnh hưởng; vẫn cần các điều kiện chuyển người phía fraud và đánh giá lỗi trên held-out.
-- Mọi ngưỡng (dải tham chiếu theo ngày, sai số độ lớn, 5%, 20 điểm, n_min, 70%) là giá trị khởi đầu, chỉnh trên development rồi khóa.
+- **Dải ×/÷2 cho tỉ số trung vị (người dùng chốt 27/10):** lỗi đơn vị luôn là lũy thừa của 10, còn dao động trung vị tự nhiên giữa các ngày không quá ~2 lần. Với ~9 giao dịch/kênh/ngày như smoke, trung vị ngày của episode clean đã lệch tới ~2 lần, nên ± 5% không thể đạt kể cả khi đổi cửa sổ. Dải này suy ra từ cấu trúc lỗi, không fit trên episode.
+- Mọi ngưỡng (dải tham chiếu theo ngày, sai số độ lớn, dải ×/÷2 của tỉ số trung vị, 20 điểm, n_min, 70%) là giá trị khởi đầu, chỉnh trên development rồi khóa.
 - Rule chỉ viết cho kịch bản *đã biết*. Alert không khớp rule nào, khớp nhiều rule mâu thuẫn, hoặc khớp runbook đang tắt quyền đóng → chuyển cho agent (kết luận của rule làm ngữ cảnh).
 
 ## 4. Quyền tự đóng: rule và agent chọn riêng
