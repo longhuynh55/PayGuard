@@ -719,6 +719,8 @@ def evaluate_gate(
         "episode_id": episode_id,
         "decision_at": normalized_as_of,
         "as_of_time": normalized_as_of,
+        "event_at": normalized_as_of,
+        "available_at": normalized_as_of,
         "source": source,
         "runbook": runbook,
         "cause": cause,

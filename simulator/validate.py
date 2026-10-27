@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from datetime import UTC, datetime, time, timedelta
@@ -71,7 +72,13 @@ _PUBLIC_FORBIDDEN_KEYS = {
     "requires_intervention",
     "rule_covered",
 }
-_DOWNSTREAM_OUTPUT_TABLES = ("model_scores", "daily_metrics", "alerts", "incidents")
+_DOWNSTREAM_OUTPUT_TABLES = (
+    "model_scores",
+    "daily_metrics",
+    "alerts",
+    "incidents",
+    "decisions",
+)
 _MONITORING_PRIVATE_MARKERS = _RESERVED_ID_TOKENS
 _MONITORING_PRIVATE_FIELD_MARKERS = _PUBLIC_FORBIDDEN_KEYS | {
     "accepted_actions_json",
@@ -930,6 +937,197 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
     )
 
 
+def _validate_decisions(operational: sqlite3.Connection) -> str:
+    """Validate operational decision rows without consulting private truth."""
+    violations: list[str] = []
+    registered = {
+        row[0] for row in operational.execute("SELECT episode_id FROM episodes")
+    }
+    rows = operational.execute("SELECT * FROM decisions ORDER BY decision_id").fetchall()
+    decision_columns = tuple(
+        row[1] for row in operational.execute('PRAGMA table_info("decisions")')
+    )
+    expected_columns = (
+        "decision_id",
+        "incident_id",
+        "episode_id",
+        "decision_at",
+        "as_of_time",
+        "event_at",
+        "available_at",
+        "source",
+        "runbook",
+        "cause",
+        "evidence_status",
+        "action",
+        "scope_json",
+        "checklist_results_json",
+        "tool_trace_ids_json",
+        "conclusion",
+        "reason",
+        "close_score",
+        "policy_version",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cost_usd",
+    )
+    if decision_columns != expected_columns:
+        _fail("decisions columns differ from the operational decision contract")
+
+    private_json_keys = {
+        "truth",
+        "truth_bearing",
+        "incident_truth",
+        "incident_truth_id",
+        "mechanism",
+        "template",
+        "seed",
+        "accepted_actions",
+        "accepted_actions_json",
+        "affected_entities_json",
+        "affected_features_json",
+        "affected_segments_json",
+        "effect_available_at",
+        "effect_end_at",
+        "effect_start_at",
+        "intervention_start_at",
+        "deadline_at",
+        "parent_scenario",
+        "requires_intervention",
+        "rule_covered",
+    }
+
+    def nested_keys(value: Any):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                yield str(key)
+                yield from nested_keys(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from nested_keys(nested)
+
+    for source in rows:
+        row = dict(source)
+        decision_id = str(row["decision_id"])
+        episode_id = str(row["episode_id"])
+        if episode_id == "base" or episode_id not in registered:
+            violations.append(f"decision {decision_id} has an invalid episode")
+        if not re.fullmatch(r"decision-[0-9a-f]{24}", decision_id):
+            violations.append(f"decision {decision_id!r} is not a neutral deterministic ID")
+        if not re.fullmatch(r"incident-[0-9a-f]{24}", str(row["incident_id"])):
+            violations.append(f"decision {decision_id} references a non-neutral incident ID")
+        times = tuple(
+            row[field]
+            for field in ("decision_at", "as_of_time", "event_at", "available_at")
+        )
+        try:
+            normalized_times = tuple(utc_timestamp(value) for value in times)
+        except StorageError:
+            normalized_times = ()
+        if not normalized_times or len(set(normalized_times)) != 1 or normalized_times != times:
+            violations.append(
+                f"decision {decision_id} temporal columns must use one fixed-width UTC instant"
+            )
+        identity = {
+            "schema_version": 1,
+            "decision": {key: row[key] for key in decision_columns if key != "decision_id"},
+        }
+        expected_id = "decision-" + _canonical_json_hash(identity)[:24]
+        if decision_id != expected_id:
+            violations.append(f"decision {decision_id} does not match its neutral operational content")
+        if not operational.execute(
+            "SELECT 1 FROM incidents WHERE incident_id = ? AND episode_id = ? "
+            "AND available_at <= ? LIMIT 1",
+            (row["incident_id"], episode_id, row["decision_at"]),
+        ).fetchone():
+            violations.append(
+                f"decision {decision_id} has no same-episode incident snapshot available at decision_at"
+            )
+        if row["source"] not in {"rule", "agent"}:
+            violations.append(f"decision {decision_id} has an unsupported source")
+        if row["evidence_status"] not in {"sufficient", "insufficient", "conflicting"}:
+            violations.append(f"decision {decision_id} has an unsupported evidence status")
+        if row["action"] not in {"close", "recheck", "data_ticket", "fraud_ops", "human_review"}:
+            violations.append(f"decision {decision_id} has an unsupported action")
+        json_types = {
+            "scope_json": dict,
+            "checklist_results_json": dict,
+            "tool_trace_ids_json": list,
+        }
+        for column, expected_type in json_types.items():
+            try:
+                decoded = json.loads(row[column])
+            except (TypeError, json.JSONDecodeError):
+                decoded = None
+            if not isinstance(decoded, expected_type):
+                violations.append(f"decision {decision_id} {column} has the wrong JSON type")
+                continue
+            if set(nested_keys(decoded)) & private_json_keys:
+                violations.append(f"decision {decision_id} stores a private truth field")
+        try:
+            scope = json.loads(row["scope_json"])
+            checklist = json.loads(row["checklist_results_json"])
+            trace_ids = json.loads(row["tool_trace_ids_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if set(scope) != {"feature", "segment", "start_at", "end_at"} or any(
+            value is not None and not isinstance(value, str) for value in scope.values()
+        ):
+            violations.append(f"decision {decision_id} has an invalid scope_json object")
+        for field in ("start_at", "end_at"):
+            if isinstance(scope.get(field), str):
+                try:
+                    if utc_timestamp(scope[field]) != scope[field]:
+                        raise StorageError("timestamp is not normalized UTC")
+                except StorageError:
+                    violations.append(f"decision {decision_id} scope_json.{field} is invalid")
+        valid_checklist_statuses = {
+            "pass",
+            "fail",
+            "pending",
+            "conflicting",
+            "error",
+            "not_applicable",
+        }
+        valid_checklist_fields = {
+            "status",
+            "reason",
+            "scope_match",
+            "window_complete",
+            "requires_human_review",
+            "details",
+        }
+        if any(
+            not isinstance(name, str)
+            or not isinstance(item, dict)
+            or set(item) - valid_checklist_fields
+            or item.get("status") not in valid_checklist_statuses
+            or ("reason" in item and not isinstance(item["reason"], str))
+            or any(
+                key in item and not isinstance(item[key], bool)
+                for key in ("scope_match", "window_complete", "requires_human_review")
+            )
+            for name, item in checklist.items()
+        ):
+            violations.append(f"decision {decision_id} has invalid checklist result entries")
+        if any(
+            not isinstance(item, str) or not item.strip() for item in trace_ids
+        ):
+            violations.append(f"decision {decision_id} has invalid tool trace IDs")
+        score = row["close_score"]
+        if score is not None and (
+            not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or not 0 <= float(score) <= 1
+        ):
+            violations.append(f"decision {decision_id} has an invalid close_score")
+
+    if violations:
+        _fail("; ".join(violations[:20]))
+    return f"{len(rows)} decisions have neutral IDs, same-episode UTC as-of fields, and no truth columns"
+
+
 def _validate_asof(operational: sqlite3.Connection) -> str:
     episodes = [
         row[0]
@@ -1232,6 +1430,7 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         _evaluate(checks, "operational_integrity_and_foreign_keys", lambda: _integrity_check(operational, "operational"))
         _evaluate(checks, "as_of_episode_contract", lambda: _collect_contract_violations(operational))
         _evaluate(checks, "monitoring_output_contract", lambda: _validate_monitoring_outputs(operational))
+        _evaluate(checks, "decision_output_contract", lambda: _validate_decisions(operational))
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))

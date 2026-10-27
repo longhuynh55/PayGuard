@@ -225,7 +225,13 @@ def test_data_pipeline_changes_only_post_start_episode_amounts_and_keeps_truth_p
         operational_content = json.dumps(_operational_content(treated), sort_keys=True)
         schema = list_operational_schema(treated.operational)
         assert "incident_truth" not in schema
-        assert all("cause" not in columns for columns in schema.values())
+        assert "cause" in schema["decisions"]
+        assert all(
+            "cause" not in columns
+            for table, columns in schema.items()
+            if table != "decisions"
+        )
+        assert not {"mechanism", "accepted_actions_json"} & set(schema["decisions"])
         assert "truth-pipeline" not in operational_content
         assert "data_pipeline" not in operational_content
         assert "accepted_actions" not in operational_content
@@ -392,8 +398,11 @@ def test_seasonal_is_one_day_and_calendar_publishes_expectation_without_truth(
         assert "incident_truth" not in operational_schema
         assert all(
             not {"cause", "mechanism", "accepted_actions_json"} & set(columns)
-            for columns in operational_schema.values()
+            for table, columns in operational_schema.items()
+            if table != "decisions"
         )
+        assert "cause" in operational_schema["decisions"]
+        assert not {"mechanism", "accepted_actions_json"} & set(operational_schema["decisions"])
         operational_text = json.dumps(after, sort_keys=True)
         for private_value in ("truth-seasonal", "incident_truth", "accepted_actions", "one_day_valid"):
             assert private_value not in operational_text

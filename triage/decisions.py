@@ -6,7 +6,10 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 import json
 import math
+import sqlite3
 from typing import Any
+
+from simulator.storage import StorageError, insert_operational_record
 
 
 DECISION_COLUMNS = (
@@ -15,6 +18,8 @@ DECISION_COLUMNS = (
     "episode_id",
     "decision_at",
     "as_of_time",
+    "event_at",
+    "available_at",
     "source",
     "runbook",
     "cause",
@@ -128,6 +133,12 @@ def validate_decision_row(row: Mapping[str, Any]) -> dict[str, Any]:
     as_of_time = _utc_timestamp(copied["as_of_time"], "as_of_time")
     if decision_at != as_of_time:
         raise DecisionSchemaError("decision_at must equal as_of_time")
+    event_at = _utc_timestamp(copied["event_at"], "event_at")
+    available_at = _utc_timestamp(copied["available_at"], "available_at")
+    if event_at != decision_at or available_at != decision_at:
+        raise DecisionSchemaError(
+            "event_at and available_at must equal decision_at for operational as-of reads"
+        )
 
     scope = _json_value(copied["scope_json"], "scope_json", dict)
     for key in ("feature", "segment", "start_at", "end_at"):
@@ -183,3 +194,38 @@ def validate_decision_row(row: Mapping[str, Any]) -> dict[str, Any]:
         raise DecisionSchemaError("cost_usd must be a non-negative number or NULL")
 
     return copied
+
+
+def persist_decisions(
+    connection: sqlite3.Connection, rows: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...]
+) -> int:
+    """Append decisions idempotently; changed content under an existing ID is rejected."""
+
+    if not isinstance(rows, (list, tuple)):
+        raise DecisionSchemaError("decision rows must be a list or tuple")
+    inserted = 0
+    connection.execute("SAVEPOINT persist_decisions")
+    try:
+        for index, source in enumerate(rows):
+            try:
+                row = validate_decision_row(source)
+            except DecisionSchemaError as exc:
+                raise DecisionSchemaError(f"decision row {index}: {exc}") from exc
+            existing = connection.execute(
+                "SELECT * FROM decisions WHERE decision_id = ?",
+                (row["decision_id"],),
+            ).fetchone()
+            if existing is not None:
+                if any(existing[column] != row[column] for column in DECISION_COLUMNS):
+                    raise StorageError(
+                        "decision_id already exists with different operational content"
+                    )
+                continue
+            insert_operational_record(connection, "decisions", row)
+            inserted += 1
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT persist_decisions")
+        connection.execute("RELEASE SAVEPOINT persist_decisions")
+        raise
+    connection.execute("RELEASE SAVEPOINT persist_decisions")
+    return inserted

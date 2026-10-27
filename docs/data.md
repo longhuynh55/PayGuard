@@ -294,6 +294,8 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 | `episode_id` | `TEXT` | Không | Episode operational, khác `base`. |
 | `decision_at` | `TEXT` UTC | Không | Bằng `as_of_time` của snapshot theo quyết định đã chốt. |
 | `as_of_time` | `TEXT` UTC | Không | Cutoff mà gate dùng để xác thực snapshot. |
+| `event_at` | `TEXT` UTC | Không | Bằng `decision_at`; timestamp sự kiện temporal để đọc qua `read_as_of`. |
+| `available_at` | `TEXT` UTC | Không | Bằng `decision_at`; quyết định khả dụng ngay tại cutoff của snapshot. |
 | `source` | `TEXT` | Không | `rule` hoặc `agent`. |
 | `runbook` | `TEXT` | Có | Runbook đề xuất; NULL nếu không áp dụng. |
 | `cause` | `TEXT` | Không | Nguyên nhân ứng viên từ rule/agent; không thay `evidence_status`. |
@@ -311,6 +313,6 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 | `total_tokens` | `INTEGER` | Có | Tổng token nếu có; không âm. |
 | `cost_usd` | `REAL` | Có | Chi phí USD nếu có; không âm. |
 
-Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID giống nhau, kết quả khác tạo ID khác. Các trường JSON phải parse đúng kiểu đã nêu. Bảng thuộc phía operational; evaluator được nối ở P4.5, còn module triage không import evaluator.
+Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID giống nhau, kết quả khác tạo ID khác. Các trường JSON phải parse đúng kiểu đã nêu. `decisions` là bảng operational append-only, có khóa bất biến như các bảng temporal operational khác; thuộc allowlist `read_as_of` và chỉ chứa episode khác `base`. `event_at = available_at = decision_at = as_of_time`, nên quyết định chỉ xuất hiện khi cutoff đạt thời điểm snapshot. Bảng không chứa truth. Evaluator được nối ở P4.5, còn module triage không import evaluator.
 
 `scope_json` có bốn khóa `feature`, `segment`, `start_at`, `end_at`; giá trị là TEXT hoặc NULL khi snapshot lỗi không cung cấp được phạm vi. `checklist_results_json` là object ánh xạ tên checklist sang object kết quả; mỗi kết quả có `status` ∈ `pass`, `fail`, `pending`, `conflicting`, `error`, `not_applicable`, và có thể có `reason`, `scope_match`, `window_complete`, `requires_human_review`, `details`. Ba cờ là BOOLEAN; `details` là JSON. `evidence_status` không phải đầu vào checklist được lưu. `tool_trace_ids_json` là mảng các TEXT ID không rỗng.
