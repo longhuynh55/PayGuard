@@ -1,0 +1,586 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from datetime import date, datetime, time
+import json
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from monitoring.incidents import compute_incidents
+from monitoring.metrics import compute_daily_metrics
+from monitoring.signals import compute_alerts
+from monitoring.store import persist_monitoring_rows
+from simulator.asof import read_as_of
+from simulator.config import load_episode_config, load_simulator_config
+from simulator.episodes import generate_episodes
+from simulator.storage import create_export_stores, insert_operational_record, utc_timestamp
+from triage.gate import GateConfig, evaluate_gate
+from triage.runbooks import check_unit_or_null_change, load_triage_config
+
+
+_T0 = "2026-01-31T17:00:00.000000Z"
+_ZONE = ZoneInfo("Asia/Ho_Chi_Minh")
+_PRE_DAY = date(2026, 2, 1)
+_CHANGE_DAY = date(2026, 2, 2)
+
+
+def _local_timestamp(day: date, hour: int = 12, minute: int = 0) -> str:
+    return utc_timestamp(datetime.combine(day, time(hour, minute), tzinfo=_ZONE))
+
+
+def _business_end(day: date) -> str:
+    return utc_timestamp(datetime.combine(day, time.max, tzinfo=_ZONE))
+
+
+def _daily_metric(
+    episode_id: str,
+    as_of_time: str,
+    *,
+    metric_id: str = "psi.amount_avg_7d",
+    feature: str = "amount_avg_7d",
+    segment: str = "consumer",
+    value: float | None = 0.3,
+    reference_window: str = "2025-11-01/2026-01-31",
+    n_reference: int = 100,
+) -> dict[str, object]:
+    return {
+        "metric_id": metric_id,
+        "episode_id": episode_id,
+        "as_of_time": as_of_time,
+        "event_at": as_of_time,
+        "available_at": as_of_time,
+        "business_date": datetime.fromisoformat(as_of_time.replace("Z", "+00:00"))
+        .astimezone(_ZONE)
+        .date()
+        .isoformat(),
+        "feature": feature,
+        "segment": segment,
+        "value": value,
+        "reference_window": reference_window,
+        "window_start": "2026-01-25",
+        "window_end": "2026-01-31",
+        "n_window": 30,
+        "n_reference": n_reference,
+        "flags": [],
+    }
+
+
+def _alert(
+    episode_id: str,
+    alert_id: str,
+    as_of_time: str,
+    *,
+    metric: str = "psi.amount_avg_7d",
+    feature: str = "amount_avg_7d",
+    segment: str = "consumer",
+) -> dict[str, object]:
+    return {
+        "alert_id": alert_id,
+        "episode_id": episode_id,
+        "as_of_time": as_of_time,
+        "metric": metric,
+        "feature": feature,
+        "segment": segment,
+        "value": 0.3,
+        "reference": "2025-11-01/2026-01-31",
+        "threshold": 0.25,
+        "event_at": as_of_time,
+        "available_at": as_of_time,
+    }
+
+
+def _incident(episode_id: str, as_of_time: str, alert_ids: list[str]) -> dict[str, object]:
+    return {
+        "incident_id": f"incident-{episode_id}",
+        "parent_incident_id": None,
+        "episode_id": episode_id,
+        "alert_ids_json": json.dumps(alert_ids, separators=(",", ":")),
+        "feature": "amount_avg_7d",
+        "segment": "consumer",
+        "opened_at": as_of_time,
+        "status": "open",
+        "event_at": as_of_time,
+        "available_at": as_of_time,
+    }
+
+
+def _seed_observations(
+    operational,
+    *,
+    episode_id: str,
+    before_amount: int = 10_000,
+    after_amount: int | None = 1_000_000,
+    as_of_time: str | None = None,
+    after_null_count: int = 0,
+    segment: str = "consumer",
+    extra_episode_rows: bool = False,
+    fraud_metric_id: str | None = None,
+) -> dict[str, object]:
+    as_of_time = as_of_time or _business_end(date(2026, 2, 3))
+    insert_operational_record(
+        operational, "episodes", {"episode_id": episode_id, "role": "development"}
+    )
+    insert_operational_record(
+        operational,
+        "customers",
+        {
+            "customer_id": f"customer-{episode_id}",
+            "episode_id": "base",
+            "event_at": _local_timestamp(date(2025, 1, 1)),
+            "available_at": _local_timestamp(date(2025, 1, 1)),
+            "segment": segment,
+            "province": "01",
+            "age_band": None,
+        },
+    )
+    insert_operational_record(
+        operational,
+        "merchants",
+        {
+            "merchant_id": f"merchant-{episode_id}",
+            "episode_id": "base",
+            "event_at": _local_timestamp(date(2025, 1, 1)),
+            "available_at": _local_timestamp(date(2025, 1, 1)),
+            "mcc": "5411",
+            "province": "01",
+        },
+    )
+
+    for day, day_amount, stored_episode in (
+        (_PRE_DAY, before_amount, episode_id),
+        (_CHANGE_DAY, after_amount, episode_id),
+    ):
+        for index in range(10):
+            amount = day_amount
+            if day == _CHANGE_DAY and index < after_null_count:
+                amount = None
+            event_at = _local_timestamp(day, 12, index)
+            insert_operational_record(
+                operational,
+                "transactions",
+                {
+                    "txn_id": f"txn-{episode_id}-{day.isoformat()}-{index}",
+                    "episode_id": stored_episode,
+                    "customer_id": f"customer-{episode_id}",
+                    "merchant_id": f"merchant-{episode_id}",
+                    "created_at": event_at,
+                    "event_at": event_at,
+                    "available_at": event_at,
+                    "amount": amount,
+                    "channel": "qr",
+                },
+            )
+
+    metric = _daily_metric(episode_id, as_of_time)
+    alert = _alert(episode_id, f"alert-{episode_id}", as_of_time)
+    insert_operational_record(operational, "daily_metrics", metric)
+    insert_operational_record(operational, "alerts", alert)
+    alert_ids = [alert["alert_id"]]
+
+    # P3.1's model review rate exists as a raw operational metric but has no reference.
+    review_metric = _daily_metric(
+        episode_id,
+        as_of_time,
+        metric_id="model.review_rate",
+        feature="decision_region",
+        segment="model_version=smoke-v1",
+        value=0.2,
+        reference_window="not_applicable",
+        n_reference=0,
+    )
+    insert_operational_record(operational, "daily_metrics", review_metric)
+
+    if fraud_metric_id is not None:
+        fraud_metric = _daily_metric(
+            episode_id,
+            as_of_time,
+            metric_id=fraud_metric_id,
+            feature="outgoing_transfers_24h",
+            segment=segment,
+            value=1.0,
+            reference_window="not_applicable",
+            n_reference=0,
+        )
+        fraud_alert = _alert(
+            episode_id,
+            f"alert-{episode_id}-fraud",
+            as_of_time,
+            metric=fraud_metric_id,
+            feature="outgoing_transfers_24h",
+            segment=segment,
+        )
+        insert_operational_record(operational, "daily_metrics", fraud_metric)
+        insert_operational_record(operational, "alerts", fraud_alert)
+        alert_ids.append(str(fraud_alert["alert_id"]))
+
+    incident = _incident(episode_id, as_of_time, alert_ids)
+    insert_operational_record(operational, "incidents", incident)
+
+    if extra_episode_rows:
+        future_time = _local_timestamp(date(2026, 2, 4))
+        insert_operational_record(
+            operational,
+            "transactions",
+            {
+                "txn_id": f"txn-{episode_id}-future",
+                "episode_id": episode_id,
+                "customer_id": f"customer-{episode_id}",
+                "merchant_id": f"merchant-{episode_id}",
+                "created_at": future_time,
+                "event_at": future_time,
+                "available_at": future_time,
+                "amount": before_amount * 1000,
+                "channel": "qr",
+            },
+        )
+    return incident
+
+
+def _fixture(tmp_path: Path, **kwargs):
+    store = create_export_stores(tmp_path / "run")
+    incident = _seed_observations(store.operational, episode_id="ep-fixture", **kwargs)
+    store.operational.commit()
+    return store, incident
+
+
+def _gate(incident, checklists, *, action="data_ticket", config=None, as_of_time=None):
+    raw_config = config or load_triage_config()
+    cutoff = as_of_time or incident["available_at"]
+    return evaluate_gate(
+        incident,
+        {
+            "cause": "data_pipeline",
+            "runbook": "unit_or_null_change",
+            "action": action,
+            "checklist_results": checklists,
+            "reason": "P4.2 runbook fixture.",
+        },
+        source="rule",
+        expected_episode_id=incident["episode_id"],
+        as_of_time=cutoff,
+        config=GateConfig.from_mapping(raw_config),
+    )
+
+
+@pytest.mark.parametrize("ratio", [100.0, 0.01, 1000.0])
+def test_median_ratio_targets_route_data_ticket(tmp_path, ratio: float) -> None:
+    before = 1_000_000 if ratio == 0.01 else (1_000 if ratio == 1000 else 10_000)
+    after = int(before * ratio)
+    store, incident = _fixture(
+        tmp_path, before_amount=before, after_amount=after
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pass"
+        assert unit["scope_match"] is True
+        assert unit["window_complete"] is True
+        assert unit["details"]["change_detection"]["median_ratio"]["matched_target"] == ratio
+        assert _gate(incident, checks)["action"] == "data_ticket"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("after", "expected_status"),
+    [
+        (499_000, "not_applicable"),
+        (500_000, "pass"),
+        (2_000_000, "pass"),
+        (2_001_000, "not_applicable"),
+    ],
+)
+def test_median_ratio_multiplicative_band_includes_exact_boundaries(
+    tmp_path, after: int, expected_status: str
+) -> None:
+    store, incident = _fixture(tmp_path, before_amount=10_000, after_amount=after)
+    try:
+        result = check_unit_or_null_change(store.operational, incident)["unit_or_null_change"]
+        assert result["status"] == expected_status
+        median_check = result["details"]["change_detection"]["median_ratio"]
+        if expected_status == "pass":
+            assert median_check["matched_target"] == 100
+            assert median_check["multiplicative_band"] == 2
+            assert median_check["accepted_ranges"][0] == {
+                "target": 100.0,
+                "minimum": 50.0,
+                "maximum": 200.0,
+            }
+        else:
+            assert result["scope_match"] is False
+    finally:
+        store.close()
+
+
+def test_null_rate_increase_of_at_least_twenty_percentage_points_passes(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=10_000,
+        after_null_count=2,
+    )
+    try:
+        result = check_unit_or_null_change(store.operational, incident)["unit_or_null_change"]
+        assert result["status"] == "pass"
+        assert result["details"]["matched_transition"]["null_rate_increase"] == pytest.approx(0.2)
+        assert result["details"]["change_detection"]["null_rate_increase"]["status"] == "pass"
+    finally:
+        store.close()
+
+
+def test_candidate_with_less_than_one_full_post_change_day_is_insufficient(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        as_of_time=_business_end(_CHANGE_DAY),
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        result = checks["unit_or_null_change"]
+        assert result["status"] == "pending"
+        assert result["window_complete"] is False
+        assert result["details"]["evaluation_status"] == "insufficient"
+        decision = _gate(incident, checks, action="recheck")
+        assert decision["action"] == "recheck"
+        assert decision["evidence_status"] == "insufficient"
+    finally:
+        store.close()
+
+
+def test_same_segment_allowlisted_fraud_alert_forces_human_review(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        fraud_metric_id="fraud.outgoing_transfers_24h",
+    )
+    config = deepcopy(load_triage_config())
+    outgoing = next(
+        item
+        for item in config["fraud_side_metrics"]["items"]
+        if item["key"] == "outgoing_transfers_24h"
+    )
+    outgoing["metric_id"] = "fraud.outgoing_transfers_24h"
+    try:
+        checks = check_unit_or_null_change(store.operational, incident, triage_config=config)
+        signal = checks["fraud_signal"]
+        assert signal["status"] == "pass"
+        assert signal["scope_match"] is True
+        decision = _gate(incident, checks, config=config)
+        assert decision["action"] == "human_review"
+        assert "same segment" in decision["reason"]
+    finally:
+        store.close()
+
+
+def test_unavailable_fraud_metrics_are_explicit_and_do_not_block_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(tmp_path)
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        signal = checks["fraud_signal"]
+        items = signal["details"]["unavailable_metrics"]
+        by_key = {item["key"]: item for item in items}
+        assert set(by_key) == {
+            "outgoing_transfers_24h",
+            "first_time_sender",
+            "amount_near_10m",
+            "model_review_rate",
+        }
+        assert all(item["status"] == "unavailable" and item["reason"] for item in items)
+        assert by_key["model_review_rate"]["metric_id"] == "model.review_rate"
+        assert by_key["model_review_rate"]["metric_rows_observed"] == 1
+        assert "no reference baseline" in by_key["model_review_rate"]["reason"]
+        assert "do not count as evidence that fraud is absent" in signal["details"]["inference_limit"]
+        decision = _gate(incident, checks)
+        assert decision["action"] == "data_ticket"
+        assert decision["evidence_status"] == "sufficient"
+    finally:
+        store.close()
+
+
+def test_unallowlisted_fraud_alert_does_not_count_as_a_signal(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        fraud_metric_id="fraud.unlisted_signal",
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        fraud = checks["fraud_signal"]
+        assert fraud["status"] == "not_applicable"
+        assert "fraud.unlisted_signal" in fraud["details"]["observed_alert_metric_ids"]
+        assert _gate(incident, checks)["action"] == "data_ticket"
+    finally:
+        store.close()
+
+
+def test_runbook_reads_only_the_incident_episode_and_snapshot(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=10_000,
+        extra_episode_rows=True,
+    )
+    try:
+        insert_operational_record(
+            store.operational,
+            "episodes",
+            {"episode_id": "ep-other", "role": "development"},
+        )
+        # This other-episode transition is available at the same cutoff.
+        other_customer = dict(
+            store.operational.execute(
+                "SELECT * FROM customers WHERE customer_id = ?",
+                ("customer-ep-fixture",),
+            ).fetchone()
+        )
+        insert_operational_record(
+            store.operational,
+            "customers",
+            {
+                **other_customer,
+                "customer_id": "customer-ep-other",
+                "episode_id": "ep-other",
+            },
+        )
+        merchant = dict(
+            store.operational.execute(
+                "SELECT * FROM merchants WHERE merchant_id = ?",
+                ("merchant-ep-fixture",),
+            ).fetchone()
+        )
+        insert_operational_record(
+            store.operational,
+            "merchants",
+            {**merchant, "merchant_id": "merchant-ep-other", "episode_id": "ep-other"},
+        )
+        other_time = _local_timestamp(_CHANGE_DAY)
+        insert_operational_record(
+            store.operational,
+            "transactions",
+            {
+                "txn_id": "txn-other-episode",
+                "episode_id": "ep-other",
+                "customer_id": "customer-ep-other",
+                "merchant_id": "merchant-ep-other",
+                "created_at": other_time,
+                "event_at": other_time,
+                "available_at": other_time,
+                "amount": 10_000_000,
+                "channel": "qr",
+            },
+        )
+        store.operational.commit()
+
+        checks = check_unit_or_null_change(store.operational, incident)
+        assert checks["unit_or_null_change"]["status"] == "not_applicable"
+        assert checks["unit_or_null_change"]["scope_match"] is False
+    finally:
+        store.close()
+
+
+def test_runbook_rejects_cutoff_after_incident_snapshot(tmp_path) -> None:
+    store, incident = _fixture(tmp_path)
+    try:
+        checks = check_unit_or_null_change(
+            store.operational,
+            incident,
+            as_of_time=_business_end(date(2026, 2, 4)),
+        )
+        assert checks["unit_or_null_change"]["status"] == "error"
+        assert checks["fraud_signal"]["status"] == "error"
+        assert "must equal the incident snapshot available_at" in checks[
+            "unit_or_null_change"
+        ]["details"]["error"]
+    finally:
+        store.close()
+
+
+def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(tmp_path) -> None:
+    store = create_export_stores(tmp_path / "smoke")
+    try:
+        simulator_config = load_simulator_config()
+        episode_config = load_episode_config()
+        generated = generate_episodes(
+            store.operational,
+            store.private,
+            simulator_config,
+            episode_config,
+            profile="smoke",
+        )
+        episode_ids = tuple(item.episode_id for item in generated.episodes)
+        template_by_id = {
+            assignment.episode_id: assignment.template
+            for assignment in episode_config.profile("smoke").assignments
+        }
+        pipeline_ids = {
+            episode_id
+            for episode_id, template in template_by_id.items()
+            if template == "data_pipeline"
+        }
+        non_pipeline_ids = {
+            episode_id
+            for episode_id, template in template_by_id.items()
+            if template in {"clean", "seasonal"}
+        }
+
+        metrics = compute_daily_metrics(
+            store.operational,
+            simulator_config=simulator_config,
+            episode_config=episode_config,
+            episode_ids=episode_ids,
+        )
+        persist_monitoring_rows(store.operational, "daily_metrics", metrics)
+        final_as_of = max(row["as_of_time"] for row in metrics)
+        for episode_id in episode_ids:
+            episode_metrics = [row for row in metrics if row["episode_id"] == episode_id]
+            alerts = compute_alerts(
+                episode_metrics,
+                episode_id=episode_id,
+                as_of_time=final_as_of,
+            ).alerts
+            persist_monitoring_rows(store.operational, "alerts", alerts)
+            incidents = compute_incidents(alerts, episode_id=episode_id).incidents
+            persist_monitoring_rows(store.operational, "incidents", incidents)
+
+        latest_by_id: dict[str, dict[str, object]] = {}
+        for episode_id in episode_ids:
+            rows = read_as_of(
+                store.operational,
+                "incidents",
+                episode_id=episode_id,
+                t0=_T0,
+                as_of_time=final_as_of,
+            )
+            for row in rows:
+                prior = latest_by_id.get(row["incident_id"])
+                if prior is None or row["event_at"] > prior["event_at"]:
+                    latest_by_id[row["incident_id"]] = row
+
+        pipeline_decisions = []
+        for incident in latest_by_id.values():
+            if incident["episode_id"] not in pipeline_ids:
+                continue
+            if incident["feature"] != "amount_avg_7d":
+                continue
+            incident_as_of = str(incident["available_at"])
+            checks = check_unit_or_null_change(
+                store.operational, incident, as_of_time=incident_as_of
+            )
+            decision = _gate(incident, checks, as_of_time=incident_as_of)
+            pipeline_decisions.append(decision)
+            assert checks["unit_or_null_change"]["status"] == "pass"
+            assert decision["action"] == "data_ticket"
+
+        assert len(pipeline_decisions) == 2
+        for incident in latest_by_id.values():
+            if incident["episode_id"] not in non_pipeline_ids:
+                continue
+            checks = check_unit_or_null_change(store.operational, incident)
+            assert checks["unit_or_null_change"]["status"] == "not_applicable"
+    finally:
+        store.close()
