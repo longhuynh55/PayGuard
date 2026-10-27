@@ -13,7 +13,7 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 | P4.2 Rule — vòng 1 hoàn tất ✅ | `unit_or_null_change` → `data_ticket`; checklist operational đúng episode và đúng `available_at` của snapshot incident; fixture từng nhánh và smoke đều đạt | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
 | P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a vòng 1 đã bàn giao** (client LLM + tool `run_sql`). | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
-| P4.5 Evaluator cho `decisions` | Timely routing recall, unsafe truth rate, chấm theo `decision_at` trên smoke | Utility, baseline, bootstrap theo episode (P5) |
+| P4.5 Evaluator cho `decisions` — vòng 1 đã bàn giao ✅ | Timely routing recall, unsafe truth rate, chấm theo `decision_at` qua interface trong bộ nhớ; báo cáo private | Utility, baseline, bootstrap theo episode (P5) |
 | P4.6 Đo token | 3 incident cố định, ghi token/chi phí thật vào MASTER mục 5 | Khóa trần USD → số episode |
 
 ## Bố trí file dự kiến
@@ -64,6 +64,8 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Phụ thuộc:** P4.3, P3.4.
 - **Kiểm tra:** truth của quyết định = sự cố có `effect_available_at <= decision_at` và giao phạm vi; `close` không bao giờ đạt routing; mẫu số 0 → NA; unmatched không thành benign. Triage KHÔNG import evaluator.
 - **Hoàn tất:** bảng kết quả smoke (dù còn xấu) trong thư mục private.
+
+- **Backlog P4.5 (không chặn, [findings r1](../review/findings/P4.5-r1.md)):** thêm test riêng cho `effect_available_at <= decision_at < intervention_start_at` và hai biên intervention/deadline.
 
 ### P4.6 — Đo token trên 3 case
 - **Mục tiêu:** chạy agent một bước với LLM thật trên 3 incident cố định, ghi token và chi phí.
