@@ -104,6 +104,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 27/10/2026 | Người dùng đổi Reviewer sang Claude Opus 5.5 (sub-agent mới mỗi lượt review); `gpt-6.1-sol` thành dự phòng |
 | 27/10/2026 | Người dùng chốt runbook `unit_or_null_change`: tỉ số trung vị sau ÷ trước dùng dải log ×/÷2 quanh {100, 1/100, 1000} thay ± 5% (± 5% không đạt được với cỡ mẫu ngày nhỏ; xem [triage](docs/triage.md) mục 3). Tạo policy version mới |
 | 26/10/2026 | Người dùng chốt LLM agent: Qwen 3.7 Flash qua OpenRouter (`qwen/qwen3.7-flash`, API key trong `.env`, không commit); thay DeepSeek V4 Flash. Rule P4 vòng 1 `unit_or_null_change` (planner và GPT-6.1-sol cùng đề xuất). `decision_at = as_of_time` |
 | 26/10/2026 | Làm rõ cửa sổ incident P3.3: mốc 2 ngày tính từ alert gần nhất; alert sau quyết định cuối chỉ tạo incident con trong 2 ngày, xa hơn là incident độc lập. Cập nhật kiểm chứng protocol và triển khai vòng 1. |
