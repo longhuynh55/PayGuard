@@ -72,6 +72,10 @@ class _SQLResultTooLarge(Exception):
     """The materialized SQL result exceeded its configured byte limit."""
 
 
+class _SQLUnsupportedType(Exception):
+    """The materialized SQL result contains a BLOB value, which this tool does not return."""
+
+
 def run_sql(
     question: str,
     episode_id: str,
@@ -232,6 +236,8 @@ def run_sql(
                     truncated = True
                     break
                 materialized_row = dict(zip(columns, tuple(row), strict=True))
+                if any(isinstance(value, bytes) for value in materialized_row.values()):
+                    raise _SQLUnsupportedType
                 row_bytes = len(
                     json.dumps(
                         materialized_row,
@@ -278,6 +284,16 @@ def run_sql(
             locals().get("llm_result"),
             "sql_result_too_large",
             "SQL result exceeded its size limit.",
+        )
+    except _SQLUnsupportedType:
+        return _sql_failure(
+            question,
+            episode_id,
+            normalized_as_of,
+            snapshot_hash,
+            locals().get("llm_result"),
+            "sql_unsupported_type",
+            "SQL result contains a BLOB value, which this tool cannot return.",
         )
     except sqlite3.Error:
         timeout_event = locals().get("timeout_event")
