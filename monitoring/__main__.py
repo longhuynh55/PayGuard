@@ -27,7 +27,6 @@ def _parser() -> argparse.ArgumentParser:
     metrics_parser = subparsers.add_parser("metrics", help="compute daily round-one metrics")
     metrics_parser.add_argument("--operational-db", required=True)
     metrics_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
-    metrics_parser.add_argument("--episode-config", default="configs/episodes.yaml")
     metrics_parser.add_argument("--monitoring-config", default="configs/monitoring.yaml")
     metrics_parser.add_argument("--episode-id", action="append")
     metrics_parser.add_argument("--output", help="write CSV here; default is CSV on stdout")
@@ -37,7 +36,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     signals_parser.add_argument("--operational-db", required=True)
     signals_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
-    signals_parser.add_argument("--episode-config", default="configs/episodes.yaml")
     signals_parser.add_argument("--monitoring-config", default="configs/monitoring.yaml")
     signals_parser.add_argument("--episode-id", required=True)
     signals_parser.add_argument(
@@ -137,7 +135,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows = compute_daily_metrics(
             operational,
             simulator_config_path=args.simulator_config,
-            episode_config_path=args.episode_config,
             monitoring_config_path=args.monitoring_config,
             episode_ids=(args.episode_id,)
             if args.command == "signals"

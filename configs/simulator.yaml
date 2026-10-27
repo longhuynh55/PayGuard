@@ -10,6 +10,15 @@ seed:
     kind: assumption
     reference: P1.1 implementation default; no external source claims this seed.
 
+episode:
+  duration_days:
+    value: 30
+    unit: calendar days
+    rationale: Public episode horizon consumed by monitoring and checked against the episode protocol.
+    provenance:
+      kind: contract
+      reference: docs/p3-implementation.md, P3.6.
+
 timeline:
   storage_timezone:
     value: UTC

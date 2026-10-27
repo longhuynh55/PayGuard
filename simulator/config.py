@@ -290,9 +290,20 @@ class ScaleProfile(StrictModel):
     merchant_count: ConfigValue[PositiveInt]
 
 
+class EpisodeRuntimeConfig(StrictModel):
+    duration_days: ConfigValue[PositiveInt]
+
+    @model_validator(mode="after")
+    def duration_must_match_mvp_contract(self) -> EpisodeRuntimeConfig:
+        if self.duration_days.value != 30:
+            raise ValueError("episode duration_days is fixed at 30 by the MVP contract")
+        return self
+
+
 class SimulatorConfig(StrictModel):
     schema_version: Literal[1]
     seed: ConfigValue[NonNegativeInt]
+    episode: EpisodeRuntimeConfig
     timeline: TimelineConfig
     world: WorldConfig
     transactions: TransactionConfig
@@ -508,6 +519,21 @@ def validate_episode_config(data: Any) -> EpisodeConfig:
     return _validate(EpisodeConfig, data, "episode")
 
 
+def validate_episode_duration_match(
+    simulator_config: SimulatorConfig,
+    episode_config: EpisodeConfig,
+) -> None:
+    """Ensure the public runtime horizon matches the injector protocol horizon."""
+    public_duration = simulator_config.episode.duration_days.value
+    protocol_duration = episode_config.protocol.duration_days.value
+    if public_duration != protocol_duration:
+        raise ConfigValidationError(
+            "simulator episode.duration_days "
+            f"({public_duration}) must match episodes protocol.duration_days "
+            f"({protocol_duration})"
+        )
+
+
 def load_simulator_config(path: str | Path = "configs/simulator.yaml") -> SimulatorConfig:
     """Read and validate simulator configuration from YAML."""
     return validate_simulator_config(_read_yaml(path))
@@ -515,4 +541,6 @@ def load_simulator_config(path: str | Path = "configs/simulator.yaml") -> Simula
 
 def load_episode_config(path: str | Path = "configs/episodes.yaml") -> EpisodeConfig:
     """Read and validate episode configuration from YAML."""
-    return validate_episode_config(_read_yaml(path))
+    episode_config = validate_episode_config(_read_yaml(path))
+    validate_episode_duration_match(load_simulator_config(), episode_config)
+    return episode_config
