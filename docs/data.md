@@ -318,4 +318,4 @@ Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID gi
 
 `scope_json` có bốn khóa `feature`, `segment`, `start_at`, `end_at`; giá trị là TEXT hoặc NULL khi snapshot lỗi không cung cấp được phạm vi. `checklist_results_json` là object ánh xạ tên checklist sang object kết quả; mỗi kết quả có `status` ∈ `pass`, `fail`, `pending`, `conflicting`, `error`, `not_applicable`, và có thể có `reason`, `scope_match`, `window_complete`, `requires_human_review`, `details`. Ba cờ là BOOLEAN; `details` là JSON. `evidence_status` không phải đầu vào checklist được lưu. `tool_trace_ids_json` là mảng các TEXT ID không rỗng.
 
-Khi tái dựng incident và snapshot `run_sql` cho một lượt triage, runner dùng các quyết định `rule` và các quyết định `agent` có `model_slug` khớp provider đang chọn; quyết định agent của provider khác vẫn được lưu nhưng không ảnh hưởng replay đó.
+Một run directory chỉ dùng một agent provider. Runner từ chối chạy nếu DB đã có quyết định `source='agent'` với `model_slug` khác provider đang chọn (bao gồm `NULL` của `unconfigured`); hãy dùng bản sao mới của run directory cho mỗi provider.

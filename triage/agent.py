@@ -122,8 +122,6 @@ class OneStepAgent:
             as_of_time,
             operational_db=self.operational_db,
             client=self.client,
-            decision_model_slug=self.model_slug,
-            provider_scoped_decisions=True,
         )
 
         proposal_context = {

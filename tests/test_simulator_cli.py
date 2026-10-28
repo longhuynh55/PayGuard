@@ -362,12 +362,24 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
             )
             persist_monitoring_rows(connection, "alerts", alerts.alerts)
 
-    fresh_run_dir = tmp_path / "p4-fresh-fake-agent-smoke"
-    shutil.copytree(run_dir, fresh_run_dir)
+    switched_provider_run_dir = tmp_path / "p4-provider-switch"
+    shutil.copytree(run_dir, switched_provider_run_dir)
     from triage.runner import run_triage
 
-    unconfigured = run_triage(run_dir)
+    unconfigured = run_triage(switched_provider_run_dir)
     assert unconfigured["decision_rows_inserted"] > 0
+    switched = _module_cli(
+        "triage",
+        "run",
+        "--run",
+        str(switched_provider_run_dir),
+        "--agent-provider",
+        "fake",
+    )
+    assert switched.returncode != 0
+    assert "fresh copy of the run directory per provider" in (
+        switched.stdout + switched.stderr
+    )
 
     first = _module_cli(
         "triage",
@@ -400,10 +412,6 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
             "AND model_slug='fake/payguard-p4-round1' "
             "ORDER BY episode_id"
         ).fetchall()
-        fake_decisions = connection.execute(
-            "SELECT * FROM decisions WHERE source='agent' "
-            "AND model_slug='fake/payguard-p4-round1' ORDER BY decision_id"
-        ).fetchall()
 
     assert rule_pipeline == 2
     assert len(rule_slugs) == rule_pipeline and all(row[0] is None for row in rule_slugs)
@@ -416,22 +424,6 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         assert cost_usd > 0
         assert model_slug == "fake/payguard-p4-round1"
         assert action == "human_review"
-
-    fresh = _module_cli(
-        "triage",
-        "run",
-        "--run",
-        str(fresh_run_dir),
-        "--agent-provider",
-        "fake",
-    )
-    assert fresh.returncode == 0, fresh.stdout + fresh.stderr
-    with sqlite3.connect(fresh_run_dir / "operational" / "observations.sqlite") as connection:
-        fresh_fake_decisions = connection.execute(
-            "SELECT * FROM decisions WHERE source='agent' "
-            "AND model_slug='fake/payguard-p4-round1' ORDER BY decision_id"
-        ).fetchall()
-    assert fake_decisions == fresh_fake_decisions
 
     replay = _module_cli(
         "triage",

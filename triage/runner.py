@@ -59,25 +59,6 @@ def _latest_snapshots(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return latest
 
 
-class _ProviderDecisionSource:
-    """Replay rule decisions and only this provider's agent decisions."""
-
-    def __init__(self, source: OperationalDecisionSource, model_slug: str | None) -> None:
-        self.source = source
-        self.model_slug = model_slug
-
-    def decisions_for_episode(self, episode_id: str) -> tuple[dict[str, Any], ...]:
-        return tuple(
-            row
-            for row in self.source.decisions_for_episode(episode_id)
-            if row.get("source") == "rule"
-            or (
-                row.get("source") == "agent"
-                and row.get("model_slug") == self.model_slug
-            )
-        )
-
-
 def _unit_or_null_rule_applies(
     checklists: Mapping[str, Mapping[str, Any]],
 ) -> bool:
@@ -164,6 +145,25 @@ def _decision_already_recorded(
     return operational.execute(query + " LIMIT 1", parameters).fetchone() is not None
 
 
+def _ensure_provider_matches_run_history(
+    operational: sqlite3.Connection,
+    *,
+    model_slug: str | None,
+) -> None:
+    """Reject provider changes before this run can write or call an LLM."""
+    existing_slugs = {
+        row[0]
+        for row in operational.execute(
+            "SELECT DISTINCT model_slug FROM decisions WHERE source='agent'"
+        )
+    }
+    if any(existing_slug != model_slug for existing_slug in existing_slugs):
+        raise StorageError(
+            "operational database already contains agent decisions from a different "
+            "provider; use a fresh copy of the run directory per provider"
+        )
+
+
 def run_triage(
     run_dir: str | Path,
     *,
@@ -208,6 +208,10 @@ def run_triage(
     incidents_inserted = 0
     decisions_inserted = 0
     with _open_operational(operational_path) as operational:
+        _ensure_provider_matches_run_history(
+            operational,
+            model_slug=provider_model_slug,
+        )
         episode_ids = tuple(
             row[0]
             for row in operational.execute(
@@ -249,13 +253,10 @@ def run_triage(
                 alert_rows_seen += len(
                     [row for row in alert_snapshot if row["as_of_time"] == as_of_time]
                 )
-                decision_source = _ProviderDecisionSource(
-                    OperationalDecisionSource(
-                        operational=operational,
-                        t0=t0,
-                        as_of_time=as_of_time,
-                    ),
-                    model_slug=provider_model_slug,
+                decision_source = OperationalDecisionSource(
+                    operational=operational,
+                    t0=t0,
+                    as_of_time=as_of_time,
                 )
                 incident_result = compute_incidents(
                     alert_snapshot,
@@ -281,16 +282,10 @@ def run_triage(
                     t0=t0,
                     as_of_time=as_of_time,
                 )
-                replayed_snapshot_keys = {
-                    (row["incident_id"], row["event_at"], row["available_at"])
-                    for row in current_incident_rows
-                }
                 current_open = [
                     row
                     for row in _latest_snapshots(incident_snapshot).values()
-                    if (row["incident_id"], row["event_at"], row["available_at"])
-                    in replayed_snapshot_keys
-                    and row["status"] in {"open", "recheck"}
+                    if row["status"] in {"open", "recheck"}
                     and row["available_at"] == as_of_time
                 ]
                 for incident in current_open:

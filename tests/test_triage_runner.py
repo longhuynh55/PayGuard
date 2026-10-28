@@ -10,10 +10,11 @@ import pytest
 from monitoring.incidents import OperationalDecisionSource, compute_incidents
 from monitoring.store import persist_monitoring_rows
 from simulator.asof import read_as_of
-from simulator.storage import create_export_stores, insert_operational_record
+from simulator.storage import StorageError, create_export_stores, insert_operational_record
 from simulator.validate import _validate_decisions
 from triage.decisions import persist_decisions
 from triage.gate import GateConfig, evaluate_gate
+from triage.llm import FakeLLMClient
 
 
 T0 = "2026-01-31T17:00:00.000000Z"
@@ -80,6 +81,21 @@ def _latest(result):
         if current is None or row["event_at"] > current["event_at"]:
             latest[row["incident_id"]] = row
     return latest
+
+
+def _single_alert_run(run_dir: Path) -> Path:
+    with create_export_stores(run_dir) as stores:
+        insert_operational_record(
+            stores.operational, "episodes", {"episode_id": "ep-a", "role": "development"}
+        )
+        assert persist_monitoring_rows(
+            stores.operational, "daily_metrics", [_metric(DAY_0)]
+        ) == 1
+        assert persist_monitoring_rows(
+            stores.operational, "alerts", [_alert("alert-a", DAY_0)]
+        ) == 1
+        operational_db = stores.operational_path
+    return operational_db
 
 
 def test_decision_effect_is_delayed_one_snapshot_and_later_alert_is_child(tmp_path) -> None:
@@ -240,18 +256,7 @@ def test_agent_run_sql_snapshot_contains_incident_under_investigation(tmp_path) 
     from triage.runner import run_triage
 
     run_dir = tmp_path / "agent-snapshot-run"
-    with create_export_stores(run_dir) as stores:
-        operational = stores.operational
-        insert_operational_record(
-            operational, "episodes", {"episode_id": "ep-a", "role": "development"}
-        )
-        assert persist_monitoring_rows(
-            operational, "daily_metrics", [_metric(DAY_0)]
-        ) == 1
-        assert persist_monitoring_rows(
-            operational, "alerts", [_alert("alert-a", DAY_0)]
-        ) == 1
-        operational_db = stores.operational_path
+    operational_db = _single_alert_run(run_dir)
 
     def fake_response(payload):
         prompt = payload["messages"][0]["content"]
@@ -282,6 +287,69 @@ def test_agent_run_sql_snapshot_contains_incident_under_investigation(tmp_path) 
             (DAY_0,),
         ).fetchone()[0]
     assert proposal_context["run_sql"]["rows"] == [{"incident_id": incident_id}]
+
+
+def _recheck_fake_client() -> FakeLLMClient:
+    def fake_response(payload):
+        prompt = payload["messages"][0]["content"]
+        if "field named sql" in prompt:
+            return {"sql": "SELECT incident_id FROM asof.incidents ORDER BY incident_id"}
+        return {
+            "cause": "other",
+            "runbook": None,
+            "action": "recheck",
+            "reason": "Check this incident again at the next snapshot.",
+        }
+
+    return FakeLLMClient(response_factory=fake_response)
+
+
+def _incident_and_decision_rows(operational_db: Path):
+    with sqlite3.connect(operational_db) as operational:
+        return {
+            table: tuple(
+                operational.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+            )
+            for table in ("incidents", "decisions")
+        }
+
+
+def test_provider_switch_fails_before_llm_or_incident_decision_writes(tmp_path) -> None:
+    from triage.agent import OneStepAgent
+    from triage.runner import run_triage
+
+    run_dir = tmp_path / "provider-switch-run"
+    operational_db = _single_alert_run(run_dir)
+    first = run_triage(run_dir)
+    assert first["decision_rows_inserted"] == 1
+    before = _incident_and_decision_rows(operational_db)
+
+    client = _recheck_fake_client()
+    with pytest.raises(StorageError, match="fresh copy of the run directory per provider"):
+        run_triage(run_dir, agent_provider=OneStepAgent(operational_db, client))
+
+    assert client.requests == []
+    assert _incident_and_decision_rows(operational_db) == before
+
+
+def test_same_provider_replay_is_idempotent(tmp_path) -> None:
+    from triage.agent import OneStepAgent
+    from triage.runner import run_triage
+
+    run_dir = tmp_path / "same-provider-run"
+    operational_db = _single_alert_run(run_dir)
+    client = _recheck_fake_client()
+    provider = OneStepAgent(operational_db, client)
+
+    first = run_triage(run_dir, agent_provider=provider)
+    before = _incident_and_decision_rows(operational_db)
+    second = run_triage(run_dir, agent_provider=provider)
+
+    assert first["decision_rows_inserted"] == 1
+    assert second["decision_rows_inserted"] == 0
+    assert second["incident_snapshots_inserted"] == 0
+    assert len(client.requests) == 2
+    assert _incident_and_decision_rows(operational_db) == before
 
 
 def test_triage_runtime_avoids_evaluation_and_episode_loader_imports() -> None:
