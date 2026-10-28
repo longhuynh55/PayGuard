@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from model.data import load_model_config
-from simulator.config import load_episode_config, load_simulator_config
+from simulator.config import (
+    load_episode_config,
+    load_simulator_config,
+    validate_episode_duration_match,
+)
 from simulator.episodes import generate_episodes
 from simulator.reports import build_smoke_reports, resolved_support_config
 from simulator.reproducibility import (
@@ -69,6 +73,7 @@ def _generate(args: argparse.Namespace) -> int:
 
     simulator_config = load_simulator_config(args.config)
     episode_config = load_episode_config(args.episodes_config)
+    validate_episode_duration_match(simulator_config, episode_config)
     support_config = resolved_support_config(
         load_model_config(args.model_config),
         args.model_config,

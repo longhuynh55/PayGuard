@@ -408,7 +408,6 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
             store.operational,
             model_directory=artifact_dir,
             simulator_config_path=ROOT / "configs" / "simulator.yaml",
-            episode_config_path=ROOT / "configs" / "episodes.yaml",
         )
         assert scores
         store.commit()

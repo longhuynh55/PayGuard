@@ -13,7 +13,11 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from simulator.asof import read_as_of
-from simulator.config import validate_episode_config, validate_simulator_config
+from simulator.config import (
+    validate_episode_config,
+    validate_episode_duration_match,
+    validate_simulator_config,
+)
 from simulator.episodes import derive_episode_seed
 from simulator.labels import LABEL_POLICY_VERSION, snapshot_labels
 from simulator.reproducibility import (
@@ -278,6 +282,7 @@ def _validate_metadata(
             _fail(f"resolved {name} config must be a JSON object")
     simulator_config = validate_simulator_config(resolved["simulator"])
     episode_config = validate_episode_config(resolved["episodes"])
+    validate_episode_duration_match(simulator_config, episode_config)
     if simulator_config.seed.value != metadata["seed"].get("simulator"):
         _fail("recorded simulator seed differs from resolved config")
     if episode_config.seed.value != metadata["seed"].get("episodes"):

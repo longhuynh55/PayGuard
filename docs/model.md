@@ -47,4 +47,6 @@ Mọi cohort có nhãn đã ≥ H = 90 ngày tại T0 = 1/2/2026 (tập trẻ nh
 
 Audit as-of và split đạt; có logistic regression; observed-label và oracle evaluation tách riêng; coverage theo lớp trước/sau drift; false approval/decline/review. *Mở rộng:* MLflow.
 
+CLI `model score` và `model evaluate` lấy thời lượng monitoring từ `episode.duration_days` trong cấu hình simulator công khai; hai lệnh không cần `configs/episodes.yaml`.
+
 > *Số đo bản 24/10 (đã rollback, split cũ train 7–10/calibration 11):* PR-AUC 0,92–0,93 trước drift, 0,48 sau drift; social engineering lọt 99%; tỉ lệ review không phản ứng với drift.

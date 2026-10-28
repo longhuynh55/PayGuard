@@ -69,7 +69,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Hoàn tất:** bảng kết quả smoke (dù còn xấu) trong thư mục private.
 - **Nối DB vòng 1 đã bàn giao (28/10):** `python -m evaluation decisions --run <run-dir>` mở DB operational read-only, dùng các episode operational và ghi report dưới private.
 
-- **Backlog P4.5 (không chặn, [findings r1](../review/findings/P4.5-r1.md)):** thêm test riêng cho `effect_available_at <= decision_at < intervention_start_at` và hai biên intervention/deadline.
+- **Backlog P4.5 (không chặn, [findings r1](../review/findings/P4.5-r1.md)):** thêm test riêng cho `effect_available_at <= decision_at < intervention_start_at` và hai biên intervention/deadline. **Đã sửa ở BACKLOG-3 (28/10).**
 
 ### P4.6 — Đo token trên 3 case
 - **Mục tiêu:** chạy agent một bước với LLM thật trên 3 incident cố định, ghi token và chi phí.

@@ -43,7 +43,6 @@ def _parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--operational-db", required=True)
     score_parser.add_argument("--data-root", default="data")
     score_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
-    score_parser.add_argument("--episode-config", default="configs/episodes.yaml")
 
     evaluate_parser = subparsers.add_parser(
         "evaluate", help="report smoke PR-AUC and Mondrian coverage using private truth"
@@ -53,7 +52,6 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--private-db", required=True)
     evaluate_parser.add_argument("--data-root", default="data")
     evaluate_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
-    evaluate_parser.add_argument("--episode-config", default="configs/episodes.yaml")
     return parser
 
 
@@ -80,7 +78,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 operational,
                 model_directory=artifact_dir,
                 simulator_config_path=args.simulator_config,
-                episode_config_path=args.episode_config,
             )
             operational.commit()
         counts: dict[str, int] = {}
@@ -98,7 +95,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             private,
             model_directory=artifact_dir,
             simulator_config_path=args.simulator_config,
-            episode_config_path=args.episode_config,
         )
     print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
     return 0
