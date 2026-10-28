@@ -75,7 +75,9 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Mục tiêu:** chạy agent một bước với LLM thật trên 3 incident cố định, ghi token và chi phí.
 - **Phụ thuộc:** P4.4. **Cần người dùng:** API key và trần chi phí tạm (MASTER mục 5).
 - **Trạng thái 29/10/2026:** CLI, report public-safe, offline tests và một lượt OpenRouter thật đã hoàn tất. Theo quyết định người dùng, lượt này đo 2 incident thay vì 3: `ep-0001` (development) và `ep-0003` (calibration); ca thứ ba hoãn tới pilot 60 P1 vòng 2. Số đo bốn call được ghi trong [MASTER_PLAN.md](../MASTER_PLAN.md) mục 5.
+- **CLI:** `python -m triage measure --run <run_dir> --agent-provider {fake,openrouter} --incidents N --out <report.json>`. `--incidents` mặc định 3; thiếu incident đủ điều kiện → dừng trước mọi lời gọi LLM (`insufficient_agent_eligible_incidents`), muốn đo ít hơn phải truyền N tường minh. Chọn tất định theo (`episode_id`, `as_of_time` đầu tiên, `incident_id`) từ `development`, chỉ dùng `calibration` khi `development` thiếu, không bao giờ `test`; danh sách chọn ghi vào report trước lời gọi đầu. Mỗi incident chạy agent một bước đúng một lần (2 lời gọi), không recheck. Report public-safe gồm `selected_incidents`, `calls` (token, chi phí, độ trễ, slug, lỗi), `incident_totals`, `totals`, `extrapolation`, `status`/`error_status`. Run dir phải chưa có agent decision; sau `measure` run dir chỉ dùng một lần (không chạy tiếp `triage run` trên đó).
 - **Hoàn tất:** số token thật trong MASTER mục 5; mốc ★ đạt.
+- **Backlog P4.6 (không chặn, [findings r1](../review/findings/P4.6-r1.md)):** comment `triage/agent.py:178` nói lỗi LLM ở bước SQL chỉ áp dụng cho measurement, thực tế áp dụng mọi đường gọi → sửa comment; `measure` lưu incident cho mọi snapshot dev/cal → chỉ lưu tới `as_of_time` lớn nhất đã chọn để run dir dùng tiếp được.
 
 ## Câu hỏi cần người dùng chốt trước khi code
 
@@ -87,5 +89,5 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - [x] Gate đúng từng nhánh của [triage.md](triage.md) mục 2; `evidence_status` do code tính.
 - [x] Một rule + agent một bước chạy end-to-end trên smoke; không tool nào đọc được truth.
 - [x] Evaluator chấm `decisions` theo `decision_at`; bảng kết quả smoke được ghi private.
-- [x] Token thật của 2 case theo quyết định người dùng 29/10 ghi vào MASTER mục 5; ca thứ ba hoãn tới pilot 60 P1 vòng 2.
+- [x] Token thật của 3 case ghi vào MASTER mục 5. **Ghi chú 29/10 (quyết định người dùng):** đo 2 case vì smoke chỉ có 2 incident tới agent ngoài test; ca thứ ba hoãn tới pilot 60 P1 vòng 2.
 - [x] Test runtime xanh.

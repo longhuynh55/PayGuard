@@ -93,18 +93,20 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 - Ước lượng thô mỗi incident tới agent: 3 lượt × ~5 SQL × 3 mẫu ≈ 45 lần sinh SQL + ~15–20 bước suy luận ≈ **60 lần gọi**. Chi phí ≈ số incident tới agent × 60 × token/lần × giá. So sánh "giá trị vận hành" chạy thêm một lượt K = N = 1 trên mọi ca tới agent.
 - **Việc:** (1) LLM đã chốt Qwen 3.7 Flash qua OpenRouter (giá và lý do: [rationale.md](docs/rationale.md) mục 3), đặt trần tạm; (2) ở mốc ★, chạy 3 incident cố định đo token thật; (3) khóa trần USD cho toàn benchmark (gồm 4 baseline và ablation) → suy ra số episode; nếu vượt 60 thì tăng calibration/test theo tỉ lệ 1:2:2.
-  - **P4.6, quyết định người dùng 29/10/2026:** lượt này đo 2 incident agent-eligible thay vì 3 (`ep-0001` development, `ep-0003` calibration; cả hai tại `2026-02-07T16:59:59.999999Z`). Không chọn test episode; ca thứ ba hoãn tới pilot 60 ở P1 vòng 2. Bốn call thật chạy trên `qwen/qwen3.7-flash-20260727`:
+  - **P4.6, quyết định người dùng 29/10/2026:** lượt này đo 2 incident agent-eligible thay vì 3 (`ep-0001` development, `ep-0003` calibration; cả hai tại `2026-02-07T16:59:59.999999Z`). Không chọn test episode; ca thứ ba hoãn tới pilot 60 ở P1 vòng 2. Bốn lời gọi thật trên `qwen/qwen3.7-flash-20260727`:
 
-    | Call | Incident | Input tokens | Output tokens | Total tokens | Cost USD | Latency ms |
+    | Lời gọi | Incident | Token vào | Token ra | Tổng token | Chi phí USD | Độ trễ ms |
     |---|---|---:|---:|---:|---:|---:|
-    | run_sql generation | ep-0001 / incident-c89881b3dc8c2d6e9ebd1354 | 3,229 | 257 | 3,486 | 0.0001302800 | 3,519.425 |
+    | sinh SQL `run_sql` | ep-0001 / incident-c89881b3dc8c2d6e9ebd1354 | 3,229 | 257 | 3,486 | 0.0001302800 | 3,519.425 |
     | proposal | ep-0001 / incident-c89881b3dc8c2d6e9ebd1354 | 3,424 | 56 | 3,480 | 0.0001100000 | 1,250.899 |
-    | run_sql generation | ep-0003 / incident-fff68272d2477ac4092c8e68 | 3,224 | 194 | 3,418 | 0.0001219400 | 2,233.807 |
+    | sinh SQL `run_sql` | ep-0003 / incident-fff68272d2477ac4092c8e68 | 3,224 | 194 | 3,418 | 0.0001219400 | 2,233.807 |
     | proposal | ep-0003 / incident-fff68272d2477ac4092c8e68 | 3,340 | 135 | 3,475 | 0.0001354125 | 3,501.848 |
-    | Average per call | — | 3,304.25 | 160.5 | 3,464.75 | 0.000124408125 | 2,626.495 |
-    | Total (4 calls) | — | 13,217 | 642 | 13,859 | 0.0004976325 | 10,505.980 |
+    | Trung bình mỗi lời gọi | — | 3,304.25 | 160.5 | 3,464.75 | 0.000124408125 | 2,626.495 |
+    | Tổng (4 lời gọi) | — | 13,217 | 642 | 13,859 | 0.0004976325 | 10,505.980 |
 
-    Extrapolation only: at approximately 60 calls per agent incident, measured average cost per call gives **$0.0074644875 per agent incident**. This is an estimate for the full design, not a measured result. The benchmark USD cap and episode count remain unlocked pending the user's decision after reviewing these numbers.
+    Bối cảnh: ở `ep-0001`, SQL do LLM sinh chạy lỗi (`sql_execution_error`); cả hai decision đều ra `human_review` với `evidence_status = insufficient`, nên token proposal của `ep-0001` chưa phản ánh ca SQL thành công.
+
+    Chỉ là ngoại suy: với khoảng 60 lời gọi mỗi incident tới agent, chi phí trung bình đo được cho **khoảng 0,0075 USD (0,0074644875) mỗi incident tới agent**. Đây là ước lượng cho thiết kế đầy đủ, không phải kết quả đo. Trần USD benchmark và số episode chưa khóa, chờ người dùng quyết sau khi xem số đo.
 
 ## 6. Tái lập
 
@@ -116,6 +118,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 29/10/2026 | P4.6: smoke chỉ có 2 incident tới agent ngoài test → người dùng chọn đo 2 ca thay vì 3 (ca thứ ba hoãn tới pilot 60); 4 lời gọi thật, 13.217 token vào / 642 ra, ≈ 0,0005 USD; chưa khóa trần benchmark và số episode. Mốc ★ đạt |
 | 27/10/2026 | Người dùng đổi Reviewer sang Claude Opus 5.5 (sub-agent mới mỗi lượt review); `gpt-6.1-sol` thành dự phòng |
 | 27/10/2026 | Người dùng chốt runbook `unit_or_null_change`: tỉ số trung vị sau ÷ trước dùng dải log ×/÷2 quanh {100, 1/100, 1000} thay ± 5% (± 5% không đạt được với cỡ mẫu ngày nhỏ; xem [triage](docs/triage.md) mục 3). Tạo policy version mới |
 | 26/10/2026 | Người dùng chốt LLM agent: Qwen 3.7 Flash qua OpenRouter (`qwen/qwen3.7-flash`, API key trong `.env`, không commit); thay DeepSeek V4 Flash. Rule P4 vòng 1 `unit_or_null_change` (planner và GPT-6.1-sol cùng đề xuất). `decision_at = as_of_time` |
