@@ -541,6 +541,4 @@ def load_simulator_config(path: str | Path = "configs/simulator.yaml") -> Simula
 
 def load_episode_config(path: str | Path = "configs/episodes.yaml") -> EpisodeConfig:
     """Read and validate episode configuration from YAML."""
-    episode_config = validate_episode_config(_read_yaml(path))
-    validate_episode_duration_match(load_simulator_config(), episode_config)
-    return episode_config
+    return validate_episode_config(_read_yaml(path))

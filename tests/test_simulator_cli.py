@@ -211,6 +211,52 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     assert "Validation summary:" in validated.stdout
 
 
+def test_generate_checks_episode_duration_against_selected_simulator_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import simulator.__main__ as simulator_cli
+    from simulator.config import load_episode_config, load_simulator_config
+
+    selected_config = tmp_path / "selected-simulator.yaml"
+    shutil.copyfile(ROOT / "configs" / "simulator.yaml", selected_config)
+    base_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+    episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    mismatched_runtime = base_config.episode.duration_days.model_copy(
+        update={"value": episode_config.protocol.duration_days.value - 1}
+    )
+    mismatched_simulator = base_config.model_copy(
+        update={
+            "episode": base_config.episode.model_copy(
+                update={"duration_days": mismatched_runtime}
+            )
+        }
+    )
+    loaded_paths: list[Path] = []
+
+    def load_selected_config(path: str | Path):
+        loaded_paths.append(Path(path))
+        return mismatched_simulator
+
+    monkeypatch.setattr(simulator_cli, "load_simulator_config", load_selected_config)
+    result = simulator_cli.main(
+        [
+            "generate",
+            "--profile",
+            "smoke",
+            "--out",
+            str(tmp_path / "run"),
+            "--config",
+            str(selected_config),
+            "--episodes-config",
+            str(ROOT / "configs" / "episodes.yaml"),
+        ]
+    )
+
+    assert result == 2
+    assert loaded_paths == [selected_config]
+    assert "must match episodes protocol.duration_days" in capsys.readouterr().err
+
+
 def test_validate_accepts_populated_monitoring_tables(p3_monitoring_smoke_run: Path) -> None:
     validated = _cli("validate", "--run", str(p3_monitoring_smoke_run))
     assert validated.returncode == 0, validated.stdout + validated.stderr
@@ -233,6 +279,15 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     simulator_config = load_simulator_config()
     import simulator.config as simulator_config_module
     import monitoring.metrics as monitoring_metrics_module
+
+    original_read_yaml = simulator_config_module._read_yaml
+
+    def guard_episode_yaml(path: str | Path):
+        if "episodes.yaml" in str(path):
+            raise AssertionError("monitoring and triage must not read configs/episodes.yaml")
+        return original_read_yaml(path)
+
+    monkeypatch.setattr(simulator_config_module, "_read_yaml", guard_episode_yaml)
 
     def forbidden_episode_loader(*args, **kwargs):
         raise AssertionError("monitoring and triage must not load configs/episodes.yaml")

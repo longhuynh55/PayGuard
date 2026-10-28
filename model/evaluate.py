@@ -26,9 +26,7 @@ from model.features import FEATURE_NAMES, build_feature_splits, build_score_feat
 from model.train import artifact_directory_for_run, save_model_run, train_and_calibrate
 from simulator.asof import read_as_of
 from simulator.config import (
-    EpisodeConfig,
     SimulatorConfig,
-    load_episode_config,
     load_simulator_config,
 )
 from simulator.labels import label_truth_metadata_key
@@ -129,7 +127,6 @@ def train_operational_model(
 
 def _monitoring_window(
     simulator_config: SimulatorConfig,
-    episode_config: EpisodeConfig,
 ) -> tuple[str, str]:
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     t0_local = datetime.combine(
@@ -138,7 +135,7 @@ def _monitoring_window(
         tzinfo=timezone,
     )
     t0 = t0_local.astimezone(UTC)
-    end = t0 + timedelta(days=episode_config.protocol.duration_days.value)
+    end = t0 + timedelta(days=simulator_config.episode.duration_days.value)
     return utc_timestamp(t0), utc_timestamp(end)
 
 
@@ -202,13 +199,11 @@ def score_monitoring_episodes(
     *,
     model_directory: str | Path,
     simulator_config_path: str | Path = "configs/simulator.yaml",
-    episode_config_path: str | Path = "configs/episodes.yaml",
 ) -> list[dict[str, Any]]:
     """Score all registered episodes without opening or reading private data."""
     predictor, calibrator, conformal, metadata = _read_model_artifacts(model_directory)
     simulator_config = load_simulator_config(simulator_config_path)
-    episode_config = load_episode_config(episode_config_path)
-    t0, monitor_end = _monitoring_window(simulator_config, episode_config)
+    t0, monitor_end = _monitoring_window(simulator_config)
     episode_ids = [
         str(row[0])
         for row in operational.execute(
@@ -377,15 +372,13 @@ def evaluate_model_scores(
     *,
     model_directory: str | Path,
     simulator_config_path: str | Path = "configs/simulator.yaml",
-    episode_config_path: str | Path = "configs/episodes.yaml",
 ) -> dict[str, Any]:
     """Evaluate persisted scores against private simulator truth in a report only."""
     if operational is private:
         raise ValueError("evaluation requires separate operational and private connections")
     _, _, conformal, model_metadata = _read_model_artifacts(model_directory)
     simulator_config = load_simulator_config(simulator_config_path)
-    episode_config = load_episode_config(episode_config_path)
-    t0, monitor_end = _monitoring_window(simulator_config, episode_config)
+    t0, monitor_end = _monitoring_window(simulator_config)
     episode_ids = [
         str(row[0])
         for row in operational.execute(

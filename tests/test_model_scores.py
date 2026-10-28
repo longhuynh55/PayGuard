@@ -14,8 +14,11 @@ import pytest
 
 from model.config import ConformalConfig
 from model.conformal import decision_for_set, fit_mondrian_conformal, predict_sets
+from model.__main__ import _parser as model_parser
+from model.__main__ import main as model_main
 from model.evaluate import _metric_block
 from model.features import build_score_feature_matrix
+import simulator.config as simulator_config_module
 from simulator.asof import read_as_of
 from simulator.config import load_episode_config, load_simulator_config
 from simulator.episodes import generate_episodes
@@ -50,7 +53,9 @@ def _cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(tmp_path: Path) -> None:
+def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     store = create_export_stores(tmp_path / "smoke-run")
     simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
     episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
@@ -96,21 +101,54 @@ def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(tmp_path: Pat
     model_directory = data_root / run_id / "model"
     score_csv = model_directory / "model_scores.csv"
     first_csv = score_csv.read_bytes()
-    _cli(
-        "score",
-        "--run-id", run_id,
-        "--operational-db", str(operational_path),
-        "--data-root", str(data_root),
-    )
+    with pytest.raises(SystemExit):
+        model_parser().parse_args(
+            [
+                "score",
+                "--run-id",
+                run_id,
+                "--operational-db",
+                str(operational_path),
+                "--episode-config",
+                "configs/episodes.yaml",
+            ]
+        )
+
+    original_read_yaml = simulator_config_module._read_yaml
+
+    def forbid_injector_config(path: str | Path):
+        if "episodes.yaml" in str(path):
+            raise AssertionError(f"model score/evaluate attempted to read private config: {path}")
+        return original_read_yaml(path)
+
+    monkeypatch.setattr(simulator_config_module, "_read_yaml", forbid_injector_config)
+    assert model_main(
+        [
+            "score",
+            "--run-id",
+            run_id,
+            "--operational-db",
+            str(operational_path),
+            "--data-root",
+            str(data_root),
+        ]
+    ) == 0
     assert score_csv.read_bytes() == first_csv
-    evaluation = _cli(
-        "evaluate",
-        "--run-id", run_id,
-        "--operational-db", str(operational_path),
-        "--private-db", str(private_path),
-        "--data-root", str(data_root),
-    )
-    report = json.loads(evaluation.stdout)
+    capsys.readouterr()
+    assert model_main(
+        [
+            "evaluate",
+            "--run-id",
+            run_id,
+            "--operational-db",
+            str(operational_path),
+            "--private-db",
+            str(private_path),
+            "--data-root",
+            str(data_root),
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
     assert report["overall"]["sample_count"] == score_summary["score_count"]
     assert report["overall"]["pr_auc"] is not None
     assert set(report["overall"]["coverage_by_class"]) == {"legit", "fraud"}
