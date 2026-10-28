@@ -1050,6 +1050,8 @@ def _validate_decisions(operational: sqlite3.Connection) -> str:
             )
         if row["source"] not in {"rule", "agent"}:
             violations.append(f"decision {decision_id} has an unsupported source")
+        elif row["source"] == "rule" and row["model_slug"] is not None:
+            violations.append(f"rule decision {decision_id} must have NULL model_slug")
         if row["evidence_status"] not in {"sufficient", "insufficient", "conflicting"}:
             violations.append(f"decision {decision_id} has an unsupported evidence status")
         if row["action"] not in {"close", "recheck", "data_ticket", "fraud_ops", "human_review"}:

@@ -59,6 +59,35 @@ def _latest_snapshots(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return latest
 
 
+class _ProviderDecisionSource:
+    """Replay rule decisions and only this provider's agent decisions."""
+
+    def __init__(self, source: OperationalDecisionSource, model_slug: str | None) -> None:
+        self.source = source
+        self.model_slug = model_slug
+
+    def decisions_for_episode(self, episode_id: str) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            row
+            for row in self.source.decisions_for_episode(episode_id)
+            if row.get("source") == "rule"
+            or (
+                row.get("source") == "agent"
+                and row.get("model_slug") == self.model_slug
+            )
+        )
+
+
+def _unit_or_null_rule_applies(
+    checklists: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    unit_result = checklists.get("unit_or_null_change", {})
+    return (
+        unit_result.get("status") == "pass"
+        and unit_result.get("scope_match") is True
+    )
+
+
 def _proposal_for_incident(
     operational: sqlite3.Connection,
     incident: Mapping[str, Any],
@@ -67,16 +96,16 @@ def _proposal_for_incident(
     simulator_config,
     triage_config: Mapping[str, Any],
     agent_provider: AgentProposalProvider,
+    checklist_results: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    checklists = check_unit_or_null_change(
+    checklists = checklist_results or check_unit_or_null_change(
         operational,
         incident,
         as_of_time=as_of_time,
         simulator_config=simulator_config,
         triage_config=triage_config,
     )
-    unit_result = checklists.get("unit_or_null_change", {})
-    if unit_result.get("status") == "pass" and unit_result.get("scope_match") is True:
+    if _unit_or_null_rule_applies(checklists):
         return "rule", {
             "cause": "data_pipeline",
             "runbook": "unit_or_null_change",
@@ -114,20 +143,25 @@ def _decision_already_recorded(
     *,
     as_of_time: str,
     policy_version: str,
+    source: str,
     model_slug: str | None,
 ) -> bool:
-    """Avoid repeating an already persisted call for the same policy and model."""
-    return operational.execute(
+    """Avoid repeating a decision for the same source, policy, and provider."""
+    query = (
         "SELECT 1 FROM decisions WHERE incident_id = ? AND episode_id = ? "
-        "AND as_of_time = ? AND policy_version = ? AND model_slug IS ? LIMIT 1",
-        (
-            incident.get("incident_id"),
-            incident.get("episode_id"),
-            as_of_time,
-            policy_version,
-            model_slug,
-        ),
-    ).fetchone() is not None
+        "AND as_of_time = ? AND policy_version = ? AND source = ?"
+    )
+    parameters: tuple[Any, ...] = (
+        incident.get("incident_id"),
+        incident.get("episode_id"),
+        as_of_time,
+        policy_version,
+        source,
+    )
+    if source != "rule":
+        query += " AND model_slug IS ?"
+        parameters += (model_slug,)
+    return operational.execute(query + " LIMIT 1", parameters).fetchone() is not None
 
 
 def run_triage(
@@ -150,6 +184,9 @@ def run_triage(
     triage_config = load_triage_config(triage_config_path)
     gate_config = GateConfig.from_mapping(triage_config)
     provider = agent_provider or UnconfiguredAgent()
+    provider_model_slug = getattr(provider, "model_slug", None)
+    if provider_model_slug is not None and not isinstance(provider_model_slug, str):
+        provider_model_slug = None
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     t0 = utc_timestamp(
         datetime.combine(
@@ -212,10 +249,13 @@ def run_triage(
                 alert_rows_seen += len(
                     [row for row in alert_snapshot if row["as_of_time"] == as_of_time]
                 )
-                decision_source = OperationalDecisionSource(
-                    operational=operational,
-                    t0=t0,
-                    as_of_time=as_of_time,
+                decision_source = _ProviderDecisionSource(
+                    OperationalDecisionSource(
+                        operational=operational,
+                        t0=t0,
+                        as_of_time=as_of_time,
+                    ),
+                    model_slug=provider_model_slug,
                 )
                 incident_result = compute_incidents(
                     alert_snapshot,
@@ -230,6 +270,9 @@ def run_triage(
                 incidents_inserted += persist_monitoring_rows(
                     operational, "incidents", current_incident_rows
                 )
+                # run_sql uses its own read-only connection; publish this
+                # episode/as-of snapshot before any agent can request it.
+                operational.commit()
 
                 incident_snapshot = read_as_of(
                     operational,
@@ -238,23 +281,35 @@ def run_triage(
                     t0=t0,
                     as_of_time=as_of_time,
                 )
+                replayed_snapshot_keys = {
+                    (row["incident_id"], row["event_at"], row["available_at"])
+                    for row in current_incident_rows
+                }
                 current_open = [
                     row
                     for row in _latest_snapshots(incident_snapshot).values()
-                    if row["status"] in {"open", "recheck"}
+                    if (row["incident_id"], row["event_at"], row["available_at"])
+                    in replayed_snapshot_keys
+                    and row["status"] in {"open", "recheck"}
                     and row["available_at"] == as_of_time
                 ]
                 for incident in current_open:
-                    provider_model_slug = getattr(provider, "model_slug", None)
-                    if provider_model_slug is not None and not isinstance(
-                        provider_model_slug, str
-                    ):
-                        provider_model_slug = None
+                    checklists = check_unit_or_null_change(
+                        operational,
+                        incident,
+                        as_of_time=as_of_time,
+                        simulator_config=simulator_config,
+                        triage_config=triage_config,
+                    )
+                    source_hint = (
+                        "rule" if _unit_or_null_rule_applies(checklists) else "agent"
+                    )
                     if _decision_already_recorded(
                         operational,
                         incident,
                         as_of_time=as_of_time,
                         policy_version=gate_config.policy_version,
+                        source=source_hint,
                         model_slug=provider_model_slug,
                     ):
                         continue
@@ -265,11 +320,13 @@ def run_triage(
                         simulator_config=simulator_config,
                         triage_config=triage_config,
                         agent_provider=provider,
+                        checklist_results=checklists,
                     )
                     tool_error = proposal.pop("_tool_error", False)
                     tool_error_reason = proposal.pop("_tool_error_reason", None)
                     usage = proposal.pop("_usage", None)
-                    model_slug = proposal.pop("_model_slug", provider_model_slug)
+                    proposed_model_slug = proposal.pop("_model_slug", provider_model_slug)
+                    model_slug = None if source == "rule" else proposed_model_slug
                     if not isinstance(tool_error, bool):
                         tool_error = True
                         tool_error_reason = "Agent returned an invalid tool-error status."
@@ -294,6 +351,7 @@ def run_triage(
                         model_slug=model_slug,
                     )
                     decisions_inserted += persist_decisions(operational, (decision,))
+                    operational.commit()
 
         operational.commit()
         return {

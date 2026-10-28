@@ -234,6 +234,56 @@ def test_zero_cost_decision_id_is_stable_after_sqlite_real_storage(tmp_path) -> 
         stores.close()
 
 
+def test_agent_run_sql_snapshot_contains_incident_under_investigation(tmp_path) -> None:
+    from triage.agent import OneStepAgent
+    from triage.llm import FakeLLMClient
+    from triage.runner import run_triage
+
+    run_dir = tmp_path / "agent-snapshot-run"
+    with create_export_stores(run_dir) as stores:
+        operational = stores.operational
+        insert_operational_record(
+            operational, "episodes", {"episode_id": "ep-a", "role": "development"}
+        )
+        assert persist_monitoring_rows(
+            operational, "daily_metrics", [_metric(DAY_0)]
+        ) == 1
+        assert persist_monitoring_rows(
+            operational, "alerts", [_alert("alert-a", DAY_0)]
+        ) == 1
+        operational_db = stores.operational_path
+
+    def fake_response(payload):
+        prompt = payload["messages"][0]["content"]
+        if "field named sql" in prompt:
+            return {"sql": "SELECT incident_id FROM asof.incidents ORDER BY incident_id"}
+        return {
+            "cause": "other",
+            "runbook": None,
+            "action": "human_review",
+            "reason": "The operational incident requires an operator.",
+        }
+
+    client = FakeLLMClient(response_factory=fake_response)
+    result = run_triage(
+        run_dir,
+        agent_provider=OneStepAgent(operational_db, client),
+    )
+
+    assert result["decision_rows_inserted"] == 1
+    assert len(client.requests) == 2
+    proposal_context = json.loads(
+        client.requests[1]["messages"][0]["content"].split("Context:\n", 1)[1]
+    )
+    with sqlite3.connect(operational_db) as operational:
+        incident_id = operational.execute(
+            "SELECT incident_id FROM incidents WHERE episode_id='ep-a' "
+            "AND available_at=?",
+            (DAY_0,),
+        ).fetchone()[0]
+    assert proposal_context["run_sql"]["rows"] == [{"incident_id": incident_id}]
+
+
 def test_triage_runtime_avoids_evaluation_and_episode_loader_imports() -> None:
     triage_dir = Path(__file__).resolve().parents[1] / "triage"
     for source_path in triage_dir.glob("*.py"):

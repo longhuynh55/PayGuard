@@ -146,6 +146,8 @@ def validate_decision_row(row: Mapping[str, Any]) -> dict[str, Any]:
         _nonempty_text(copied["runbook"], "runbook")
     if copied["model_slug"] is not None:
         _nonempty_text(copied["model_slug"], "model_slug")
+    if copied["source"] == "rule" and copied["model_slug"] is not None:
+        raise DecisionSchemaError("model_slug must be NULL for rule decisions")
 
     decision_at = _utc_timestamp(copied["decision_at"], "decision_at")
     as_of_time = _utc_timestamp(copied["as_of_time"], "as_of_time")

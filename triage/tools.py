@@ -83,6 +83,8 @@ def run_sql(
     *,
     operational_db: str | Path,
     client: LLMClient,
+    decision_model_slug: str | None = None,
+    provider_scoped_decisions: bool = False,
 ) -> ToolResult:
     """Generate one SQL statement, then run it only against a read-only snapshot."""
     tool_config: LLMConfig = client.config
@@ -138,6 +140,16 @@ def run_sql(
                 t0=T0_UTC_TEXT,
                 as_of_time=normalized_as_of,
             )
+            if table == "decisions" and provider_scoped_decisions:
+                snapshots[table] = [
+                    row
+                    for row in snapshots[table]
+                    if row["source"] == "rule"
+                    or (
+                        row["source"] == "agent"
+                        and row["model_slug"] == decision_model_slug
+                    )
+                ]
             schemas[table] = tuple(
                 str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')
             )

@@ -308,7 +308,7 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 | `reason` | `TEXT` | Không | Lý do cho action sau gate, gồm lý do chờ nếu action là `recheck`. |
 | `close_score` | `REAL` | Có | Score agent do code cung cấp, trong `[0, 1]`; NULL nếu không có score. Rule không ghi score. |
 | `policy_version` | `TEXT` | Không | Phiên bản policy dùng cho lần gate. |
-| `model_slug` | `TEXT` | Có | Canonical slug của model agent đã cấu hình cho lượt điều tra; NULL với rule hoặc khi agent không cấu hình. |
+| `model_slug` | `TEXT` | Có | Canonical slug của model agent đã cấu hình cho lượt điều tra; NULL với rule (validator bắt buộc) hoặc khi agent không cấu hình. |
 | `input_tokens` | `INTEGER` | Có | Token đầu vào nếu có; không âm. |
 | `output_tokens` | `INTEGER` | Có | Token đầu ra nếu có; không âm. |
 | `total_tokens` | `INTEGER` | Có | Tổng token nếu có; không âm. |
@@ -317,3 +317,5 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID giống nhau, kết quả khác tạo ID khác. Các trường JSON phải parse đúng kiểu đã nêu. `decisions` là bảng operational append-only, có khóa bất biến như các bảng temporal operational khác; thuộc allowlist `read_as_of` và chỉ chứa episode khác `base`. `event_at = available_at = decision_at = as_of_time`, nên quyết định chỉ xuất hiện khi cutoff đạt thời điểm snapshot. Bảng không chứa truth. Evaluator được nối ở P4.5, còn module triage không import evaluator.
 
 `scope_json` có bốn khóa `feature`, `segment`, `start_at`, `end_at`; giá trị là TEXT hoặc NULL khi snapshot lỗi không cung cấp được phạm vi. `checklist_results_json` là object ánh xạ tên checklist sang object kết quả; mỗi kết quả có `status` ∈ `pass`, `fail`, `pending`, `conflicting`, `error`, `not_applicable`, và có thể có `reason`, `scope_match`, `window_complete`, `requires_human_review`, `details`. Ba cờ là BOOLEAN; `details` là JSON. `evidence_status` không phải đầu vào checklist được lưu. `tool_trace_ids_json` là mảng các TEXT ID không rỗng.
+
+Khi tái dựng incident và snapshot `run_sql` cho một lượt triage, runner dùng các quyết định `rule` và các quyết định `agent` có `model_slug` khớp provider đang chọn; quyết định agent của provider khác vẫn được lưu nhưng không ảnh hưởng replay đó.

@@ -1,6 +1,6 @@
 # P4 — Sub-plan triển khai triage (rule, gate, agent)
 
-> Trạng thái: **người dùng duyệt 26/10/2026; P4.4b và nối DB cho P4.5 vòng 1 đã bàn giao 28/10; P4.6 còn lại**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
+> Trạng thái: **người dùng duyệt 26/10/2026; P4.4b vòng 2 đã sửa 2 finding chặn review r1 và cập nhật replay as-of; P4.6 còn lại**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
 > Format task và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md). Mốc ★ và ngân sách LLM: [MASTER_PLAN.md](../MASTER_PLAN.md) mục 3 và 5.
 
 ## Thứ tự hai vòng
@@ -12,7 +12,7 @@ Vòng 1 chỉ đủ cho mốc ★: snapshot → score → một monitor → **m�
 | P4.1 `decisions` + gate — vòng 1 hoàn tất ✅ | Schema `decisions`, gate phân nhánh theo hành động, `evidence_status` do code tính | Recheck tối đa 2 lần cách 1 ngày; xung đột nhiều rule |
 | P4.2 Rule — vòng 1 hoàn tất ✅ | `unit_or_null_change` → `data_ticket`; checklist operational đúng episode và đúng `available_at` của snapshot incident; fixture từng nhánh và smoke đều đạt | Đủ 4 runbook; `seasonal_calendar` với kỳ vọng có trọng số; `close_enabled` chọn trên calibration |
 | P4.3 Vòng lặp quyết định ↔ incident | Gate đọc incident qua `read_as_of`, ghi `decisions`, monitoring nhận qua `DecisionSource` | — |
-| P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a và P4.4b vòng 1 đã bàn giao**. | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
+| P4.4 Agent một bước | 1 lượt, 1 `run_sql`, không UQ; agent không được đóng (`agent_close_disabled`). **P4.4a đã bàn giao; P4.4b vòng 2 đã sửa finding chặn review r1**. | K = 3, `run_sql` N = 3 + cache, `close_score`, `tau_agent` trên calibration, bộ câu hỏi + DB phản ví dụ |
 | P4.5 Evaluator cho `decisions` — vòng 1 đã bàn giao ✅ | Timely routing recall, unsafe truth rate, chấm theo `decision_at`; CLI đọc decisions từ DB operational read-only; báo cáo private | Utility, baseline, bootstrap theo episode (P5) |
 | P4.6 Đo token | 3 incident cố định, ghi token/chi phí thật vào MASTER mục 5 | Khóa trần USD → số episode |
 
@@ -60,7 +60,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - **Kiểm tra:** tool chỉ có kết nối read-only tới DB operational qua as-of, không nhìn thấy đường dẫn hay bảng private; agent không được `close` ở vòng 1; LLM sai format/tool lỗi/hết ngân sách → `human_review`. Test dùng LLM giả lập tất định; gọi API thật chỉ ở P4.6.
 - **Hoàn tất:** trace tool có ID trong `tool_trace_ids`; token/chi phí ghi vào `decisions`.
 - **P4.4a vòng 1 đã bàn giao (review r2 PASS, 27/10):** client OpenRouter + `run_sql` read-only as-of, test offline. Backlog vòng 2 (không chặn): kết quả BLOB bị báo `snapshot_error` và mất SQL trong trace ([findings r2](../review/findings/P4.4a-r2.md)).
-- **P4.4b vòng 1 đã bàn giao (28/10):** agent gọi một `run_sql` rồi một proposal JSON; CLI mặc định `UnconfiguredAgent`, lựa chọn `fake` tất định, OpenRouter chỉ khi chọn rõ `--agent-provider openrouter`. Gate giữ `agent_close_disabled`, trace/usage/model slug được ghi vào decisions. Smoke có 2 `data_pipeline` qua rule và các incident còn lại qua fake agent; replay ổn định, P4.5 tạo báo cáo private.
+- **P4.4b vòng 1 đã bàn giao (28/10), vòng 2 sửa finding chặn review r1:** agent gọi một `run_sql` rồi một proposal JSON; CLI mặc định `UnconfiguredAgent`, lựa chọn `fake` tất định, OpenRouter chỉ khi chọn rõ `--agent-provider openrouter`. Gate giữ `agent_close_disabled`, trace/usage/model slug được ghi vào decisions. Rule decisions giữ `model_slug = NULL`; run_sql thấy incident đã commit và replay fake không phụ thuộc lịch sử unconfigured. Smoke có 2 `data_pipeline` qua rule và các incident còn lại qua fake agent; P4.5 tạo báo cáo private. Findings không chặn 3–4 vẫn để backlog.
 
 ### P4.5 — Evaluator cho `decisions`
 - **Mục tiêu:** chấm `decisions` theo [evaluation.md](evaluation.md) mục 3–4: timely routing recall, unsafe truth rate, dangerous closure rate.

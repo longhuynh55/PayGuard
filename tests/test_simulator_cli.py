@@ -332,10 +332,9 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
     from monitoring.metrics import compute_daily_metrics
     from monitoring.signals import compute_alerts
     from monitoring.store import persist_monitoring_rows
-    from simulator.config import load_episode_config, load_simulator_config
+    from simulator.config import load_simulator_config
 
     simulator_config = load_simulator_config()
-    episode_config = load_episode_config()
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -348,7 +347,6 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         metrics = compute_daily_metrics(
             connection,
             simulator_config=simulator_config,
-            episode_config=episode_config,
             episode_ids=episode_ids,
         )
         persist_monitoring_rows(connection, "daily_metrics", metrics)
@@ -363,6 +361,13 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
                 as_of_time=cutoff,
             )
             persist_monitoring_rows(connection, "alerts", alerts.alerts)
+
+    fresh_run_dir = tmp_path / "p4-fresh-fake-agent-smoke"
+    shutil.copytree(run_dir, fresh_run_dir)
+    from triage.runner import run_triage
+
+    unconfigured = run_triage(run_dir)
+    assert unconfigured["decision_rows_inserted"] > 0
 
     first = _module_cli(
         "triage",
@@ -381,13 +386,28 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
             "SELECT COUNT(*) FROM decisions WHERE source='rule' AND action='data_ticket' "
             "AND cause='data_pipeline'"
         ).fetchone()[0]
+        rule_slugs = connection.execute(
+            "SELECT model_slug FROM decisions WHERE source='rule'"
+        ).fetchall()
+        duplicate_rule_groups = connection.execute(
+            "SELECT COUNT(*) FROM (SELECT incident_id, episode_id, as_of_time "
+            "FROM decisions WHERE source='rule' GROUP BY incident_id, episode_id, as_of_time "
+            "HAVING COUNT(*) > 1)"
+        ).fetchone()[0]
         agent_rows = connection.execute(
             "SELECT episode_id, tool_trace_ids_json, input_tokens, output_tokens, total_tokens, "
             "cost_usd, model_slug, action FROM decisions WHERE source='agent' "
+            "AND model_slug='fake/payguard-p4-round1' "
             "ORDER BY episode_id"
+        ).fetchall()
+        fake_decisions = connection.execute(
+            "SELECT * FROM decisions WHERE source='agent' "
+            "AND model_slug='fake/payguard-p4-round1' ORDER BY decision_id"
         ).fetchall()
 
     assert rule_pipeline == 2
+    assert len(rule_slugs) == rule_pipeline and all(row[0] is None for row in rule_slugs)
+    assert duplicate_rule_groups == 0
     assert len(agent_rows) >= 3
     assert {row[0] for row in agent_rows} == {"ep-0001", "ep-0003", "ep-0005"}
     for _, trace_ids, input_tokens, output_tokens, total_tokens, cost_usd, model_slug, action in agent_rows:
@@ -396,6 +416,22 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         assert cost_usd > 0
         assert model_slug == "fake/payguard-p4-round1"
         assert action == "human_review"
+
+    fresh = _module_cli(
+        "triage",
+        "run",
+        "--run",
+        str(fresh_run_dir),
+        "--agent-provider",
+        "fake",
+    )
+    assert fresh.returncode == 0, fresh.stdout + fresh.stderr
+    with sqlite3.connect(fresh_run_dir / "operational" / "observations.sqlite") as connection:
+        fresh_fake_decisions = connection.execute(
+            "SELECT * FROM decisions WHERE source='agent' "
+            "AND model_slug='fake/payguard-p4-round1' ORDER BY decision_id"
+        ).fetchall()
+    assert fake_decisions == fresh_fake_decisions
 
     replay = _module_cli(
         "triage",
@@ -422,6 +458,20 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
     assert "PASS decision_output_contract" in validated.stdout
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER decisions_no_update")
+        rule_decision_id = connection.execute(
+            "SELECT decision_id FROM decisions WHERE source='rule' LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE decisions SET model_slug='fake/payguard-p4-round1' WHERE decision_id=?",
+            (rule_decision_id,),
+        )
+    invalidated = _cli("validate", "--run", str(run_dir))
+    assert invalidated.returncode != 0
+    assert "rule decision" in invalidated.stdout + invalidated.stderr
+    assert "must have NULL model_slug" in invalidated.stdout + invalidated.stderr
 
 
 @pytest.mark.parametrize("violation", ["available_at_differs", "cross_episode_alert"])
