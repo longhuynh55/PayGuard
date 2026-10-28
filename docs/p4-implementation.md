@@ -1,6 +1,6 @@
 # P4 — Sub-plan triển khai triage (rule, gate, agent)
 
-> Trạng thái: **người dùng duyệt 26/10/2026; P4.4b vòng 2 đã sửa 2 finding chặn review r1 và cập nhật replay as-of; P4.6 còn lại**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
+> Trạng thái: **người dùng duyệt 26/10/2026; P4.4b vòng 2 đã sửa 2 finding chặn review r1 và cập nhật replay as-of; P4.6 round 1 đo thật trên 2 ca theo quyết định người dùng 29/10; ca thứ ba hoãn tới pilot 60 P1 vòng 2**. Hợp đồng triage: [triage.md](triage.md); chấm điểm: [evaluation.md](evaluation.md); schema: [data.md](data.md). File này sở hữu thứ tự task và nghiệm thu P4; không chép hợp đồng.
 > Format task và luật hai vòng giống [p1-implementation.md](p1-implementation.md). Điều phối: [orchestration.md](orchestration.md). Mốc ★ và ngân sách LLM: [MASTER_PLAN.md](../MASTER_PLAN.md) mục 3 và 5.
 
 ## Thứ tự hai vòng
@@ -74,6 +74,7 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 ### P4.6 — Đo token trên 3 case
 - **Mục tiêu:** chạy agent một bước với LLM thật trên 3 incident cố định, ghi token và chi phí.
 - **Phụ thuộc:** P4.4. **Cần người dùng:** API key và trần chi phí tạm (MASTER mục 5).
+- **Trạng thái 29/10/2026:** CLI, report public-safe, offline tests và một lượt OpenRouter thật đã hoàn tất. Theo quyết định người dùng, lượt này đo 2 incident thay vì 3: `ep-0001` (development) và `ep-0003` (calibration); ca thứ ba hoãn tới pilot 60 P1 vòng 2. Số đo bốn call được ghi trong [MASTER_PLAN.md](../MASTER_PLAN.md) mục 5.
 - **Hoàn tất:** số token thật trong MASTER mục 5; mốc ★ đạt.
 
 ## Câu hỏi cần người dùng chốt trước khi code
@@ -86,5 +87,5 @@ tests/        test_triage_gate.py, test_triage_runbooks.py, test_triage_agent.py
 - [x] Gate đúng từng nhánh của [triage.md](triage.md) mục 2; `evidence_status` do code tính.
 - [x] Một rule + agent một bước chạy end-to-end trên smoke; không tool nào đọc được truth.
 - [x] Evaluator chấm `decisions` theo `decision_at`; bảng kết quả smoke được ghi private.
-- [ ] Token thật của 3 case ghi vào MASTER mục 5.
+- [x] Token thật của 2 case theo quyết định người dùng 29/10 ghi vào MASTER mục 5; ca thứ ba hoãn tới pilot 60 P1 vòng 2.
 - [x] Test runtime xanh.
