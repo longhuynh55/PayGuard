@@ -36,6 +36,16 @@ def test_checked_in_configs_load_and_validate() -> None:
     validate_episode_duration_match(simulator, episodes)
 
 
+def test_load_episode_config_absolute_path_is_independent_of_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    episodes = load_episode_config(ROOT / "configs" / "episodes.yaml")
+
+    assert episodes.protocol.duration_days.value == 30
+
+
 def test_public_episode_duration_drift_is_rejected_and_protocol_match_is_checked() -> None:
     simulator_data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
     simulator_data["episode"]["duration_days"]["value"] = 29
