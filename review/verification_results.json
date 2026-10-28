@@ -158,6 +158,12 @@
     "other_incident_or_before_start_counts": false,
     "close_after_fraud_available_is_unsafe": true
   },
+  "incident_grouping_window_boundaries": {
+    "open_exact_two_day_gap_merges": true,
+    "final_exact_two_day_gap_creates_child": true,
+    "gap_over_two_days_is_independent": true,
+    "window_anchor": "latest_alert_at"
+  },
   "seasonal_runbook_daily_check": {
     "max_overlap_by_event_length": {
       "1_day_event": 0.143,
@@ -310,5 +316,5 @@
     "zero_denominator_rate": null,
     "note": "40 incidents are not 40 independent episode-level Bernoulli trials."
   },
-  "scope": "18 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
+  "scope": "19 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
 }
