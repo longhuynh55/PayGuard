@@ -472,19 +472,26 @@ class FakeLLMClient(LLMClient):
         response: Any = None,
         config: LLMConfig | None = None,
         config_path: str | Path = DEFAULT_CONFIG_PATH,
+        response_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         if responses is not None and response is not None:
             raise ValueError("provide either responses or response, not both")
+        if response_factory is not None and (responses is not None or response is not None):
+            raise ValueError("provide either fake responses or response_factory, not both")
         initial = responses if responses is not None else [response if response is not None else {"sql": "SELECT 1"}]
         self._fake_responses = deque(initial)
+        self._fake_response_factory = response_factory
         self.requests: list[dict[str, Any]] = []
         super().__init__(config=config, config_path=config_path, transport=self._fake_send)
 
     def _fake_send(self, payload: dict[str, Any], _timeout_seconds: float) -> Any:
         self.requests.append(payload)
-        if not self._fake_responses:
-            raise _RequestFailure("fake_response_exhausted", "Fake LLM has no remaining response.")
-        item = self._fake_responses.popleft()
+        if self._fake_response_factory is not None:
+            item = self._fake_response_factory(payload)
+        else:
+            if not self._fake_responses:
+                raise _RequestFailure("fake_response_exhausted", "Fake LLM has no remaining response.")
+            item = self._fake_responses.popleft()
         if isinstance(item, BaseException):
             if isinstance(item, TimeoutError):
                 raise _RequestFailure("timeout", "OpenRouter request timed out.", retryable=True)

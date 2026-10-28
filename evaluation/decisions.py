@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from evaluation.matcher import (
@@ -16,6 +17,7 @@ from evaluation.matcher import (
     normalize_as_of_time,
 )
 from evaluation.recall import EvaluationResult
+from simulator.schema import PRIVATE_TABLES
 from triage.decisions import DecisionSchemaError, validate_decision_row
 
 
@@ -367,3 +369,64 @@ def evaluate_decisions(
         newline="",
     )
     return EvaluationResult(report=report, report_path=report_path)
+
+
+def evaluate_operational_decisions(
+    operational_db_path: str | Path,
+    *,
+    private_db_path: str | Path,
+) -> EvaluationResult:
+    """Read persisted decisions from the operational DB, then score private truth."""
+    operational_path = Path(operational_db_path).expanduser().resolve()
+    private_path = Path(private_db_path).expanduser().resolve()
+    if operational_path == private_path:
+        raise DecisionEvaluationError(
+            "operational decisions and private evaluator data must be separate databases"
+        )
+    if not operational_path.is_file():
+        raise DecisionEvaluationError(
+            f"operational database does not exist: {operational_path}"
+        )
+
+    connection = sqlite3.connect(f"{operational_path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        table_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if not {"episodes", "decisions"}.issubset(table_names):
+            raise DecisionEvaluationError(
+                "operational database is missing episodes or decisions"
+            )
+        forbidden = table_names.intersection(PRIVATE_TABLES)
+        if forbidden:
+            raise DecisionEvaluationError(
+                "operational database contains private evaluator tables"
+            )
+        episode_ids = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
+            )
+        )
+        decisions = tuple(
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM decisions ORDER BY decision_at, episode_id, incident_id, decision_id"
+            )
+        )
+    except sqlite3.Error as exc:
+        raise DecisionEvaluationError(
+            "could not read operational decisions in read-only mode"
+        ) from exc
+    finally:
+        connection.close()
+
+    return evaluate_decisions(
+        decisions,
+        private_db_path=private_path,
+        episode_ids=episode_ids,
+    )

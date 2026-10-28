@@ -248,6 +248,7 @@ OPERATIONAL_DDL: tuple[str, ...] = (
             close_score IS NULL OR (close_score >= 0.0 AND close_score <= 1.0)
         ),
         policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
+        model_slug TEXT NULL CHECK (model_slug IS NULL OR length(model_slug) > 0),
         input_tokens INTEGER NULL CHECK (
             input_tokens IS NULL OR (typeof(input_tokens) = 'integer' AND input_tokens >= 0)
         ),

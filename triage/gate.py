@@ -426,6 +426,7 @@ def evaluate_gate(
     recheck_reason: str | None = None,
     close_score: float | None = None,
     usage: Mapping[str, Any] | None = None,
+    model_slug: str | None = None,
 ) -> dict[str, Any]:
     """Return one deterministic decision row without reading or mutating state.
 
@@ -446,12 +447,15 @@ def evaluate_gate(
     normalized_as_of = _format_timestamp(as_of)
     policy = config if isinstance(config, GateConfig) else GateConfig.from_mapping(config)
     usage_fields = _usage_columns(usage)
+    if model_slug is not None and not _nonempty_text(model_slug):
+        model_slug = None
+        proposal_errors = ["model_slug must be non-empty text or NULL."]
+    else:
+        proposal_errors = []
 
     if not isinstance(proposal, Mapping):
         proposal = {}
-        proposal_errors = ["Proposal is not an object."]
-    else:
-        proposal_errors = []
+        proposal_errors.append("Proposal is not an object.")
 
     snapshot_valid, snapshot_error, snapshot = _check_snapshot(
         incident, expected_episode_id=expected_episode_id, as_of=as_of
@@ -737,6 +741,7 @@ def evaluate_gate(
         "reason": reason,
         "close_score": score,
         "policy_version": policy.policy_version,
+        "model_slug": model_slug,
         **usage_fields,
     }
     decision_payload = normalize_decision_real_columns(decision_payload)
