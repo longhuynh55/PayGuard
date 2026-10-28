@@ -4,6 +4,8 @@ import ast
 import json
 from pathlib import Path
 
+import pytest
+
 from evaluation import evaluate_decisions, evaluate_operational_decisions
 from simulator.storage import (
     create_export_stores,
@@ -58,6 +60,8 @@ def _add_truth(
     truth_id: str = "truth-1",
     effect_start_at: str = "2026-02-05T00:00:00.000000Z",
     effect_available_at: str = "2026-02-05T00:00:00.000000Z",
+    intervention_start_at: str | None = None,
+    deadline_at: str = "2026-02-12T00:00:00.000000Z",
     effect_end_at: str | None = "2026-02-10T00:00:00.000000Z",
     requires_intervention: bool = True,
     accepted_actions: list[str] | None = None,
@@ -79,8 +83,8 @@ def _add_truth(
             "effect_start_at": effect_start_at,
             "effect_end_at": effect_end_at,
             "effect_available_at": effect_available_at,
-            "intervention_start_at": effect_available_at,
-            "deadline_at": "2026-02-12T00:00:00.000000Z",
+            "intervention_start_at": intervention_start_at or effect_available_at,
+            "deadline_at": deadline_at,
             "accepted_actions_json": (
                 accepted_actions if accepted_actions is not None else ["fraud_ops", "human_review"]
             ),
@@ -271,6 +275,60 @@ def test_routing_before_intervention_or_after_deadline_is_not_timely(
         assert routing["recall"] == 0.0
         assert result.report["decision_matches"][0]["status"] == "unmatched"
         assert result.report["decision_matches"][1]["status"] == "matched"
+    finally:
+        store.close()
+
+
+def test_routing_after_availability_before_intervention_is_matched_but_not_timely(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(
+            store,
+            effect_available_at="2026-02-05T00:00:00.000000Z",
+            intervention_start_at="2026-02-08T00:00:00.000000Z",
+            deadline_at="2026-02-15T00:00:00.000000Z",
+        )
+        store.commit()
+        result = _evaluate(
+            store,
+            [_decision("routed-before-intervention", "2026-02-07T00:00:00.000000Z", "fraud_ops")],
+        )
+
+        routing = result.report["timely_routing_recall"]
+        assert result.report["decision_matches"][0]["status"] == "matched"
+        assert routing["routed"] == 0
+        assert routing["missing_truth_ids"] == ["truth-1"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("decision_at", "routed"),
+    [
+        ("2026-02-08T00:00:00.000000Z", 1),
+        ("2026-02-15T00:00:00.000000Z", 1),
+        ("2026-02-15T00:00:00.000001Z", 0),
+    ],
+    ids=["at-intervention-start", "at-deadline", "one-microsecond-after-deadline"],
+)
+def test_routing_window_boundaries_are_inclusive(
+    tmp_path: Path, decision_at: str, routed: int
+) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(
+            store,
+            effect_available_at="2026-02-05T00:00:00.000000Z",
+            intervention_start_at="2026-02-08T00:00:00.000000Z",
+            deadline_at="2026-02-15T00:00:00.000000Z",
+        )
+        store.commit()
+        result = _evaluate(store, [_decision("boundary-route", decision_at, "fraud_ops")])
+
+        assert result.report["decision_matches"][0]["status"] == "matched"
+        assert result.report["timely_routing_recall"]["routed"] == routed
     finally:
         store.close()
 
