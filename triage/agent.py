@@ -92,6 +92,7 @@ class OneStepAgent:
     def __init__(self, operational_db: str | Path, client: LLMClient) -> None:
         self.operational_db = Path(operational_db).expanduser().resolve()
         self.client = client
+        self.last_call_reports: list[dict[str, Any]] = []
 
     @property
     def model_slug(self) -> str:
@@ -104,6 +105,7 @@ class OneStepAgent:
         as_of_time: str,
         checklist_results: Mapping[str, Mapping[str, Any]],
     ) -> Mapping[str, Any]:
+        self.last_call_reports = []
         episode_id = incident.get("episode_id")
         safe_incident = {field: incident.get(field) for field in _INCIDENT_CONTEXT_FIELDS}
         safe_checklists = _json_safe(checklist_results)
@@ -157,17 +159,54 @@ class OneStepAgent:
                 "sql_rows": sql_result.rows,
             }
         )
-        proposal_result = self.client.complete_json(
-            prompt,
-            episode_id=str(episode_id),
-            as_of_time=as_of_time,
-            data_snapshot=hashlib.sha256(snapshot_material.encode("utf-8")).hexdigest(),
-        )
+        sql_llm_error = None
+        sql_tool_status = None
+        if sql_result.trace.error is not None:
+            sql_tool_status = sql_result.trace.error.code
+            if sql_result.trace.error.code in _LLM_ERROR_CODES:
+                sql_llm_error = sql_result.trace.error.code
+        proposal_result: LLMResult | None = None
+        if sql_llm_error is None:
+            proposal_result = self.client.complete_json(
+                prompt,
+                episode_id=str(episode_id),
+                as_of_time=as_of_time,
+                data_snapshot=hashlib.sha256(snapshot_material.encode("utf-8")).hexdigest(),
+            )
+            proposal, proposal_error = _normalize_proposal(proposal_result)
+        else:
+            # An API-level failure is terminal for this measurement. Do not
+            # issue the second request after authentication/provider failures.
+            proposal = _fallback_proposal(sql_llm_error)
+            proposal_error = sql_llm_error
 
-        proposal, proposal_error = _normalize_proposal(proposal_result)
+        self.last_call_reports = [
+            _call_report(
+                "run_sql_generation",
+                sql_result.trace.llm,
+                error_status=sql_llm_error,
+                tool_status=sql_tool_status,
+                canonical_slug=self.model_slug,
+            )
+        ]
+        if proposal_result is not None:
+            self.last_call_reports.append(
+                _call_report(
+                    "proposal",
+                    proposal_result.record,
+                    error_status=(
+                        proposal_result.error.code if proposal_result.error else None
+                    ),
+                    tool_status=proposal_error,
+                    canonical_slug=self.model_slug,
+                )
+            )
         records = [
             record
-            for record in (sql_result.trace.llm, proposal_result.record)
+            for record in (
+                sql_result.trace.llm,
+                proposal_result.record if proposal_result is not None else None,
+            )
             if record is not None
         ]
         usage = _aggregate_usage(records)
@@ -198,7 +237,11 @@ class OneStepAgent:
                 "reason": proposal_error,
                 "scope_match": True,
                 "window_complete": True,
-                "details": {"cache_key": proposal_result.record.cache_key},
+                "details": (
+                    {"cache_key": proposal_result.record.cache_key}
+                    if proposal_result is not None
+                    else {"error_status": proposal_error}
+                ),
             }
 
         tool_error = not sql_result.ok or proposal_error is not None
@@ -223,6 +266,48 @@ class OneStepAgent:
             }
         )
         return proposal
+
+
+_LLM_ERROR_CODES = frozenset(
+    {
+        "cost_limit_exceeded",
+        "empty_content",
+        "http_error",
+        "invalid_json",
+        "invalid_response",
+        "missing_api_key",
+        "network_error",
+        "provider_error",
+        "provider_unavailable",
+        "timeout",
+        "token_limit",
+        "transport_error",
+    }
+)
+
+
+def _call_report(
+    request_type: str,
+    record: LLMCallRecord | None,
+    *,
+    error_status: str | None,
+    tool_status: str | None,
+    canonical_slug: str,
+) -> dict[str, Any]:
+    """Return usage-only metadata safe for the public P4.6 measurement report."""
+    return {
+        "request_type": request_type,
+        "input_tokens": record.prompt_tokens if record else 0,
+        "output_tokens": record.completion_tokens if record else 0,
+        "total_tokens": (
+            record.prompt_tokens + record.completion_tokens if record else 0
+        ),
+        "cost_usd": record.cost_usd if record else 0.0,
+        "latency_ms": record.latency_ms if record else 0.0,
+        "model_canonical_slug": record.canonical_slug if record else canonical_slug,
+        "error_status": error_status or ("not_called" if record is None else None),
+        "tool_status": tool_status,
+    }
 
 
 def build_agent_provider(

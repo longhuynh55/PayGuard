@@ -40,11 +40,11 @@
 | P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1 vòng 1 hoàn tất: P1.1–P1.2, P1.3–P1.8 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3, P1.4, P1.6, P1.7 và P1.8 vòng 2 chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ✅ P3 vòng 1 hoàn tất: P3.1–P3.4 và P3.5 `round1-done` (Vòng 1 đã bàn giao; chi tiết P3.4 và P3.5 tại [sub-plan](docs/p3-implementation.md)); phần vòng 2 chưa triển khai; BACKLOG-2 (28/10): `model score`/`model evaluate` không còn nạp `configs/episodes.yaml` |
-| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1–P4.5 vòng 1 hoàn tất ✅; P4.4b hoàn tất sau review r2 và fail-fast fix r3 (mỗi run directory dùng một agent provider); P4.6 còn lại; P3.6 tách cấu hình injector khỏi monitoring |
+| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1–P4.5 vòng 1 hoàn tất ✅; P4.4b hoàn tất sau review r2 và fail-fast fix r3 (mỗi run directory dùng một agent provider); P4.6 round 1 hoàn tất với 2 incident theo quyết định người dùng 29/10; ca thứ ba hoãn tới pilot 60 P1 vòng 2 ([chi tiết](docs/p4-implementation.md)); P3.6 tách cấu hình injector khỏi monitoring |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
-**Việc tiếp theo:** P4.6 vòng 1 theo [sub-plan](docs/p4-implementation.md). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Sau mốc ★, P1 vòng 2 với pilot 60 theo [sub-plan](docs/p1-implementation.md). Khi luồng mỏng tới mốc ★: đo token trên 3 case cố định rồi khóa ngân sách benchmark và số episode (mục 5). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
+**Việc tiếp theo:** P1 vòng 2 với pilot 60 theo [sub-plan](docs/p1-implementation.md); ca P4.6 thứ ba hoãn tới pilot này theo quyết định người dùng 29/10 (mục 5). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Không khóa ngân sách benchmark hay số episode trước khi người dùng xem số đo. Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
 
 ---
 
@@ -93,6 +93,18 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 - Ước lượng thô mỗi incident tới agent: 3 lượt × ~5 SQL × 3 mẫu ≈ 45 lần sinh SQL + ~15–20 bước suy luận ≈ **60 lần gọi**. Chi phí ≈ số incident tới agent × 60 × token/lần × giá. So sánh "giá trị vận hành" chạy thêm một lượt K = N = 1 trên mọi ca tới agent.
 - **Việc:** (1) LLM đã chốt Qwen 3.7 Flash qua OpenRouter (giá và lý do: [rationale.md](docs/rationale.md) mục 3), đặt trần tạm; (2) ở mốc ★, chạy 3 incident cố định đo token thật; (3) khóa trần USD cho toàn benchmark (gồm 4 baseline và ablation) → suy ra số episode; nếu vượt 60 thì tăng calibration/test theo tỉ lệ 1:2:2.
+  - **P4.6, quyết định người dùng 29/10/2026:** lượt này đo 2 incident agent-eligible thay vì 3 (`ep-0001` development, `ep-0003` calibration; cả hai tại `2026-02-07T16:59:59.999999Z`). Không chọn test episode; ca thứ ba hoãn tới pilot 60 ở P1 vòng 2. Bốn call thật chạy trên `qwen/qwen3.7-flash-20260727`:
+
+    | Call | Incident | Input tokens | Output tokens | Total tokens | Cost USD | Latency ms |
+    |---|---|---:|---:|---:|---:|---:|
+    | run_sql generation | ep-0001 / incident-c89881b3dc8c2d6e9ebd1354 | 3,229 | 257 | 3,486 | 0.0001302800 | 3,519.425 |
+    | proposal | ep-0001 / incident-c89881b3dc8c2d6e9ebd1354 | 3,424 | 56 | 3,480 | 0.0001100000 | 1,250.899 |
+    | run_sql generation | ep-0003 / incident-fff68272d2477ac4092c8e68 | 3,224 | 194 | 3,418 | 0.0001219400 | 2,233.807 |
+    | proposal | ep-0003 / incident-fff68272d2477ac4092c8e68 | 3,340 | 135 | 3,475 | 0.0001354125 | 3,501.848 |
+    | Average per call | — | 3,304.25 | 160.5 | 3,464.75 | 0.000124408125 | 2,626.495 |
+    | Total (4 calls) | — | 13,217 | 642 | 13,859 | 0.0004976325 | 10,505.980 |
+
+    Extrapolation only: at approximately 60 calls per agent incident, measured average cost per call gives **$0.0074644875 per agent incident**. This is an estimate for the full design, not a measured result. The benchmark USD cap and episode count remain unlocked pending the user's decision after reviewing these numbers.
 
 ## 6. Tái lập
 
