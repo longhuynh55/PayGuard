@@ -59,6 +59,16 @@ def _latest_snapshots(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return latest
 
 
+def _unit_or_null_rule_applies(
+    checklists: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    unit_result = checklists.get("unit_or_null_change", {})
+    return (
+        unit_result.get("status") == "pass"
+        and unit_result.get("scope_match") is True
+    )
+
+
 def _proposal_for_incident(
     operational: sqlite3.Connection,
     incident: Mapping[str, Any],
@@ -67,16 +77,16 @@ def _proposal_for_incident(
     simulator_config,
     triage_config: Mapping[str, Any],
     agent_provider: AgentProposalProvider,
+    checklist_results: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    checklists = check_unit_or_null_change(
+    checklists = checklist_results or check_unit_or_null_change(
         operational,
         incident,
         as_of_time=as_of_time,
         simulator_config=simulator_config,
         triage_config=triage_config,
     )
-    unit_result = checklists.get("unit_or_null_change", {})
-    if unit_result.get("status") == "pass" and unit_result.get("scope_match") is True:
+    if _unit_or_null_rule_applies(checklists):
         return "rule", {
             "cause": "data_pipeline",
             "runbook": "unit_or_null_change",
@@ -93,9 +103,65 @@ def _proposal_for_incident(
     )
     # Evidence is code-owned. A proposal may choose cause/action, but cannot
     # replace the operational checklist or supply evidence_status.
+    agent_checklists = proposal.pop("_agent_checklist_results", {})
+    if isinstance(agent_checklists, Mapping):
+        checklists = {
+            **checklists,
+            **{
+                name: result
+                for name, result in agent_checklists.items()
+                if isinstance(name, str) and isinstance(result, Mapping)
+            },
+        }
     proposal["checklist_results"] = checklists
     proposal.pop("evidence_status", None)
     return "agent", proposal
+
+
+def _decision_already_recorded(
+    operational: sqlite3.Connection,
+    incident: Mapping[str, Any],
+    *,
+    as_of_time: str,
+    policy_version: str,
+    source: str,
+    model_slug: str | None,
+) -> bool:
+    """Avoid repeating a decision for the same source, policy, and provider."""
+    query = (
+        "SELECT 1 FROM decisions WHERE incident_id = ? AND episode_id = ? "
+        "AND as_of_time = ? AND policy_version = ? AND source = ?"
+    )
+    parameters: tuple[Any, ...] = (
+        incident.get("incident_id"),
+        incident.get("episode_id"),
+        as_of_time,
+        policy_version,
+        source,
+    )
+    if source != "rule":
+        query += " AND model_slug IS ?"
+        parameters += (model_slug,)
+    return operational.execute(query + " LIMIT 1", parameters).fetchone() is not None
+
+
+def _ensure_provider_matches_run_history(
+    operational: sqlite3.Connection,
+    *,
+    model_slug: str | None,
+) -> None:
+    """Reject provider changes before this run can write or call an LLM."""
+    existing_slugs = {
+        row[0]
+        for row in operational.execute(
+            "SELECT DISTINCT model_slug FROM decisions WHERE source='agent'"
+        )
+    }
+    if any(existing_slug != model_slug for existing_slug in existing_slugs):
+        raise StorageError(
+            "operational database already contains agent decisions from a different "
+            "provider; use a fresh copy of the run directory per provider"
+        )
 
 
 def run_triage(
@@ -118,6 +184,9 @@ def run_triage(
     triage_config = load_triage_config(triage_config_path)
     gate_config = GateConfig.from_mapping(triage_config)
     provider = agent_provider or UnconfiguredAgent()
+    provider_model_slug = getattr(provider, "model_slug", None)
+    if provider_model_slug is not None and not isinstance(provider_model_slug, str):
+        provider_model_slug = None
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     t0 = utc_timestamp(
         datetime.combine(
@@ -139,6 +208,10 @@ def run_triage(
     incidents_inserted = 0
     decisions_inserted = 0
     with _open_operational(operational_path) as operational:
+        _ensure_provider_matches_run_history(
+            operational,
+            model_slug=provider_model_slug,
+        )
         episode_ids = tuple(
             row[0]
             for row in operational.execute(
@@ -198,6 +271,9 @@ def run_triage(
                 incidents_inserted += persist_monitoring_rows(
                     operational, "incidents", current_incident_rows
                 )
+                # run_sql uses its own read-only connection; publish this
+                # episode/as-of snapshot before any agent can request it.
+                operational.commit()
 
                 incident_snapshot = read_as_of(
                     operational,
@@ -213,6 +289,25 @@ def run_triage(
                     and row["available_at"] == as_of_time
                 ]
                 for incident in current_open:
+                    checklists = check_unit_or_null_change(
+                        operational,
+                        incident,
+                        as_of_time=as_of_time,
+                        simulator_config=simulator_config,
+                        triage_config=triage_config,
+                    )
+                    source_hint = (
+                        "rule" if _unit_or_null_rule_applies(checklists) else "agent"
+                    )
+                    if _decision_already_recorded(
+                        operational,
+                        incident,
+                        as_of_time=as_of_time,
+                        policy_version=gate_config.policy_version,
+                        source=source_hint,
+                        model_slug=provider_model_slug,
+                    ):
+                        continue
                     source, proposal = _proposal_for_incident(
                         operational,
                         incident,
@@ -220,7 +315,24 @@ def run_triage(
                         simulator_config=simulator_config,
                         triage_config=triage_config,
                         agent_provider=provider,
+                        checklist_results=checklists,
                     )
+                    tool_error = proposal.pop("_tool_error", False)
+                    tool_error_reason = proposal.pop("_tool_error_reason", None)
+                    usage = proposal.pop("_usage", None)
+                    proposed_model_slug = proposal.pop("_model_slug", provider_model_slug)
+                    model_slug = None if source == "rule" else proposed_model_slug
+                    if not isinstance(tool_error, bool):
+                        tool_error = True
+                        tool_error_reason = "Agent returned an invalid tool-error status."
+                    if usage is not None and not isinstance(usage, Mapping):
+                        tool_error = True
+                        tool_error_reason = "Agent returned invalid LLM usage metadata."
+                        usage = None
+                    if model_slug is not None and not isinstance(model_slug, str):
+                        tool_error = True
+                        tool_error_reason = "Agent returned an invalid model slug."
+                        model_slug = None
                     decision = evaluate_gate(
                         incident,
                         proposal,
@@ -228,8 +340,13 @@ def run_triage(
                         expected_episode_id=episode_id,
                         as_of_time=as_of_time,
                         config=gate_config,
+                        tool_error=tool_error,
+                        tool_error_reason=tool_error_reason,
+                        usage=usage,
+                        model_slug=model_slug,
                     )
                     decisions_inserted += persist_decisions(operational, (decision,))
+                    operational.commit()
 
         operational.commit()
         return {

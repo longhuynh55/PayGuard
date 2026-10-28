@@ -4,8 +4,14 @@ import ast
 import json
 from pathlib import Path
 
-from evaluation import evaluate_decisions
-from simulator.storage import create_export_stores, insert_private_record
+from evaluation import evaluate_decisions, evaluate_operational_decisions
+from simulator.storage import (
+    create_export_stores,
+    insert_operational_record,
+    insert_private_record,
+)
+from triage.decisions import persist_decisions
+from triage.gate import GateConfig, evaluate_gate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +31,11 @@ def _manifest_config() -> dict[str, object]:
 
 
 def _add_episode(store) -> None:
+    insert_operational_record(
+        store.operational,
+        "episodes",
+        {"episode_id": EPISODE_ID, "role": "calibration"},
+    )
     insert_private_record(store.private, "private_episodes", {"episode_id": EPISODE_ID})
     insert_private_record(
         store.private,
@@ -117,6 +128,7 @@ def _decision(
         "reason": "Hand-authored evaluation fixture",
         "close_score": None,
         "policy_version": "fixture-v1",
+        "model_slug": None,
         "input_tokens": None,
         "output_tokens": None,
         "total_tokens": None,
@@ -326,6 +338,54 @@ def test_auto_routing_and_human_review_are_reported_separately(tmp_path: Path) -
         assert result.report_path.is_file()
         assert result.report_path.is_relative_to(store.private_path.parent)
         assert not result.report_path.is_relative_to(store.operational_path.parent / "reports")
+        assert json.loads(result.report_path.read_text(encoding="utf-8")) == result.report
+    finally:
+        store.close()
+
+
+def test_operational_evaluator_reads_persisted_decisions_and_writes_private_report(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    try:
+        decision_at = "2026-02-09T00:00:00.000000Z"
+        incident = {
+            "incident_id": "incident-1",
+            "parent_incident_id": None,
+            "episode_id": EPISODE_ID,
+            "alert_ids_json": '["alert-1"]',
+            "feature": "amount_avg_7d",
+            "segment": "retail",
+            "opened_at": "2026-02-04T00:00:00.000000Z",
+            "status": "open",
+            "event_at": decision_at,
+            "available_at": decision_at,
+        }
+        decision = evaluate_gate(
+            incident,
+            {
+                "cause": "data_pipeline",
+                "runbook": "unit_or_null_change",
+                "action": "human_review",
+                "checklist_results": {},
+                "reason": "Operational database integration fixture.",
+            },
+            source="rule",
+            expected_episode_id=EPISODE_ID,
+            as_of_time=decision_at,
+            config=GateConfig(policy_version="fixture-v1", close_enabled={}),
+        )
+        assert persist_decisions(store.operational, [decision]) == 1
+        store.commit()
+
+        result = evaluate_operational_decisions(
+            store.operational_path,
+            private_db_path=store.private_path,
+        )
+
+        assert result.report["decision_counts"]["total"] == 1
+        assert result.report["timely_routing_recall"]["routed"] == 1
+        assert result.report_path.is_relative_to(store.private_path.parent)
         assert json.loads(result.report_path.read_text(encoding="utf-8")) == result.report
     finally:
         store.close()
