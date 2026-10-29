@@ -119,6 +119,13 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Triển khai:** sinh entity, mạng quan hệ và luồng giao dịch hợp lệ theo nghiệp vụ trong `data.md`. Giữ riêng RNG/seed của thế giới, giao dịch và các thành phần sẽ bổ sung để thay đổi một kịch bản không làm đổi lịch sử nền ngoài ý muốn. Lịch nghiệp vụ công khai chỉ chứa kỳ vọng đã khai báo; không trích đáp án hậu kiểm từ truth.
 - **Kiểm tra:** quan hệ entity, tính hợp lệ mốc thời gian, trạng thái/response, đơn vị tiền và quan hệ refund/reversal theo hợp đồng đã chốt. Cùng seed/config cho cùng nội dung dữ liệu khi sort theo khóa; đổi seed tạo giao dịch khác nhưng vẫn đạt bất biến.
 - **Hoàn tất:** profile smoke sinh được giao dịch hợp lệ và bảng phân phối nền. Có cơ chế lưu fingerprint của nội dung canonical; không yêu cầu file DB nhị phân có hash giống nhau nếu metadata vật lý khác.
+- **Nghiệm thu vòng 2 (orchestrator viết 29/10/2026):**
+  - Giao dịch hợp lệ có đủ ba kênh QR/ví/thẻ theo `data.md` (Bối cảnh VN), tỷ lệ kênh và tham số trong `configs/simulator.yaml` có provenance; schema/cột mới (nếu có) định nghĩa trong `data.md` cùng thay đổi.
+  - Vai trò tài khoản: cá nhân có người nhận quen, hộ kinh doanh nhận tiền qua tài khoản cá nhân (gồm hộ bán online trả nhà cung cấp), mule nội bộ chuyển tiền ra trong vài giờ (mule chỉ là năng lực của thế giới; dòng fraud thuộc P1.4). Vai trò chỉ ở private/generator metadata, không mã hóa trong ID hay cột operational.
+  - Refund/reversal tách dòng, liên kết giao dịch gốc, thời gian và số tiền hợp lệ (không vượt gốc, sau gốc), append-only, có `available_at` đúng.
+  - `_poisson_count` đúng cho mean rất nhỏ và lớn (hoặc config giới hạn miền mean có kiểm tra).
+  - RNG/seed tách theo thành phần: thêm kênh/refund không làm đổi các luồng không liên quan ngoài ý muốn; cùng seed → cùng canonical content; đổi seed → khác nhưng giữ bất biến.
+  - Validate và test bao các bất biến mới; smoke generate/validate đạt; toàn bộ pytest đạt theo quy tắc baseline smoke ở mục 7.
 - **Vòng 1 đã bàn giao:** entity nền và giao dịch QR hợp lệ trước T0; lifecycle append-only; fingerprint nội dung được ghi trong private `run_metadata`. Phân phối và giả định đang dùng nằm trong config cùng provenance; các kênh, vai trò tài khoản và refund/reversal còn ở vòng 2. Vòng 2 cũng sửa `_poisson_count` (`simulator/transactions.py`) cho mean lớn/rất nhỏ hoặc giới hạn miền mean trong config — finding không chặn của review vòng 1.
 
 ### P1.4 — Hành vi fraud và các ca đối chứng (`round1-done`; vòng 2 chưa làm)
@@ -203,3 +210,11 @@ uv run pytest
 ## 7. Task tiếp theo
 
 **Sau ★ — P1 vòng 2.** Mở rộng P1.3, P1.4, P1.6 và P1.7 theo bảng hai vòng; P1.8 chạy pilot 60 và hoàn thiện báo cáo support. P1.8 vòng 1 smoke đã bàn giao.
+
+**Thứ tự P1 vòng 2 — người dùng duyệt 29/10/2026.** Bốn đợt nối tiếp; mỗi đợt review Opus và merge trước khi mở đợt sau:
+1. P1.3 vòng 2 (kênh, vai trò tài khoản, refund/reversal, sửa `_poisson_count`).
+2. P1.4 vòng 2 (đủ cơ chế fraud, social engineering, cash-out, `legit_business_spike`).
+3. P1.6 vòng 2 (các template còn lại trong [data.md](data.md) mục Kịch bản sự cố, ca hai nguyên nhân).
+4. P1.7 + P1.8 vòng 2 (pilot 60 episode 12/24/24, báo cáo support đầy đủ, ca P4.6 thứ ba).
+
+**Quy tắc baseline smoke (người dùng duyệt 29/10/2026):** khi thế giới nền đổi làm đổi dữ liệu smoke, coder được cập nhật các số đếm/fingerprint smoke ghi cứng trong test P1–P4 (ví dụ số `model_scores`, số incident, số alert). KHÔNG được nới bất biến (AS-OF, truth cô lập, pending không phải nhãn âm, quy tắc gate, khóa manifest) hay xóa assertion. Mỗi số đổi phải liệt kê cũ → mới kèm lý do trong báo cáo bàn giao; reviewer đối chiếu từng số.
