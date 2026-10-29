@@ -175,8 +175,9 @@ class OneStepAgent:
             )
             proposal, proposal_error = _normalize_proposal(proposal_result)
         else:
-            # An API-level failure is terminal for this measurement. Do not
-            # issue the second request after authentication/provider failures.
+            # An API-level failure is terminal for every caller, including
+            # triage run and measure. Do not issue the second request after
+            # authentication/provider failures.
             proposal = _fallback_proposal(sql_llm_error)
             proposal_error = sql_llm_error
 
