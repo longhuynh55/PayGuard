@@ -44,7 +44,7 @@
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
-**Việc tiếp theo:** P1 vòng 2 với pilot 60 theo [sub-plan](docs/p1-implementation.md); ca P4.6 thứ ba hoãn tới pilot này theo quyết định người dùng 29/10 (mục 5). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Không khóa ngân sách benchmark hay số episode trước khi người dùng xem số đo. Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
+**Việc tiếp theo:** P1 vòng 2 với pilot 60 theo [sub-plan](docs/p1-implementation.md); ca P4.6 thứ ba hoãn tới pilot này theo quyết định người dùng 29/10 (mục 5). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Mốc ★ đạt 29/10; ngân sách benchmark đã khóa (mục 5: 10 USD, 60 episode). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
 
 ---
 
@@ -87,7 +87,7 @@ MVP là phần tối thiểu để trả lời câu hỏi chính. Phần "làm s
 
 ---
 
-## 5. Ngân sách LLM 🟡 — chốt sau luồng mỏng
+## 5. Ngân sách LLM ✅ — khóa 29/10/2026 sau luồng mỏng
 
 Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của số episode là chi phí agent. 60 episode là **sàn**. Cần pipeline để đo nên chia hai mức: trần tạm cho pilot (không chặn P1–P3) và ngân sách benchmark khóa sau khi đo.
 
@@ -107,6 +107,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
     Bối cảnh: ở `ep-0001`, SQL do LLM sinh chạy lỗi (`sql_execution_error`); cả hai decision đều ra `human_review` với `evidence_status = insufficient`, nên token proposal của `ep-0001` chưa phản ánh ca SQL thành công.
 
     Chỉ là ngoại suy: với khoảng 60 lời gọi mỗi incident tới agent, chi phí trung bình đo được cho **khoảng 0,0075 USD (0,0074644875) mỗi incident tới agent**. Đây là ước lượng cho thiết kế đầy đủ, không phải kết quả đo. Trần USD benchmark và số episode chưa khóa, chờ người dùng quyết sau khi xem số đo.
+  - **Khóa ngân sách — người dùng chốt 29/10/2026:** trần **10 USD** cho toàn benchmark (gồm 4 baseline và ablation); số episode giữ **60** (pilot 12/24/24). Sau pilot 60, đo số incident tới agent thật mỗi episode; chỉ tăng episode (calibration/test theo tỉ lệ 1:2:2) nếu người dùng duyệt lại. Trần tạm 1 USD trong `configs/llm.yaml` vẫn áp cho P4 vòng 1; đổi sang trần benchmark khi triển khai chạy benchmark.
 
 ## 6. Tái lập
 
@@ -118,6 +119,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 29/10/2026 | Người dùng khóa ngân sách benchmark 10 USD (gồm 4 baseline + ablation), giữ 60 episode; tăng episode chỉ khi duyệt lại sau pilot 60 |
 | 29/10/2026 | P4.6: smoke chỉ có 2 incident tới agent ngoài test → người dùng chọn đo 2 ca thay vì 3 (ca thứ ba hoãn tới pilot 60); 4 lời gọi thật, 13.217 token vào / 642 ra, ≈ 0,0005 USD; chưa khóa trần benchmark và số episode. Mốc ★ đạt |
 | 27/10/2026 | Người dùng đổi Reviewer sang Claude Opus 5.5 (sub-agent mới mỗi lượt review); `gpt-6.1-sol` thành dự phòng |
 | 27/10/2026 | Người dùng chốt runbook `unit_or_null_change`: tỉ số trung vị sau ÷ trước dùng dải log ×/÷2 quanh {100, 1/100, 1000} thay ± 5% (± 5% không đạt được với cỡ mẫu ngày nhỏ; xem [triage](docs/triage.md) mục 3). Tạo policy version mới |
