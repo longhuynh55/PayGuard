@@ -119,6 +119,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 31/10/2026 | Review P5.2 r1 → người dùng chốt: `ambiguous_match` chỉ chặn chấm nguyên nhân/reward benign/utility, metric rủi ro và routing tính mọi truth ứng viên; hiệu ứng trễ = cửa sổ metric + lookback feature; mở P3.7 (metric volume theo ngày + sửa alert nền PSI `amount_avg_7d`) trước P5.0b. BACKLOG-5: ca FP clean `ep-0001` kỳ vọng `small_sample` → `insufficient` → `human_review` |
 | 30/10/2026 | Sau phản biện kiến trúc (orchestrator + supervisor), người dùng duyệt chen trước P1.4: bảng quyết định UQ, matcher hoàn chỉnh, bảng support development, harness + sổ chi phí bền ([sub-plan P5](docs/p5-implementation.md)); P4 vòng 2 vẫn sau P1. Chỉ orchestrator cập nhật Trạng thái MASTER; file điều phối lưu bền ngoài `/tmp`; đo `--durations` trước khi tối ưu test |
 | 30/10/2026 | P4.1 vòng 2 (recheck cap): **người dùng chốt** bộ đếm theo từng `incident_id`, incident con bắt đầu bộ đếm riêng. Định nghĩa khoảng cách ≥ 24 giờ giữa hai `as_of_time` UTC liên tiếp do implementer đặt theo `docs/triage.md` mục 2 ("cách nhau một ngày"), reviewer xác nhận khớp nhịp chạy hằng ngày; recheck thứ ba hoặc quá sớm chuyển `human_review` |
 | 29/10/2026 | Người dùng khóa ngân sách benchmark 10 USD (gồm 4 baseline + ablation), giữ 60 episode; tăng episode chỉ khi duyệt lại sau pilot 60 |
