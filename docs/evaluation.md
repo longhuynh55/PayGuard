@@ -93,3 +93,12 @@ Cùng monitoring, snapshot, dữ liệu as-of:
 ## 8. Xong khi
 
 Có bảng và biểu đồ cuối cùng cho README: metric rủi ro trên tập truth/episode cố định, metric vận hành kèm số incident con, giới hạn quyền tự đóng của agent, mẫu số/độ bao phủ đánh giá và khoảng bất định phù hợp, kể cả kết quả âm tính. Không yêu cầu agent phải thắng baseline.
+
+## 9. CLI chấm `decisions` và chọn cặp (P4.5)
+
+- Lệnh: `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Đọc `operational/observations.sqlite` ở chế độ read-only, ghi báo cáo vào `private/reports/p4_5_decisions.json`, in `policy_version` và `model_slug` đã chọn.
+- **Một báo cáo chỉ gồm một cặp `(policy_version, model_slug)`.** Quyết định agent trong DB tạo danh sách cặp ứng viên. Nếu có nhiều hơn một cặp mà không truyền selector, lệnh từ chối: thoát mã 2, liệt kê các cặp, không ghi báo cáo.
+- Selector phải chọn **đúng một** cặp. Không khớp cặp nào, hoặc khớp nhiều cặp (chỉ `--policy-version` khi policy đó có nhiều model), đều bị từ chối. Cặp agent chưa cấu hình (`model_slug` NULL) được chọn bằng `--policy-version` khi policy đó chỉ có một cặp.
+- Quyết định `rule` (`model_slug` NULL) luôn được tính cho `policy_version` đã chọn. Quyết định của policy khác và quyết định agent của cặp khác không được tính; số bị loại ghi ở `selection.excluded_decision_count`.
+- DB không có quyết định agent: cặp ứng viên là các `policy_version` của rule; có nhiều policy thì cần `--policy-version`.
+- Báo cáo có khối `selection` gồm `policy_version`, `model_slug` (NULL khi cặp đã chọn là agent chưa cấu hình hoặc chỉ có rule) và `excluded_decision_count`. Tên file không đổi theo cặp, nên chạy cặp khác trên cùng run-dir sẽ ghi đè báo cáo trước; `selection` cho biết báo cáo thuộc cặp nào.

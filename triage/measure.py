@@ -60,7 +60,7 @@ def _prepare_incident_snapshots(
     simulator_config,
     t0: str,
     catalog_cutoff: str,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     metric_rows: list[dict[str, Any]] = []
     for episode_id in episode_ids:
         metric_rows.extend(
@@ -81,6 +81,7 @@ def _prepare_incident_snapshots(
         raise StorageError("daily_metrics catalog contains a row unavailable in the run timeline")
 
     snapshot_times = tuple(sorted({row["as_of_time"] for row in metric_rows}))
+    staged_rows: list[dict[str, Any]] = []
     for as_of_time in snapshot_times:
         for episode_id in episode_ids:
             alerts = read_as_of(
@@ -103,10 +104,27 @@ def _prepare_incident_snapshots(
             current_rows = [
                 row for row in incident_result.incidents if row["available_at"] == as_of_time
             ]
+            # Not committed: candidate checks read these rows back via read_as_of.
             persist_monitoring_rows(operational, "incidents", current_rows)
-            # The SQL tool opens a separate read-only connection for this snapshot.
-            operational.commit()
-    return snapshot_times
+            staged_rows.extend(current_rows)
+    return snapshot_times, staged_rows
+
+
+def _commit_incident_prefix(
+    operational: sqlite3.Connection,
+    staged_rows: Sequence[Mapping[str, Any]],
+    selected: Sequence[Mapping[str, Any]],
+) -> None:
+    """Roll back staged snapshots and commit those through the latest selected as_of."""
+    operational.rollback()
+    if selected:
+        latest_as_of = max(candidate["incident"]["available_at"] for candidate in selected)
+        persist_monitoring_rows(
+            operational,
+            "incidents",
+            [row for row in staged_rows if row["available_at"] <= latest_as_of],
+        )
+    operational.commit()
 
 
 def _agent_eligible_candidates(
@@ -352,7 +370,10 @@ def measure_triage(
         if not development_ids:
             raise StorageError("operational database has no development episodes")
 
-        development_snapshot_times = _prepare_incident_snapshots(
+        # Candidate checks read incident rows back through read_as_of, so every
+        # snapshot stays staged in this transaction until the selection is known.
+        operational.execute("BEGIN")
+        development_snapshot_times, staged_rows = _prepare_incident_snapshots(
             operational,
             episode_ids=development_ids,
             simulator_config=simulator_config,
@@ -370,13 +391,14 @@ def measure_triage(
         selected = development_candidates[:incidents]
 
         if len(selected) < incidents and calibration_ids:
-            calibration_snapshot_times = _prepare_incident_snapshots(
+            calibration_snapshot_times, calibration_rows = _prepare_incident_snapshots(
                 operational,
                 episode_ids=calibration_ids,
                 simulator_config=simulator_config,
                 t0=t0,
                 catalog_cutoff=catalog_cutoff,
             )
+            staged_rows.extend(calibration_rows)
             calibration_candidates = _agent_eligible_candidates(
                 operational,
                 episode_ids=calibration_ids,
@@ -387,6 +409,7 @@ def measure_triage(
             )
             selected.extend(calibration_candidates[: incidents - len(selected)])
 
+        _commit_incident_prefix(operational, staged_rows, selected)
         selected_ids = [_selection_entry(candidate) for candidate in selected]
         client_config = agent_provider.client.config
         report: dict[str, Any] = {

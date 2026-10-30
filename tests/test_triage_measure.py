@@ -15,6 +15,8 @@ from triage.measure import MeasurementError, measure_triage
 
 
 DAY_0 = "2026-02-01T16:59:59.999999Z"
+DAY_1 = "2026-02-02T16:59:59.999999Z"
+DAY_2 = "2026-02-03T16:59:59.999999Z"
 
 
 def _metric(episode_id: str) -> dict[str, object]:
@@ -50,6 +52,28 @@ def _alert(episode_id: str) -> dict[str, object]:
         "threshold": 0.25,
         "event_at": DAY_0,
         "available_at": DAY_0,
+    }
+
+
+def _metric_on(episode_id: str, as_of_time: str) -> dict[str, object]:
+    return {
+        **_metric(episode_id),
+        "as_of_time": as_of_time,
+        "event_at": as_of_time,
+        "available_at": as_of_time,
+        "business_date": as_of_time[:10],
+        "window_start": as_of_time[:10],
+        "window_end": as_of_time[:10],
+    }
+
+
+def _alert_on(episode_id: str, as_of_time: str) -> dict[str, object]:
+    return {
+        **_alert(episode_id),
+        "alert_id": f"alert-{episode_id}-{as_of_time[:10]}",
+        "as_of_time": as_of_time,
+        "event_at": as_of_time,
+        "available_at": as_of_time,
     }
 
 
@@ -230,3 +254,63 @@ def test_measure_budget_stop_blocks_further_requests_and_records_status(tmp_path
         assert connection.execute(
             "SELECT COUNT(*) FROM decisions WHERE source='agent'"
         ).fetchone()[0] == 1
+
+
+def test_measure_persists_incident_snapshots_only_through_latest_selected_as_of(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "measure-snapshot-prefix"
+    alert_days = {
+        "ep-dev-a": (DAY_0, DAY_1),
+        "ep-dev-b": (DAY_1, DAY_2),
+    }
+    with create_export_stores(run_dir) as stores:
+        for episode_id in alert_days:
+            insert_operational_record(
+                stores.operational,
+                "episodes",
+                {"episode_id": episode_id, "role": "development"},
+            )
+        persist_monitoring_rows(
+            stores.operational,
+            "daily_metrics",
+            [
+                _metric_on(episode_id, as_of_time)
+                for episode_id in alert_days
+                for as_of_time in (DAY_0, DAY_1, DAY_2)
+            ],
+        )
+        persist_monitoring_rows(
+            stores.operational,
+            "alerts",
+            [
+                _alert_on(episode_id, as_of_time)
+                for episode_id, days in alert_days.items()
+                for as_of_time in days
+            ],
+        )
+        database_path = stores.operational_path
+    provider, _ = _fake_provider(database_path)
+
+    report = _run_measure(run_dir, provider, run_dir / "prefix.json", count=2)
+
+    assert report["status"] == "complete"
+    selected = [
+        (entry["episode_id"], entry["as_of_time"]) for entry in report["selected_incidents"]
+    ]
+    assert selected == [("ep-dev-a", DAY_0), ("ep-dev-b", DAY_1)]
+    latest_selected = max(as_of_time for _, as_of_time in selected)
+    with sqlite3.connect(database_path) as connection:
+        snapshots = connection.execute(
+            "SELECT episode_id, available_at, event_at FROM incidents "
+            "ORDER BY episode_id, available_at"
+        ).fetchall()
+    assert [(episode_id, available_at) for episode_id, available_at, _ in snapshots] == [
+        ("ep-dev-a", DAY_0),
+        ("ep-dev-a", DAY_1),
+        ("ep-dev-b", DAY_1),
+    ]
+    assert all(
+        available_at <= latest_selected and event_at <= latest_selected
+        for _, available_at, event_at in snapshots
+    )
