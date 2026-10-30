@@ -14,6 +14,10 @@
 
 - Dùng thời gian (gồm hiệu ứng trễ của cửa sổ 7 ngày), entity/segment và feature bị tác động.
 - Trạng thái `matched` / `ambiguous_match` / `unmatched`. Không khớp **không** tự thành benign. Ambiguous và unmatched được đếm, giữ trong workload, không chấm accuracy. Matcher khóa trên development.
+- **Làm rõ 31/10/2026 (người dùng chốt, review P5.2 r1):**
+  - *Hiệu ứng trễ* = số ngày cửa sổ metric + số ngày lookback của chính feature (ví dụ `amount_avg_7d`: 7 + 7; `txn_count_24h`: 7 + 1), lấy từ định nghĩa public của metric/feature, không từ metadata truth.
+  - *`ambiguous_match`* chỉ chặn chấm đúng nguyên nhân, reward benign và utility. Metric rủi ro và routing (unsafe truth/episode rate, timely routing recall, detection recall) liên kết quyết định/incident với **mọi** truth ứng viên đã khả dụng tại `decision_at` (mục 3): đóng một incident ứng viên của cả benign B1 và fraud F1 thì F1 là unsafe (phản ví dụ `mixed` trong `review/verify_plan_claims.py`). Khó gán nguyên nhân không làm giảm detection recall.
+  - Thành phần cùng `parent_scenario` (ca hai nguyên nhân) được ghép với cả hai truth thành phần.
 - *Mở rộng:* phân xử thủ công ca ambiguous (người phân xử không xem câu trả lời agent).
 
 ## 3. Chấm theo thời điểm quyết định

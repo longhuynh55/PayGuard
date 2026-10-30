@@ -130,6 +130,10 @@ class WorldConfig(StrictModel):
     expected_transactions_per_customer_local_day: ConfigValue[PositiveFloat]
     minimum_customer_count: ConfigValue[PositiveInt]
     minimum_merchant_count: ConfigValue[PositiveInt]
+    account_role_weights: ConfigValue[dict[str, NonNegativeFloat]]
+    familiar_account_payee_count: ConfigValue[PositiveInt]
+    household_supplier_merchant_count: ConfigValue[PositiveInt]
+    internal_mule_outbound_window_hours: ConfigValue[PositiveInt]
     customer_segments: ConfigValue[list[str]]
     customer_provinces: ConfigValue[list[str]]
     customer_age_bands: ConfigValue[list[str]]
@@ -154,11 +158,34 @@ class WorldConfig(StrictModel):
             raise ValueError("profile categories must not contain duplicates")
         return value
 
+    @field_validator("account_role_weights")
+    @classmethod
+    def account_role_weights_must_cover_all_roles(
+        cls, value: ConfigValue[dict[str, NonNegativeFloat]]
+    ) -> ConfigValue[dict[str, NonNegativeFloat]]:
+        weights = value.value
+        if set(weights) != {"individual", "household_business", "internal_mule"}:
+            raise ValueError(
+                "world account_role_weights must define individual, household_business, and internal_mule"
+            )
+        if any(not math.isfinite(weight) or weight <= 0 for weight in weights.values()):
+            raise ValueError("world account_role_weights must be finite and positive")
+        if not math.isclose(sum(weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("world account_role_weights must sum to 1")
+        return value
+
 
 class TransactionConfig(StrictModel):
     minimum_amount: ConfigValue[PositiveInt]
     maximum_amount: ConfigValue[PositiveInt]
     channel: ConfigValue[str]
+    channel_weights: ConfigValue[dict[str, NonNegativeFloat]]
+    account_transfer_channel: ConfigValue[str]
+    account_transfer_rate_per_individual_local_day: ConfigValue[PositiveFloat]
+    refund_probability: ConfigValue[Probability]
+    reversal_probability: ConfigValue[Probability]
+    adjustment_minimum_delay_minutes: ConfigValue[PositiveInt]
+    adjustment_maximum_delay_hours: ConfigValue[PositiveInt]
     authorization_response_code: ConfigValue[str]
     authorization_delay_seconds: ConfigValue[PositiveInt]
     hourly_transaction_weights: ConfigValue[list[NonNegativeFloat]]
@@ -169,6 +196,29 @@ class TransactionConfig(StrictModel):
     def channel_must_be_nonempty(cls, value: ConfigValue[str]) -> ConfigValue[str]:
         if not value.value.strip():
             raise ValueError("transactions channel must not be blank")
+        return value
+
+    @field_validator("channel_weights")
+    @classmethod
+    def channel_weights_must_cover_all_channels(
+        cls, value: ConfigValue[dict[str, NonNegativeFloat]]
+    ) -> ConfigValue[dict[str, NonNegativeFloat]]:
+        weights = value.value
+        if set(weights) != {"qr", "wallet", "card"}:
+            raise ValueError("transactions channel_weights must define qr, wallet, and card")
+        if any(not math.isfinite(weight) or weight <= 0 for weight in weights.values()):
+            raise ValueError("transactions channel_weights must be finite and positive")
+        if not math.isclose(sum(weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("transactions channel_weights must sum to 1")
+        return value
+
+    @field_validator("account_transfer_channel")
+    @classmethod
+    def account_transfer_channel_is_wallet(
+        cls, value: ConfigValue[str]
+    ) -> ConfigValue[str]:
+        if value.value != "wallet":
+            raise ValueError("transactions.account_transfer_channel is fixed to 'wallet'")
         return value
 
     @field_validator("authorization_response_code")
@@ -204,6 +254,13 @@ class TransactionConfig(StrictModel):
             raise ValueError("transactions minimum_amount must be less than maximum_amount")
         if self.minimum_amount.unit != self.maximum_amount.unit:
             raise ValueError("transactions minimum_amount and maximum_amount must use the same unit")
+        if self.refund_probability.value + self.reversal_probability.value > 1:
+            raise ValueError("transactions refund and reversal probabilities must sum to at most 1")
+        if (
+            self.adjustment_maximum_delay_hours.value * 60
+            < self.adjustment_minimum_delay_minutes.value
+        ):
+            raise ValueError("transactions adjustment delay range must be ordered")
         lifecycle_delay_seconds = (
             self.authorization_delay_seconds.value
             + self.settlement_delay_minutes.value * 60

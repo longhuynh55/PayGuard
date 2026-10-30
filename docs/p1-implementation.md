@@ -111,7 +111,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Kiểm tra:** khóa trùng, FK mồ côi, truy vấn nhầm episode, bản ghi chưa khả dụng, thời điểm đúng bằng cutoff; thêm dữ liệu chỉ khả dụng sau t không đổi snapshot tại t. Liệt kê bảng/cột/export của operational để xác nhận không có truth nội bộ.
 - **Hoàn tất:** fixture ghi/đọc được, trả đúng các hàng theo episode/as-of và không lẫn truth. Không coi một DB nằm ở thư mục khác là bằng chứng cô lập tool end-to-end.
 
-### P1.3 — Thế giới và giao dịch hợp lệ (`round1-done`; vòng 2 chưa làm)
+### P1.3 — Thế giới và giao dịch hợp lệ (`round1-done`; vòng 2 ban đầu chưa làm; vòng 2 triển khai 29/10/2026 — xem trạng thái bổ sung bên dưới)
 
 - **Mục tiêu:** sinh lịch sử nền nhất quán từ profile khách hàng/merchant, gồm hành vi ngày/giờ/kênh theo config.
 - **Phụ thuộc:** P1.2.
@@ -127,6 +127,11 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
   - RNG/seed tách theo thành phần: thêm kênh/refund không làm đổi các luồng không liên quan ngoài ý muốn; cùng seed → cùng canonical content; đổi seed → khác nhưng giữ bất biến.
   - Validate và test bao các bất biến mới; smoke generate/validate đạt; toàn bộ pytest đạt theo quy tắc baseline smoke ở mục 7.
 - **Vòng 1 đã bàn giao:** entity nền và giao dịch QR hợp lệ trước T0; lifecycle append-only; fingerprint nội dung được ghi trong private `run_metadata`. Phân phối và giả định đang dùng nằm trong config cùng provenance; các kênh, vai trò tài khoản và refund/reversal còn ở vòng 2. Vòng 2 cũng sửa `_poisson_count` (`simulator/transactions.py`) cho mean lớn/rất nhỏ hoặc giới hạn miền mean trong config — finding không chặn của review vòng 1.
+- **Trạng thái bổ sung vòng 2 (29–30/10/2026):** runtime P1.3 hoàn tất: đã triển khai ba kênh, A2A và vai trò ở private metadata, refund/reversal append-only, cùng `_poisson_count` cho mean rất nhỏ/lớn. Smoke baseline đổi theo bảng bàn giao; downstream P2/P3/P4 đã chạy. Full pytest còn assertion non-pipeline `not_applicable` không đạt; kết quả và quyết định giữ assertion được ghi tại [P4 sub-plan](p4-implementation.md).
+- **Cập nhật nghiệm thu 30/10/2026:** theo quyết định người dùng, chỉ case false positive minimum-support của `ep-0001` được cô lập thành strict xfail và ghi BACKLOG-5 tại [P4.2](p4-implementation.md); các assertion non-pipeline khác vẫn chạy. Full suite: 304 passed, 1 xfailed; smoke generate/validate và các kiểm tra chuẩn đều đạt. Không đổi runtime P1.3.
+- **Ghi chú review fix vòng 1 (30/10/2026):** A2A thêm vào luồng trong ngày làm dịch `daily_index`, từ đó đổi `txn_id` một số dòng card-testing P1.4; P1.5 khóa RNG `reported_at` theo `txn_id`, nên 53/540 card-testing rows đổi `reported_at` và fraud calibration đổi 24 → 23. Không re-key ID ở fix này; có thể tách namespace khi triển khai P1.4. Assertion reproducibility theo world seed chỉ so luồng merchant payment và các trường độc lập với profile; không yêu cầu toàn bộ transaction/event set giống nhau vì world seed quyết định account role, familiar payee, supplier và A2A.
+- **Đính chính review 30/10/2026:** câu full pytest còn assertion non-pipeline `not_applicable` không đạt ở trạng thái bổ sung phía trên đã được supersede bởi quyết định người dùng 30/10: chỉ case `ep-0001` là `xfail(strict=True)`; các case khác vẫn assert.
+- **Hoàn tất fix review vòng 1 (30/10/2026):** pipeline validator đối chiếu adjustment với pre-injection amount lưu riêng trong private effect metadata và chỉ cho phép NULL ở các transaction thuộc pipeline null effect; trigger/validator giới hạn adjustment tổng, số lượng và trạng thái settlement. Default operational fingerprint giữ `6defebb0…`, không đổi bảng baseline smoke. Full suite: 311 passed, 1 xfailed; generate/validate smoke 16/16.
 
 ### P1.4 — Hành vi fraud và các ca đối chứng (`round1-done`; vòng 2 chưa làm)
 
@@ -216,5 +221,7 @@ uv run pytest
 2. P1.4 vòng 2 (đủ cơ chế fraud, social engineering, cash-out, `legit_business_spike`).
 3. P1.6 vòng 2 (các template còn lại trong [data.md](data.md) mục Kịch bản sự cố, ca hai nguyên nhân).
 4. P1.7 + P1.8 vòng 2 (pilot 60 episode 12/24/24, báo cáo support đầy đủ, ca P4.6 thứ ba).
+
+**Backlog P1.3 vòng 2 (không chặn, [findings r2](../review/findings/P1.3-r2-r2.md)):** test trigger refund chèn adjustment hợp lệ trước nên che các ca null/vượt gốc/không sau gốc (mutation vẫn pass) → thử từng ca trên giao dịch chưa có adjustment; tập data_ticket tường minh thiếu kiểm `source='rule'`, `cause='data_pipeline'` và tổng số dòng; thiếu test âm cho các nhánh validator pre-injection (`validate.py:843/756/762/547/686`); `data.md` mục effect reference chưa link mô tả `pre_injection_amount_by_txn_id`.
 
 **Quy tắc baseline smoke (người dùng duyệt 29/10/2026):** khi thế giới nền đổi làm đổi dữ liệu smoke, coder được cập nhật các số đếm/fingerprint smoke ghi cứng trong test P1–P4 (ví dụ số `model_scores`, số incident, số alert). KHÔNG được nới bất biến (AS-OF, truth cô lập, pending không phải nhãn âm, quy tắc gate, khóa manifest) hay xóa assertion. Mỗi số đổi phải liệt kê cũ → mới kèm lý do trong báo cáo bàn giao; reviewer đối chiếu từng số.

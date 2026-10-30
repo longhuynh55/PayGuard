@@ -18,7 +18,11 @@ from simulator.randomness import derive_seed
 from simulator.reproducibility import canonical_episode_fingerprint
 from simulator.storage import insert_operational_record, insert_private_record
 from simulator.transactions import TransactionSummary, generate_episode_transactions, generate_transactions
-from simulator.world import WorldSummary, generate_world
+from simulator.world import (
+    ACCOUNT_PROFILE_METADATA_KEY,
+    WorldSummary,
+    generate_world,
+)
 
 
 EPISODE_SEED_DERIVATION = "sha256-keyed p1.7.episode.v1, reduced modulo 2^63"
@@ -171,7 +175,20 @@ def generate_episodes(
     private.execute("SAVEPOINT p1_7_episode_run")
     try:
         base_world = generate_world(operational, simulator_config, profile)
-        base_transactions = generate_transactions(operational, simulator_config, profile)
+        insert_private_record(
+            private,
+            "run_metadata",
+            {
+                "key": ACCOUNT_PROFILE_METADATA_KEY,
+                "value_json": base_world.private_metadata(),
+            },
+        )
+        base_transactions = generate_transactions(
+            operational,
+            simulator_config,
+            profile,
+            world_summary=base_world,
+        )
         base_fraud = generate_card_testing(
             operational,
             private,
@@ -214,6 +231,7 @@ def generate_episodes(
                 episode_id=episode_id,
                 seed=episode_seed,
                 duration_days=duration_days,
+                world_summary=base_world,
             )
             fraud_summary = generate_card_testing(
                 operational,

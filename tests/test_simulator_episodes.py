@@ -25,6 +25,7 @@ from simulator.reproducibility import (
 )
 from simulator.schema import PRIVATE_TABLES
 from simulator.storage import create_export_stores, list_operational_schema
+from simulator.world import ACCOUNT_PROFILE_METADATA_KEY
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +130,12 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             for row in pair.private.execute("SELECT * FROM episode_manifest")
         }
         operational_schema = list_operational_schema(pair.operational)
+        account_metadata = json.loads(
+            pair.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key = ?",
+                (ACCOUNT_PROFILE_METADATA_KEY,),
+            ).fetchone()[0]
+        )
 
         assert len(summary.episodes) == 5
         assert Counter(row["role"] for row in manifest.values()) == {
@@ -145,6 +152,54 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
         assert {episode_id: row["role"] for episode_id, row in manifest.items()} == expected_roles
         assert {episode_id: row["template"] for episode_id, row in manifest.items()} == expected_templates
         assert set(operational_schema["episodes"]) == {"episode_id", "role"}
+        assert "recipient_customer_id" in operational_schema["transactions"]
+        assert not any(
+            column in {"account_role", "role", "familiar_payees"}
+            for table, columns in operational_schema.items()
+            if table != "episodes"
+            for column in columns
+        )
+        account_roles = account_metadata["account_roles"]
+        assert set(account_roles.values()) == {
+            "individual",
+            "household_business",
+            "internal_mule",
+        }
+        assert set(account_roles) == {
+            row[0] for row in pair.operational.execute("SELECT customer_id FROM customers")
+        }
+        account_transfers = [
+            dict(row)
+            for row in pair.operational.execute(
+                "SELECT * FROM transactions WHERE recipient_customer_id IS NOT NULL"
+            )
+        ]
+        household_accounts = {
+            customer_id
+            for customer_id, role in account_roles.items()
+            if role == "household_business"
+        }
+        assert account_transfers
+        assert household_accounts & {
+            row["recipient_customer_id"] for row in account_transfers
+        }
+        assert all(
+            account_roles[row["customer_id"]] == "individual"
+            and account_roles[row["recipient_customer_id"]] != "internal_mule"
+            and row["merchant_id"] is None
+            and row["channel"] == "wallet"
+            for row in account_transfers
+        )
+        supplier_merchants = account_metadata["supplier_merchants"]
+        household_supplier_payments = [
+            row
+            for row in pair.operational.execute(
+                "SELECT customer_id, merchant_id FROM transactions WHERE merchant_id IS NOT NULL"
+            )
+            if account_roles[row["customer_id"]] == "household_business"
+            and row["merchant_id"] in supplier_merchants[row["customer_id"]]
+        ]
+        assert household_supplier_payments
         assert not set(PRIVATE_TABLES) & set(operational_schema)
         assert set(PRIVATE_TABLES) <= {
             row[0]
