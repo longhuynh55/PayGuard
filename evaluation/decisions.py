@@ -105,6 +105,85 @@ def _validated_decisions(
     )
 
 
+def _selector_text(value: str | None, *, name: str) -> str | None:
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise DecisionEvaluationError(f"{name} selector must be non-empty text")
+    return value
+
+
+def _format_pairs(pairs: Iterable[tuple[str, str | None]]) -> str:
+    ordered = sorted(pairs, key=lambda pair: (pair[0], pair[1] or ""))
+    return ", ".join(
+        f"(policy_version={policy!r}, model_slug={slug!r})" for policy, slug in ordered
+    ) or "none"
+
+
+def _select_decision_scope(
+    decisions: tuple[dict[str, Any], ...],
+    *,
+    policy_version: str | None,
+    model_slug: str | None,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+    """Keep one (policy_version, model_slug) pair so a report never mixes providers.
+
+    Agent decisions give the candidate pairs; without agent decisions the candidates
+    are the rule policy versions. Rule decisions carry NULL model_slug, so they follow
+    the selected policy_version only.
+    """
+    policy_version = _selector_text(policy_version, name="policy_version")
+    model_slug = _selector_text(model_slug, name="model_slug")
+    agent_pairs = {
+        (row["policy_version"], row["model_slug"])
+        for row in decisions
+        if row["source"] == "agent"
+    }
+    candidates = agent_pairs or {(row["policy_version"], None) for row in decisions}
+    if policy_version is None and model_slug is None:
+        if len(candidates) > 1:
+            raise DecisionEvaluationError(
+                f"operational decisions contain {len(candidates)} (policy_version, model_slug) "
+                f"pairs: {_format_pairs(candidates)}; select exactly one with "
+                "--policy-version and/or --model-slug"
+            )
+        selected = next(iter(candidates), (None, None))
+    else:
+        selector = ", ".join(
+            f"{name}={value!r}"
+            for name, value in (("policy_version", policy_version), ("model_slug", model_slug))
+            if value is not None
+        )
+        matches = {
+            pair
+            for pair in candidates
+            if (policy_version is None or pair[0] == policy_version)
+            and (model_slug is None or pair[1] == model_slug)
+        }
+        if not matches:
+            raise DecisionEvaluationError(
+                f"no (policy_version, model_slug) pair matches {selector}; "
+                f"available pairs: {_format_pairs(candidates)}"
+            )
+        if len(matches) > 1:
+            raise DecisionEvaluationError(
+                f"{selector} matches {len(matches)} pairs: {_format_pairs(matches)}; "
+                "add --model-slug to select exactly one"
+            )
+        selected = next(iter(matches))
+    selected_policy_version, selected_model_slug = selected
+    kept = tuple(
+        row
+        for row in decisions
+        if row["policy_version"] == selected_policy_version
+        and (row["source"] == "rule" or row["model_slug"] == selected_model_slug)
+    )
+    selection = {
+        "policy_version": selected_policy_version,
+        "model_slug": selected_model_slug,
+        "excluded_decision_count": len(decisions) - len(kept),
+    }
+    return kept, selection
+
+
 def _scope_snapshots(decision: Mapping[str, Any]) -> tuple[dict[str, Any], ...] | None:
     """Represent the decision's explicit scope interval for the P3 matcher."""
     scope = json.loads(decision["scope_json"])
@@ -197,6 +276,7 @@ def _build_report(
     matches: tuple[dict[str, Any], ...],
     truth_rows: tuple[dict[str, Any], ...],
     episode_ids: tuple[str, ...],
+    selection: dict[str, Any],
 ) -> dict[str, Any]:
     truth_by_id = {str(row["incident_truth_id"]): row for row in truth_rows}
     required_truth_ids = {
@@ -285,6 +365,7 @@ def _build_report(
         "schema_version": 1,
         "matching_scope": "decision_scope_effect_available_at",
         "episode_ids": list(episode_ids),
+        "selection": selection,
         "decision_counts": {
             "total": len(decisions),
             "matched": matched_count,
@@ -337,11 +418,15 @@ def evaluate_decisions(
     *,
     private_db_path: str | Path,
     episode_ids: Iterable[str],
+    policy_version: str | None = None,
+    model_slug: str | None = None,
 ) -> EvaluationResult:
     """Score in-memory operational decisions and write a private-side report.
 
     Decisions are supplied by the caller; only the evaluator opens the private
-    database, through the same read-only truth loader used by P3.4.
+    database, through the same read-only truth loader used by P3.4. Decisions that
+    span several agent (policy_version, model_slug) pairs are refused unless the
+    selector names exactly one of them.
     """
     context = load_private_evaluation_data(
         private_db_path,
@@ -351,12 +436,18 @@ def evaluate_decisions(
         decisions,
         episode_ids=context.episode_ids,
     )
-    matches = _match_decisions(normalized_decisions, context=context)
+    selected_decisions, selection = _select_decision_scope(
+        normalized_decisions,
+        policy_version=policy_version,
+        model_slug=model_slug,
+    )
+    matches = _match_decisions(selected_decisions, context=context)
     report = _build_report(
-        decisions=normalized_decisions,
+        decisions=selected_decisions,
         matches=matches,
         truth_rows=context.truth_rows,
         episode_ids=context.episode_ids,
+        selection=selection,
     )
 
     private_root = Path(private_db_path).expanduser().resolve().parent
@@ -375,8 +466,14 @@ def evaluate_operational_decisions(
     operational_db_path: str | Path,
     *,
     private_db_path: str | Path,
+    policy_version: str | None = None,
+    model_slug: str | None = None,
 ) -> EvaluationResult:
-    """Read persisted decisions from the operational DB, then score private truth."""
+    """Read persisted decisions from the operational DB, then score private truth.
+
+    A DB whose agent decisions span several (policy_version, model_slug) pairs
+    needs a selector for exactly one of them; otherwise the evaluator refuses.
+    """
     operational_path = Path(operational_db_path).expanduser().resolve()
     private_path = Path(private_db_path).expanduser().resolve()
     if operational_path == private_path:
@@ -429,4 +526,6 @@ def evaluate_operational_decisions(
         decisions,
         private_db_path=private_path,
         episode_ids=episode_ids,
+        policy_version=policy_version,
+        model_slug=model_slug,
     )
