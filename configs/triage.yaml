@@ -1,4 +1,4 @@
-policy_version: payguard.triage.p4.round1.v3
+policy_version: payguard.triage.p4.round2.v2
 
 # Round 1 deliberately grants no automatic close authority. The small-sample
 # minimum is selected and locked using development-only evidence in docs/triage.md.
@@ -12,7 +12,7 @@ agent_close_disabled: true
 tau_agent: null
 
 provenance:
-  policy_version: "P4.1 gate plus P4.2 round 1 runbook; BACKLOG-5 adds development-tuned small_sample n_min."
+  policy_version: "P4.1 round 2 gate (recheck cap) plus P4.2 round 1 runbook; BACKLOG-5 adds development-tuned small_sample n_min."
   close_enabled: "P4.2 round 1 sub-plan: no runbook has close_enabled authority."
   agent_close_disabled: "P4.4 round 1 sub-plan: agent cannot close."
   tau_agent: "Unset while agent closing is disabled; calibration selection is deferred."

@@ -15,6 +15,7 @@ from monitoring.store import persist_monitoring_rows
 from simulator.asof import read_as_of
 from simulator.config import load_episode_config, load_simulator_config
 from simulator.episodes import generate_episodes
+from simulator.incidents import PIPELINE_START_OFFSET_DAYS
 from simulator.storage import create_export_stores, insert_operational_record, utc_timestamp
 from triage.gate import GateConfig, evaluate_gate
 from triage import runbooks as runbook_module
@@ -25,6 +26,7 @@ _T0 = "2026-01-31T17:00:00.000000Z"
 _ZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 _PRE_DAY = date(2026, 2, 1)
 _CHANGE_DAY = date(2026, 2, 2)
+_KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID = "incident-c89881b3dc8c2d6e9ebd1354"
 
 
 def _local_timestamp(day: date, hour: int = 12, minute: int = 0) -> str:
@@ -748,8 +750,9 @@ def test_runbook_rejects_cutoff_after_incident_snapshot(tmp_path) -> None:
         store.close()
 
 
-def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(tmp_path) -> None:
-    store = create_export_stores(tmp_path / "smoke")
+@pytest.fixture(scope="module")
+def _smoke_runbook_context(tmp_path_factory):
+    store = create_export_stores(tmp_path_factory.mktemp("runbook-smoke") / "smoke")
     try:
         simulator_config = load_simulator_config()
         episode_config = load_episode_config()
@@ -808,26 +811,118 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(tmp_p
                 if prior is None or row["event_at"] > prior["event_at"]:
                     latest_by_id[row["incident_id"]] = row
 
-        pipeline_decisions = []
-        for incident in latest_by_id.values():
-            if incident["episode_id"] not in pipeline_ids:
-                continue
-            if incident["feature"] != "amount_avg_7d":
-                continue
-            incident_as_of = str(incident["available_at"])
-            checks = check_unit_or_null_change(
-                store.operational, incident, as_of_time=incident_as_of
-            )
-            decision = _gate(incident, checks, as_of_time=incident_as_of)
-            pipeline_decisions.append(decision)
-            assert checks["unit_or_null_change"]["status"] == "pass"
-            assert decision["action"] == "data_ticket"
-
-        assert len(pipeline_decisions) == 2
-        for incident in latest_by_id.values():
-            if incident["episode_id"] not in non_pipeline_ids:
-                continue
-            checks = check_unit_or_null_change(store.operational, incident)
-            assert checks["unit_or_null_change"]["status"] == "not_applicable"
+        known_false_positive = latest_by_id.get(
+            _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
+        )
+        assert known_false_positive is not None
+        assert known_false_positive["episode_id"] == "ep-0001"
+        assert known_false_positive["feature"] == "amount_avg_7d"
+        yield {
+            "store": store,
+            "simulator_config": simulator_config,
+            "pipeline_ids": pipeline_ids,
+            "non_pipeline_ids": non_pipeline_ids,
+            "latest_by_id": latest_by_id,
+        }
     finally:
         store.close()
+
+
+def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
+    _smoke_runbook_context,
+) -> None:
+    store = _smoke_runbook_context["store"]
+    simulator_config = _smoke_runbook_context["simulator_config"]
+    pipeline_ids = _smoke_runbook_context["pipeline_ids"]
+    non_pipeline_ids = _smoke_runbook_context["non_pipeline_ids"]
+    latest_by_id = _smoke_runbook_context["latest_by_id"]
+    pipeline_amount_incidents = sorted(
+        (
+            incident
+            for incident in latest_by_id.values()
+            if incident["episode_id"] in pipeline_ids
+            and incident["feature"] == "amount_avg_7d"
+        ),
+        key=lambda row: (row["episode_id"], row["event_at"], row["incident_id"]),
+    )
+    pipeline_decisions = []
+    jump_decisions_by_episode = {episode_id: [] for episode_id in pipeline_ids}
+    jump_day = simulator_config.timeline.t0_business_date.value + timedelta(
+        days=PIPELINE_START_OFFSET_DAYS
+    )
+    previous_jump_day = jump_day - timedelta(days=1)
+    for incident in pipeline_amount_incidents:
+        incident_as_of = str(incident["available_at"])
+        checks = check_unit_or_null_change(
+            store.operational, incident, as_of_time=incident_as_of
+        )
+        unit_check = checks["unit_or_null_change"]
+        decision = _gate(incident, checks, as_of_time=incident_as_of)
+        pipeline_decisions.append(decision)
+
+        source_window = unit_check["details"].get("incident_metric_window", {})
+        window_start_raw = source_window.get("window_start")
+        window_end_raw = source_window.get("window_end")
+        assert isinstance(window_start_raw, str)
+        assert isinstance(window_end_raw, str)
+        window_start = date.fromisoformat(window_start_raw)
+        window_end = date.fromisoformat(window_end_raw)
+        window_contains_jump = (
+            window_start <= previous_jump_day and jump_day <= window_end
+        )
+        if window_contains_jump:
+            jump_decisions_by_episode[incident["episode_id"]].append(
+                (incident, unit_check, decision)
+            )
+
+        assert decision["action"] != "close"
+        if unit_check["status"] == "pass":
+            assert decision["action"] == "data_ticket"
+        else:
+            assert unit_check["status"] == "not_applicable"
+            comparisons = unit_check["details"].get("comparisons", [])
+            assert all(
+                item["matched_median_ratio_target"] is None
+                and item["null_rate_threshold_met"] is False
+                for item in comparisons
+            )
+            assert decision["action"] == "human_review"
+
+    first_jump_decisions = []
+    for episode_id in sorted(pipeline_ids):
+        jump_decisions = sorted(
+            jump_decisions_by_episode[episode_id],
+            key=lambda item: (item[0]["event_at"], item[0]["incident_id"]),
+        )
+        assert jump_decisions, (
+            f"{episode_id} has no amount incident window containing the pipeline jump"
+        )
+        first_jump_incident, first_jump_check, first_jump_decision = jump_decisions[0]
+        assert first_jump_check["status"] == "pass"
+        assert first_jump_decision["action"] == "data_ticket"
+        first_jump_decisions.append(first_jump_decision)
+
+    assert len(first_jump_decisions) == len(pipeline_ids) == 2
+    assert len(pipeline_decisions) == 4
+    for incident in latest_by_id.values():
+        if incident["episode_id"] not in non_pipeline_ids:
+            continue
+        if incident["incident_id"] == _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID:
+            continue
+        checks = check_unit_or_null_change(store.operational, incident)
+        assert checks["unit_or_null_change"]["status"] == "not_applicable"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="unit_or_null_change lacks minimum transaction support; fixed by BACKLOG-5",
+)
+def test_clean_ep0001_card_window_minimum_support_false_positive(
+    _smoke_runbook_context,
+) -> None:
+    store = _smoke_runbook_context["store"]
+    incident = _smoke_runbook_context["latest_by_id"][
+        _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
+    ]
+    checks = check_unit_or_null_change(store.operational, incident)
+    assert checks["unit_or_null_change"]["status"] == "not_applicable"

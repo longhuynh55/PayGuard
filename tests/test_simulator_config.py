@@ -113,6 +113,44 @@ def test_transaction_hourly_weights_must_cover_a_local_day() -> None:
         validate_simulator_config(data)
 
 
+@pytest.mark.parametrize(
+    "weights",
+    [
+        {"qr": 0.5, "wallet": 0.5},
+        {"qr": 0.5, "wallet": 0.3, "card": 0.0},
+        {"qr": 0.5, "wallet": 0.3, "card": 0.3},
+    ],
+)
+def test_transaction_channel_weights_must_cover_all_channels_and_sum_to_one(
+    weights: dict[str, float],
+) -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["transactions"]["channel_weights"]["value"] = weights
+
+    with pytest.raises(ConfigValidationError, match="transactions channel_weights"):
+        validate_simulator_config(data)
+
+
+def test_world_account_role_weights_must_cover_all_roles_and_sum_to_one() -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["world"]["account_role_weights"]["value"] = {
+        "individual": 0.8,
+        "household_business": 0.2,
+    }
+
+    with pytest.raises(ConfigValidationError, match="world account_role_weights"):
+        validate_simulator_config(data)
+
+
+def test_refund_and_reversal_probabilities_must_be_disjoint() -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["transactions"]["refund_probability"]["value"] = 0.8
+    data["transactions"]["reversal_probability"]["value"] = 0.3
+
+    with pytest.raises(ConfigValidationError, match="sum to at most 1"):
+        validate_simulator_config(data)
+
+
 def test_entity_profile_categories_must_be_unique() -> None:
     data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
     data["world"]["merchant_mcc_codes"]["value"] = ["5411", "5411"]

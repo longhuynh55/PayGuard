@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from evaluation import evaluate_decisions, evaluate_operational_decisions
+from evaluation import DecisionEvaluationError, evaluate_decisions, evaluate_operational_decisions
+from evaluation.__main__ import main as evaluation_main
 from simulator.storage import (
     create_export_stores,
     insert_operational_record,
@@ -482,3 +483,297 @@ def test_triage_runtime_modules_do_not_import_evaluation() -> None:
                 violations.append(str(path.relative_to(ROOT)))
 
     assert violations == []
+
+
+def _agent_decision(
+    decision_id: str,
+    decision_at: str,
+    action: str,
+    *,
+    incident_id: str,
+    policy_version: str,
+    model_slug: str,
+) -> dict[str, object]:
+    return {
+        **_decision(decision_id, decision_at, action, incident_id=incident_id),
+        "source": "agent",
+        "policy_version": policy_version,
+        "model_slug": model_slug,
+        "tool_trace_ids_json": json.dumps([f"trace-{decision_id}"]),
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "cost_usd": 0.00001,
+    }
+
+
+def _decision_id(tag: str) -> str:
+    """Map a readable tag onto the decision-<24 lowercase hex> ID that the DB CHECK requires."""
+    return "decision-" + tag.encode("ascii").hex().rjust(24, "0")
+
+
+def _persist_operational(store, rows: list[dict[str, object]]) -> None:
+    persisted = [{**row, "decision_id": _decision_id(str(row["decision_id"]))} for row in rows]
+    assert persist_decisions(store.operational, persisted) == len(persisted)
+    store.commit()
+
+
+def _persist_mixed_pairs(store) -> None:
+    """Two agent models under fixture-v1, plus rule decisions under fixture-v1 and fixture-v2."""
+    _persist_operational(
+        store,
+        [
+            _agent_decision(
+                "a-1",
+                "2026-02-06T00:00:00.000000Z",
+                "fraud_ops",
+                incident_id="incident-1",
+                policy_version="fixture-v1",
+                model_slug="fake/a",
+            ),
+            _agent_decision(
+                "a-2",
+                "2026-02-07T00:00:00.000000Z",
+                "human_review",
+                incident_id="incident-2",
+                policy_version="fixture-v1",
+                model_slug="fake/a",
+            ),
+            _agent_decision(
+                "b-1",
+                "2026-02-06T00:00:00.000000Z",
+                "close",
+                incident_id="incident-3",
+                policy_version="fixture-v1",
+                model_slug="fake/b",
+            ),
+            _decision(
+                "rule-1",
+                "2026-02-06T00:00:00.000000Z",
+                "human_review",
+                incident_id="incident-4",
+            ),
+            {
+                **_decision(
+                    "rule-2",
+                    "2026-02-06T00:00:00.000000Z",
+                    "human_review",
+                    incident_id="incident-5",
+                ),
+                "policy_version": "fixture-v2",
+            },
+        ],
+    )
+
+
+def test_mixed_agent_pairs_are_refused_without_selector(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path)
+    try:
+        _persist_mixed_pairs(store)
+
+        with pytest.raises(DecisionEvaluationError, match="2 .*pairs") as refused:
+            evaluate_operational_decisions(
+                store.operational_path,
+                private_db_path=store.private_path,
+            )
+        assert "model_slug='fake/a'" in str(refused.value)
+        assert "model_slug='fake/b'" in str(refused.value)
+
+        assert evaluation_main(["decisions", "--run", str(tmp_path / "evaluation-run")]) == 2
+        assert "ERROR: DecisionEvaluationError" in capsys.readouterr().err
+        assert not (store.private_path.parent / "reports" / "p4_5_decisions.json").exists()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected_ids", "expected_selection", "unsafe"),
+    [
+        (
+            {"model_slug": "fake/a"},
+            ["a-1", "a-2", "rule-1"],
+            {"policy_version": "fixture-v1", "model_slug": "fake/a", "excluded_decision_count": 2},
+            0,
+        ),
+        (
+            {"policy_version": "fixture-v1", "model_slug": "fake/b"},
+            ["b-1", "rule-1"],
+            {"policy_version": "fixture-v1", "model_slug": "fake/b", "excluded_decision_count": 3},
+            1,
+        ),
+    ],
+    ids=["model-a", "model-b"],
+)
+def test_selector_picks_one_pair_and_counts_match(
+    tmp_path: Path,
+    selector: dict[str, str],
+    expected_ids: list[str],
+    expected_selection: dict[str, object],
+    unsafe: int,
+) -> None:
+    store = _store(tmp_path)
+    try:
+        _persist_mixed_pairs(store)
+
+        result = evaluate_operational_decisions(
+            store.operational_path,
+            private_db_path=store.private_path,
+            **selector,
+        )
+
+        assert result.report["selection"] == expected_selection
+        assert {match["decision_id"] for match in result.report["decision_matches"]} == {
+            _decision_id(tag) for tag in expected_ids
+        }
+        assert result.report["decision_counts"]["total"] == len(expected_ids)
+        assert result.report["unsafe_truth_rate"]["unsafe"] == unsafe
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"policy_version": "fixture-v1"},
+        {"model_slug": "fake/missing"},
+        {"model_slug": " "},
+    ],
+    ids=["policy-matches-two-pairs", "no-matching-pair", "blank-selector"],
+)
+def test_selector_must_choose_exactly_one_pair(tmp_path: Path, selector: dict[str, str]) -> None:
+    store = _store(tmp_path)
+    try:
+        _persist_mixed_pairs(store)
+
+        with pytest.raises(DecisionEvaluationError):
+            evaluate_operational_decisions(
+                store.operational_path,
+                private_db_path=store.private_path,
+                **selector,
+            )
+    finally:
+        store.close()
+
+
+def test_cli_selector_flags_report_one_pair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path)
+    try:
+        _persist_mixed_pairs(store)
+
+        exit_code = evaluation_main(
+            ["decisions", "--run", str(tmp_path / "evaluation-run"), "--model-slug", "fake/b"]
+        )
+
+        assert exit_code == 0
+        output = capsys.readouterr().out
+        assert "decision_count=2" in output
+        assert "policy_version=fixture-v1" in output
+        assert "model_slug=fake/b" in output
+        report = json.loads(
+            (store.private_path.parent / "reports" / "p4_5_decisions.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert report["selection"]["model_slug"] == "fake/b"
+        assert report["decision_counts"]["total"] == 2
+    finally:
+        store.close()
+
+
+def test_single_provider_db_is_reported_without_selector(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = _store(tmp_path)
+    try:
+        _persist_operational(
+            store,
+            [
+                _agent_decision(
+                    "agent-1",
+                    "2026-02-06T00:00:00.000000Z",
+                    "fraud_ops",
+                    incident_id="incident-1",
+                    policy_version="fixture-v1",
+                    model_slug="fake/a",
+                ),
+                _agent_decision(
+                    "agent-2",
+                    "2026-02-07T00:00:00.000000Z",
+                    "human_review",
+                    incident_id="incident-2",
+                    policy_version="fixture-v1",
+                    model_slug="fake/a",
+                ),
+                _decision(
+                    "rule-1",
+                    "2026-02-06T00:00:00.000000Z",
+                    "data_ticket",
+                    incident_id="incident-3",
+                ),
+            ],
+        )
+
+        result = evaluate_operational_decisions(
+            store.operational_path,
+            private_db_path=store.private_path,
+        )
+
+        assert result.report["selection"] == {
+            "policy_version": "fixture-v1",
+            "model_slug": "fake/a",
+            "excluded_decision_count": 0,
+        }
+        assert result.report["decision_counts"]["total"] == 3
+        assert evaluation_main(["decisions", "--run", str(tmp_path / "evaluation-run")]) == 0
+        assert "decision_count=3" in capsys.readouterr().out
+    finally:
+        store.close()
+
+
+def test_rule_only_db_with_several_policy_versions_needs_policy_selector(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        _persist_operational(
+            store,
+            [
+                _decision(
+                    "rule-1",
+                    "2026-02-06T00:00:00.000000Z",
+                    "data_ticket",
+                    incident_id="incident-1",
+                ),
+                {
+                    **_decision(
+                        "rule-2",
+                        "2026-02-06T00:00:00.000000Z",
+                        "human_review",
+                        incident_id="incident-2",
+                    ),
+                    "policy_version": "fixture-v2",
+                },
+            ],
+        )
+
+        with pytest.raises(DecisionEvaluationError, match="2 .*pairs"):
+            evaluate_operational_decisions(
+                store.operational_path,
+                private_db_path=store.private_path,
+            )
+
+        result = evaluate_operational_decisions(
+            store.operational_path,
+            private_db_path=store.private_path,
+            policy_version="fixture-v2",
+        )
+        assert result.report["selection"] == {
+            "policy_version": "fixture-v2",
+            "model_slug": None,
+            "excluded_decision_count": 1,
+        }
+        assert result.report["decision_counts"]["total"] == 1
+    finally:
+        store.close()

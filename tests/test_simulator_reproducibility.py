@@ -28,7 +28,11 @@ def _generate(
     try:
         world = generate_world(pair.operational, config, "smoke", seed=world_seed)
         transactions = generate_transactions(
-            pair.operational, config, "smoke", seed=transaction_seed
+            pair.operational,
+            config,
+            "smoke",
+            seed=transaction_seed,
+            world_summary=world,
         )
         fingerprint = canonical_fingerprint(pair.operational)
         stored_fingerprint = record_canonical_fingerprint(pair.operational, pair.private)
@@ -60,13 +64,21 @@ def _assert_generated_invariants(result: dict, config: SimulatorConfig) -> None:
     assert len(customers) == config.scale_for("smoke").customer_count.value
     assert len(merchants) == config.scale_for("smoke").merchant_count.value
     assert transactions
-    assert len(events) == 2 * len(transactions)
+    assert len(events) == result["transactions"].lifecycle_event_count
     assert all(row["episode_id"] == "base" for row in customers + merchants + transactions + events)
     customer_ids = {row["customer_id"] for row in customers}
     merchant_ids = {row["merchant_id"] for row in merchants}
     transactions_by_id = {row["txn_id"]: row for row in transactions}
     assert all(row["customer_id"] in customer_ids for row in transactions)
-    assert all(row["merchant_id"] in merchant_ids for row in transactions)
+    assert all(
+        (row["merchant_id"] is None) != (row["recipient_customer_id"] is None)
+        for row in transactions
+    )
+    assert all(
+        row["merchant_id"] in merchant_ids
+        for row in transactions
+        if row["merchant_id"] is not None
+    )
     assert all(
         type(row["amount"]) is int
         and config.transactions.minimum_amount.value <= row["amount"] <= config.transactions.maximum_amount.value
@@ -88,10 +100,22 @@ def _assert_generated_invariants(result: dict, config: SimulatorConfig) -> None:
         created_at = datetime.fromisoformat(transaction["created_at"].replace("Z", "+00:00"))
         assert transaction["event_at"] == transaction["created_at"]
         assert transaction["available_at"] == transaction["created_at"]
-        assert transaction["channel"] == config.transactions.channel.value
+        assert transaction["channel"] in config.transactions.channel_weights.value
+        if transaction["recipient_customer_id"] is not None:
+            assert transaction["recipient_customer_id"] in customer_ids
+            assert transaction["recipient_customer_id"] != transaction["customer_id"]
+            assert transaction["channel"] == config.transactions.account_transfer_channel.value
         assert start_date <= created_at.astimezone(local_tz).date() < t0_date
         lifecycle = sorted(events_by_txn[txn_id], key=lambda event: event["event_at"])
-        assert [event["event_type"] for event in lifecycle] == ["authorized", "settled"]
+        event_types = [event["event_type"] for event in lifecycle]
+        assert event_types[:2] == ["authorized", "settled"]
+        assert len(event_types) in (2, 3)
+        if len(event_types) == 3:
+            assert event_types[2] in {"refunded", "reversed"}
+            assert 0 < lifecycle[2]["amount"] <= transaction["amount"]
+            assert lifecycle[2]["event_at"] > transaction["created_at"]
+        else:
+            assert all(event["amount"] is None for event in lifecycle)
         assert all(event["available_at"] == event["event_at"] for event in lifecycle)
         assert all(
             datetime.fromisoformat(event["event_at"].replace("Z", "+00:00")) < t0
@@ -146,8 +170,44 @@ def test_world_and_transaction_random_streams_are_independent(tmp_path: Path) ->
     )
     assert changed_world_seed["content"]["customers"] != other_world_seed["content"]["customers"]
     assert changed_world_seed["content"]["merchants"] != other_world_seed["content"]["merchants"]
-    assert changed_world_seed["content"]["transactions"] == other_world_seed["content"]["transactions"]
-    assert changed_world_seed["content"]["transaction_events"] == other_world_seed["content"]["transaction_events"]
+    assert changed_world_seed["world"].account_roles != other_world_seed["world"].account_roles
+    first_merchant_payments = {
+        row["txn_id"]: row
+        for row in changed_world_seed["content"]["transactions"]
+        if row["merchant_id"] is not None
+    }
+    second_merchant_payments = {
+        row["txn_id"]: row
+        for row in other_world_seed["content"]["transactions"]
+        if row["merchant_id"] is not None
+    }
+    assert first_merchant_payments.keys() == second_merchant_payments.keys()
+    independent_columns = (
+        "customer_id",
+        "created_at",
+        "event_at",
+        "available_at",
+        "amount",
+        "channel",
+    )
+    for txn_id, first_row in first_merchant_payments.items():
+        assert {
+            column: first_row[column] for column in independent_columns
+        } == {
+            column: second_merchant_payments[txn_id][column]
+            for column in independent_columns
+        }
+    first_events = {
+        event["event_id"]: event
+        for event in changed_world_seed["content"]["transaction_events"]
+        if event["txn_id"] in first_merchant_payments
+    }
+    second_events = {
+        event["event_id"]: event
+        for event in other_world_seed["content"]["transaction_events"]
+        if event["txn_id"] in second_merchant_payments
+    }
+    assert first_events == second_events
 
     changed_transaction_seed = _generate(
         tmp_path / "transaction-seed-b", config, world_seed=71, transaction_seed=809

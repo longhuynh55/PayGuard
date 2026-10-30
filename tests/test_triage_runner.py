@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
@@ -15,6 +16,7 @@ from simulator.validate import _validate_decisions
 from triage.decisions import persist_decisions
 from triage.gate import GateConfig, evaluate_gate
 from triage.llm import FakeLLMClient
+from triage.runner import _prior_recheck_as_of_times
 
 
 T0 = "2026-01-31T17:00:00.000000Z"
@@ -23,23 +25,34 @@ DAY_1 = "2026-02-02T16:59:59.999999Z"
 
 
 def _metric(as_of_time: str) -> dict[str, object]:
+    utc_day = datetime.fromisoformat(as_of_time.replace("Z", "+00:00")).date()
+    business_date = (date(2026, 2, 1) + (utc_day - date(2026, 2, 1))).isoformat()
     return {
         "metric_id": "psi.amount_avg_7d",
         "episode_id": "ep-a",
         "as_of_time": as_of_time,
         "event_at": as_of_time,
         "available_at": as_of_time,
-        "business_date": "2026-02-01" if as_of_time == DAY_0 else "2026-02-02",
+        "business_date": business_date,
         "feature": "amount_avg_7d",
         "segment": "all",
         "value": 0.3,
         "reference_window": "2025-11-01/2026-01-31",
-        "window_start": "2026-02-01",
-        "window_end": "2026-02-01" if as_of_time == DAY_0 else "2026-02-02",
+        "window_start": business_date,
+        "window_end": business_date,
         "n_window": 30,
         "n_reference": 100,
         "flags": [],
     }
+
+
+def _day(offset: int) -> str:
+    timestamp = datetime.fromisoformat(DAY_0.replace("Z", "+00:00"))
+    return (
+        (timestamp + timedelta(days=offset))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _alert(alert_id: str, as_of_time: str) -> dict[str, object]:
@@ -349,6 +362,131 @@ def test_same_provider_replay_is_idempotent(tmp_path) -> None:
     assert second["decision_rows_inserted"] == 0
     assert second["incident_snapshots_inserted"] == 0
     assert len(client.requests) == 2
+    assert _incident_and_decision_rows(operational_db) == before
+
+
+def _persist_recheck(
+    operational,
+    *,
+    incident_id: str,
+    episode_id: str,
+    as_of_time: str,
+    parent_incident_id: str | None = None,
+) -> None:
+    incident = {
+        "incident_id": incident_id,
+        "parent_incident_id": parent_incident_id,
+        "episode_id": episode_id,
+        "alert_ids_json": '["alert-a"]',
+        "feature": "amount_avg_7d",
+        "segment": "all",
+        "opened_at": as_of_time,
+        "status": "open",
+        "event_at": as_of_time,
+        "available_at": as_of_time,
+    }
+    decision = evaluate_gate(
+        incident,
+        {
+            "cause": "other",
+            "runbook": None,
+            "action": "recheck",
+            "reason": "Wait for the next complete observation day.",
+            "checklist_results": {"wait": {"status": "pending"}},
+        },
+        source="rule",
+        expected_episode_id=episode_id,
+        as_of_time=as_of_time,
+        config=GateConfig(policy_version="test-policy-v1", close_enabled={}),
+    )
+    assert persist_decisions(operational, (decision,)) == 1
+
+
+def test_recheck_history_is_as_of_episode_and_incident_scoped(tmp_path) -> None:
+    run_dir = tmp_path / "recheck-history-run"
+    operational_db = _single_alert_run(run_dir)
+    with sqlite3.connect(operational_db) as operational:
+        operational.row_factory = sqlite3.Row
+        insert_operational_record(
+            operational, "episodes", {"episode_id": "ep-b", "role": "calibration"}
+        )
+        _persist_recheck(
+            operational, incident_id="parent", episode_id="ep-a", as_of_time=DAY_0
+        )
+        _persist_recheck(
+            operational,
+            incident_id="child",
+            episode_id="ep-a",
+            as_of_time=DAY_0,
+            parent_incident_id="parent",
+        )
+        _persist_recheck(
+            operational,
+            incident_id="child",
+            episode_id="ep-a",
+            as_of_time=DAY_1,
+            parent_incident_id="parent",
+        )
+        _persist_recheck(
+            operational,
+            incident_id="child",
+            episode_id="ep-a",
+            as_of_time=_day(2),
+            parent_incident_id="parent",
+        )
+        _persist_recheck(
+            operational, incident_id="child", episode_id="ep-b", as_of_time=DAY_0
+        )
+
+        child = {
+            "incident_id": "child",
+            "parent_incident_id": "parent",
+            "episode_id": "ep-a",
+        }
+        assert _prior_recheck_as_of_times(
+            operational, child, t0=T0, as_of_time=DAY_1
+        ) == (DAY_0, DAY_1)
+
+
+def test_recheck_cap_stops_third_request_and_replay_is_idempotent(tmp_path) -> None:
+    from triage.agent import OneStepAgent
+    from triage.runner import run_triage
+
+    run_dir = tmp_path / "recheck-cap-run"
+    operational_db = _single_alert_run(run_dir)
+    with sqlite3.connect(operational_db) as operational:
+        for offset in (1, 2):
+            as_of_time = _day(offset)
+            assert persist_monitoring_rows(
+                operational, "daily_metrics", [_metric(as_of_time)]
+            ) == 1
+            assert persist_monitoring_rows(
+                operational, "alerts", [_alert(f"alert-{offset}", as_of_time)]
+            ) == 1
+
+    client = _recheck_fake_client()
+    provider = OneStepAgent(operational_db, client)
+    first = run_triage(run_dir, agent_provider=provider)
+    before = _incident_and_decision_rows(operational_db)
+    with sqlite3.connect(operational_db) as operational:
+        rows = operational.execute(
+            "SELECT incident_id, as_of_time, action, reason FROM decisions "
+            "WHERE episode_id='ep-a' ORDER BY as_of_time"
+        ).fetchall()
+
+    assert first["decision_rows_inserted"] == 3
+    assert len(rows) == 3
+    assert [row[2] for row in rows] == ["recheck", "recheck", "human_review"]
+    assert rows[0][0] == rows[1][0] == rows[2][0]
+    assert rows[1][1] == _day(1)
+    assert rows[2][1] == _day(2)
+    assert "maximum of two rechecks" in rows[2][3]
+    assert len(client.requests) == 6
+
+    second = run_triage(run_dir, agent_provider=provider)
+    assert second["decision_rows_inserted"] == 0
+    assert second["incident_snapshots_inserted"] == 0
+    assert len(client.requests) == 6
     assert _incident_and_decision_rows(operational_db) == before
 
 
