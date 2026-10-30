@@ -117,6 +117,8 @@
       "seasonal_plus_fraud": "human_review",
       "invalid_tool_snapshot": "human_review",
       "recheck_exhausted": "human_review",
+      "recheck_too_soon": "human_review",
+      "recheck_24_hours_apart": "recheck",
       "below_threshold": "recheck",
       "agent_closure_disabled": "human_review",
       "rule_closure_disabled": "human_review",

@@ -696,6 +696,58 @@ def test_direct_recheck_requires_a_reason() -> None:
     assert with_reason["action"] == "recheck"
 
 
+@pytest.mark.parametrize("source", ["rule", "agent"])
+def test_third_recheck_is_routed_to_human_for_each_source(source: str) -> None:
+    result = _gate(
+        _proposal(
+            "recheck",
+            checklist_results={"wait": {"status": "pending"}},
+            reason="Wait for the next complete observation.",
+        ),
+        incident=_incident(incident_id=f"incident-{source}"),
+        source=source,
+        prior_recheck_as_of_times=(
+            _timestamp(_AS_OF - timedelta(days=2)),
+            _timestamp(_AS_OF - timedelta(days=1)),
+        ),
+    )
+
+    assert result["action"] == "human_review"
+    assert result["evidence_status"] == "insufficient"
+    assert "maximum of two rechecks" in result["reason"]
+
+
+def test_recheck_requires_24_hours_between_as_of_cutoffs() -> None:
+    too_soon = _gate(
+        _proposal("recheck", reason="Wait for more evidence."),
+        prior_recheck_as_of_times=(_timestamp(_AS_OF - timedelta(hours=23)),),
+    )
+    exactly_one_day = _gate(
+        _proposal("recheck", reason="Wait for more evidence."),
+        prior_recheck_as_of_times=(_timestamp(_AS_OF - timedelta(days=1)),),
+    )
+    same_cutoff = _gate(
+        _proposal("recheck", reason="Wait for more evidence."),
+        prior_recheck_as_of_times=(_timestamp(),),
+    )
+
+    assert too_soon["action"] == "human_review"
+    assert "at least 24 hours" in too_soon["reason"]
+    assert exactly_one_day["action"] == "recheck"
+    assert same_cutoff["action"] == "human_review"
+
+
+def test_child_incident_starts_a_fresh_recheck_counter() -> None:
+    result = _gate(
+        _proposal("recheck", reason="Wait for the next complete observation."),
+        incident=_incident(
+            incident_id="incident-child", parent_incident_id="incident-parent"
+        ),
+    )
+
+    assert result["action"] == "recheck"
+
+
 def test_human_review_needs_neither_benign_evidence_nor_close_score() -> None:
     result = _gate(
         _proposal("human_review", cause="new_fraud", runbook=None), source="agent"

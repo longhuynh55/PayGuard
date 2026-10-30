@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import math
@@ -123,6 +123,23 @@ def _parse_timestamp(value: Any, field_name: str) -> datetime:
 
 def _format_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _normalize_prior_recheck_times(
+    values: Sequence[str], *, as_of: datetime
+) -> tuple[datetime, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise GateInputError("prior_recheck_as_of_times must be a sequence of timestamps")
+    normalized: list[datetime] = []
+    for index, value in enumerate(values):
+        try:
+            parsed = _parse_timestamp(value, f"prior recheck {index} as_of_time")
+        except ValueError as exc:
+            raise GateInputError(str(exc)) from exc
+        if parsed > as_of:
+            raise GateInputError("prior recheck as_of_time cannot be after current as_of_time")
+        normalized.append(parsed)
+    return tuple(sorted(normalized))
 
 
 def _nonempty_text(value: Any) -> bool:
@@ -424,6 +441,7 @@ def evaluate_gate(
     tool_error: bool = False,
     tool_error_reason: str | None = None,
     recheck_reason: str | None = None,
+    prior_recheck_as_of_times: Sequence[str] = (),
     close_score: float | None = None,
     usage: Mapping[str, Any] | None = None,
     model_slug: str | None = None,
@@ -433,7 +451,9 @@ def evaluate_gate(
     ``evidence_status`` is derived only from normalized checklist/tool results and
     snapshot validity. Any same-named field in the proposal or checklist payload
     is discarded. ``as_of_time`` and ``expected_episode_id`` are explicit because
-    an incidents row has no separate as-of column.
+    an incidents row has no separate as-of column. The runner supplies prior
+    recheck cutoffs from the operational as-of view so this pure gate can enforce
+    the count and spacing limits without reading mutable state itself.
     """
 
     if not isinstance(source, str) or source not in {"rule", "agent"}:
@@ -445,6 +465,9 @@ def evaluate_gate(
     except ValueError as exc:
         raise GateInputError(str(exc)) from exc
     normalized_as_of = _format_timestamp(as_of)
+    prior_recheck_times = _normalize_prior_recheck_times(
+        prior_recheck_as_of_times, as_of=as_of
+    )
     policy = config if isinstance(config, GateConfig) else GateConfig.from_mapping(config)
     usage_fields = _usage_columns(usage)
     if model_slug is not None and not _nonempty_text(model_slug):
@@ -680,6 +703,20 @@ def evaluate_gate(
         else:
             decision_action = "close"
             reasons.append("The benign checklist passed and agent close_score met tau_agent.")
+
+    if decision_action == "recheck":
+        if len(prior_recheck_times) >= 2:
+            decision_action = "human_review"
+            reasons.append(
+                "The maximum of two rechecks for this incident_id has been reached; "
+                "route to human review."
+            )
+        elif prior_recheck_times and as_of - prior_recheck_times[-1] < timedelta(days=1):
+            decision_action = "human_review"
+            reasons.append(
+                "A recheck requires at least 24 hours since the prior recheck, "
+                "measured between as_of_time cutoffs; route to human review."
+            )
 
     if not reasons:
         proposal_reason = proposal.get("reason")

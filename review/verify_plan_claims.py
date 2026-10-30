@@ -228,12 +228,18 @@ def closure_gate_cases():
     def gate(action, *, evidence="sufficient", valid=True, mandatory_human=False,
              benign=False, runbook=None, source="agent", score=1, tau=1,
              rule_enabled=True, agent_disabled=False, routing_signal=False,
-             rechecks=0, can_wait=False):
+             prior_recheck_as_of_times=(), current_as_of=None, can_wait=False):
         if not valid or mandatory_human or evidence == "conflicting":
             return "human_review"
 
         def wait_or_escalate():
-            return "recheck" if can_wait and rechecks < 2 else "human_review"
+            if not can_wait or len(prior_recheck_as_of_times) >= 2:
+                return "human_review"
+            if current_as_of is not None and prior_recheck_as_of_times:
+                latest_prior = max(prior_recheck_as_of_times)
+                if current_as_of - latest_prior < timedelta(days=1):
+                    return "human_review"
+            return "recheck"
 
         if action == "human_review":
             return action
@@ -252,12 +258,26 @@ def closure_gate_cases():
         return wait_or_escalate()
 
     close = {"action": "close", "benign": True, "runbook": "seasonal_calendar"}
+    current_as_of = datetime(2026, 2, 10, 16, 59, 59, 999999)
     cases = {
         "complete_benign": (close, "close"),
         "small_sample": ({**close, "evidence": "insufficient", "can_wait": True}, "recheck"),
         "seasonal_plus_fraud": ({**close, "mandatory_human": True}, "human_review"),
         "invalid_tool_snapshot": ({**close, "valid": False}, "human_review"),
-        "recheck_exhausted": ({**close, "evidence": "insufficient", "can_wait": True, "rechecks": 2}, "human_review"),
+        "recheck_exhausted": (
+            {**close, "evidence": "insufficient", "can_wait": True,
+             "current_as_of": current_as_of,
+             "prior_recheck_as_of_times": (current_as_of - timedelta(days=2),
+                                           current_as_of - timedelta(days=1))},
+            "human_review"),
+        "recheck_too_soon": (
+            {"action": "recheck", "can_wait": True, "current_as_of": current_as_of,
+             "prior_recheck_as_of_times": (current_as_of - timedelta(hours=23),)},
+            "human_review"),
+        "recheck_24_hours_apart": (
+            {"action": "recheck", "can_wait": True, "current_as_of": current_as_of,
+             "prior_recheck_as_of_times": (current_as_of - timedelta(days=1),)},
+            "recheck"),
         "below_threshold": ({**close, "score": 2 / 3, "can_wait": True}, "recheck"),
         "agent_closure_disabled": ({**close, "agent_disabled": True}, "human_review"),
         "rule_closure_disabled": ({**close, "source": "rule", "rule_enabled": False}, "human_review"),
