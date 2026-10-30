@@ -571,7 +571,7 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert detection_recall["detected"] == 2
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
-    assert evaluation_result.report["incident_counts"]["matched"] == 2
+    assert evaluation_result.report["incident_counts"]["matched"] == 4
     assert evaluation_result.report["incident_counts"]["ambiguous"] == 0
     assert evaluation_result.report["incident_counts"]["benign_matched"] == 0
     assert evaluation_result.report["incident_counts"]["unmatched"] == 5

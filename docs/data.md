@@ -276,10 +276,11 @@ Evaluator ghi JSON tại `reports/p3_4_detection_recall.json` tương đối v�
 
 | Trường | Kiểu | Ý nghĩa |
 |---|---|---|
-| `schema_version` | `INTEGER` | Phiên bản cấu trúc JSON; P5.2 dùng phiên bản `2`. |
+| `schema_version` | `INTEGER` | Phiên bản cấu trúc JSON; P5.2 Fix 1 dùng phiên bản `3`. |
 | `as_of_time` | `TEXT` UTC | Cutoff dùng để lọc snapshot incident theo `available_at`. |
-| `matching_scope` | `TEXT` | Phạm vi gồm effect window cộng metric window, segment và feature. |
-| `metric_window_days` | `INTEGER` | Độ dài metric window lấy từ `configs/monitoring.yaml`, cấu hình public. |
+| `matching_scope` | `TEXT` | Phạm vi gồm effect window cộng metric window, feature lookback, segment và feature. |
+| `metric_window_days` | `INTEGER` | Độ dài metric window lấy từ cấu hình run nếu có, đối chiếu với `configs/monitoring.yaml` public. |
+| `feature_lookback_days` | `OBJECT` JSON | Lookback theo ngày của các feature monitoring, lấy từ định nghĩa public trong `model/features.py`. |
 | `deferred_to_round2` | `TEXT[]` JSON | Trường tương thích; rỗng khi matcher P5.2 đã hoàn tất. |
 | `feature_mapping` | `OBJECT` JSON | Mapping tường minh từ feature monitoring sang feature truth. |
 | `detection_recall` | `OBJECT` JSON | Tổng số sự cố cần can thiệp được phát hiện. |
@@ -330,6 +331,29 @@ Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID gi
 
 ### Báo cáo evaluator P4.5 (private)
 
-Evaluator ghi `reports/p4_5_decisions.json` tương đối với thư mục private DB. Báo cáo dùng `schema_version = 2`; `matching_scope` nêu phạm vi decision-scope, effect window, metric window, segment và feature; `metric_window_days` lấy từ cấu hình public `configs/monitoring.yaml`. Mỗi phần tử `decision_matches` gồm `decision_id`, `incident_id`, `episode_id`, `decision_at`, `status`, `matched_truth_ids`, `candidate_truth_ids`. Trạng thái dùng `matched`, `ambiguous_match`, `unmatched`; `matched_truth_ids` chỉ có truth được xác nhận duy nhất, `candidate_truth_ids` giữ mọi ứng viên. Quy tắc scoring và workload thuộc [evaluation.md](evaluation.md), mục 2–4; closure chưa khớp duy nhất được liệt kê riêng trong `decision_counts`.
+Evaluator ghi `reports/p4_5_decisions.json` tương đối với thư mục private DB. Báo cáo dùng `schema_version = 3`; `matching_scope` nêu decision-scope, effect window, metric window, feature lookback, segment và feature. `metric_window_days` lấy từ cấu hình run nếu có và được đối chiếu với `configs/monitoring.yaml`; `feature_lookback_days` lấy từ `model/features.py`.
+
+| Trường top-level | Cấu trúc |
+|---|---|
+| `schema_version` | `INTEGER`, hiện là `3`. |
+| `matching_scope` | `TEXT`. |
+| `metric_window_days` | `INTEGER`. |
+| `feature_lookback_days` | `OBJECT` ánh xạ feature sang số ngày lookback. |
+| `episode_ids` | `TEXT[]` JSON, thứ tự tăng dần. |
+| `selection` | Object gồm `policy_version`, `model_slug`, `excluded_decision_count`. |
+| `decision_counts` | Object xem cấu trúc bên dưới. |
+| `truth_counts` | Object gồm `total`, `requires_intervention`, `benign`. |
+| `timely_routing_recall` | Object xem cấu trúc bên dưới. |
+| `unsafe_truth_rate` | Object xem cấu trúc bên dưới. |
+| `dangerous_closure_rate` | Object xem cấu trúc bên dưới. |
+| `decision_matches` | Mảng object ghép từng decision với status, matched IDs và candidate IDs. |
+
+Các object con có cấu trúc cố định:
+
+- `decision_counts`: `total`, `matched`, `unmatched`, `ambiguous`, `close`, `unmatched_closures`, `ambiguous_closures`, `unmatched_closure_decision_ids`, `ambiguous_closure_decision_ids`. Hai trường `*_closure_decision_ids` là `TEXT[]` JSON đã sắp xếp.
+- `unsafe_truth_rate`: `unsafe`, `denominator`, `rate` (`REAL NULL`), `unsafe_truth_ids`, `lower_bound_observed`, `basis`. `basis` là `observed_lower_bound`, `all_candidate_truths_included` hoặc `matched_truth_only`.
+- `timely_routing_recall`: `routed`, `denominator`, `recall` (`REAL NULL`), `truth_ids`, `missing_truth_ids`, `automatic_routing`, `human_review`. Hai bucket routing gồm `routed`, `denominator`, `recall` (`REAL NULL`), `truth_ids`.
+- `dangerous_closure_rate`: `dangerous_closures`, `denominator`, `rate` (`REAL NULL`), `dangerous_incident_ids`, `triaged_incident_ids`.
+- Mỗi `decision_matches` gồm `decision_id`, `incident_id`, `episode_id`, `decision_at`, `status`, `matched_truth_ids`, `candidate_truth_ids`. `status` là `matched`, `ambiguous_match` hoặc `unmatched`; `matched_truth_ids` chỉ chứa truth được ghép duy nhất, `candidate_truth_ids` giữ mọi ứng viên. Quy tắc scoring thuộc [evaluation.md](evaluation.md), mục 2–4.
 
 Một run directory chỉ dùng một agent provider. Runner từ chối chạy nếu DB đã có quyết định `source='agent'` với `model_slug` khác provider đang chọn (bao gồm `NULL` của `unconfigured`); hãy dùng bản sao mới của run directory cho mỗi provider.

@@ -4,9 +4,13 @@ import ast
 import json
 from pathlib import Path
 
+import pytest
+
 from evaluation import evaluate_detection_recall
+from evaluation.matcher import EvaluationMatcherError
 from monitoring.incidents import InMemoryDecisionSource, compute_incidents
 from simulator.storage import create_export_stores, insert_private_record
+from simulator.validate import RUN_METADATA_KEY
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -278,7 +282,104 @@ def test_late_incident_inside_public_metric_window_matches_truth(tmp_path: Path)
         store.close()
 
 
-def test_multiple_truth_candidates_are_ambiguous_and_excluded_from_recall(
+@pytest.mark.parametrize(
+    ("feature", "truth_feature", "alert_at", "expected_status"),
+    [
+        ("amount_avg_7d", "amount", "2026-02-20T00:00:00.000000Z", "matched"),
+        ("amount_avg_7d", "amount", "2026-02-20T00:00:00.000001Z", "unmatched"),
+        ("txn_count_24h", "txn_count", "2026-02-14T00:00:00.000000Z", "matched"),
+        ("txn_count_24h", "txn_count", "2026-02-14T00:00:00.000001Z", "unmatched"),
+    ],
+    ids=["amount-boundary", "amount-after-boundary", "count-boundary", "count-after-boundary"],
+)
+def test_metric_window_plus_feature_lookback_boundaries(
+    tmp_path: Path,
+    feature: str,
+    truth_feature: str,
+    alert_at: str,
+    expected_status: str,
+) -> None:
+    store = create_export_stores(tmp_path / "feature-lookback-boundary-run")
+    try:
+        _add_episode(store, "ep-lookback-boundary", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-lookback-boundary",
+            truth_id="truth-lookback-boundary",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=[truth_feature],
+            segments=["retail"],
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-lookback-boundary",
+                alert_id="alert-lookback-boundary",
+                feature=feature,
+                at=alert_at,
+            ),
+            episode_id="ep-lookback-boundary",
+        )
+
+        result = _evaluate(store, incidents, ["ep-lookback-boundary"])
+
+        assert result.report["metric_window_days"] == 7
+        assert result.report["incident_matches"][0]["status"] == expected_status
+    finally:
+        store.close()
+
+
+def test_run_resolved_metric_window_must_match_public_contract(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "resolved-window-run")
+    try:
+        _add_episode(store, "ep-resolved-window", "data_pipeline")
+        insert_private_record(
+            store.private,
+            "run_metadata",
+            {
+                "key": RUN_METADATA_KEY,
+                "value_json": {
+                    "resolved_config": {
+                        "monitoring": {"window_days": {"value": 6}}
+                    }
+                },
+            },
+        )
+        store.commit()
+
+        with pytest.raises(EvaluationMatcherError, match="does not match"):
+            _evaluate(store, (), ["ep-resolved-window"])
+    finally:
+        store.close()
+
+
+def test_matching_run_resolved_metric_window_is_used(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "resolved-window-match-run")
+    try:
+        _add_episode(store, "ep-resolved-window-match", "data_pipeline")
+        insert_private_record(
+            store.private,
+            "run_metadata",
+            {
+                "key": RUN_METADATA_KEY,
+                "value_json": {
+                    "resolved_config": {
+                        "monitoring": {"window_days": {"value": 7}}
+                    }
+                },
+            },
+        )
+        store.commit()
+
+        result = _evaluate(store, (), ["ep-resolved-window-match"])
+
+        assert result.report["metric_window_days"] == 7
+    finally:
+        store.close()
+
+
+def test_multiple_truth_candidates_are_ambiguous_and_counted_for_recall(
     tmp_path: Path,
 ) -> None:
     store = create_export_stores(tmp_path / "ambiguous-run")
@@ -332,16 +433,16 @@ def test_multiple_truth_candidates_are_ambiguous_and_excluded_from_recall(
         }
         assert result.report["ambiguous_incident_ids"] == [incidents[0]["incident_id"]]
         assert result.report["detection_recall"] == {
-            "detected": 0,
+            "detected": 2,
             "denominator": 2,
-            "recall": 0.0,
-            "missed_truth_ids": ["truth-ambiguous-a", "truth-ambiguous-b"],
+            "recall": 1.0,
+            "missed_truth_ids": [],
         }
     finally:
         store.close()
 
 
-def test_multi_cause_truth_components_keep_distinct_ids_and_are_scored_once_each(
+def test_same_feature_multi_cause_truth_components_both_count_for_recall(
     tmp_path: Path,
 ) -> None:
     store = create_export_stores(tmp_path / "multi-cause-run")
@@ -363,7 +464,7 @@ def test_multi_cause_truth_components_keep_distinct_ids_and_are_scored_once_each
             truth_id="truth-fraud-component",
             cause="fraud_surge",
             requires_intervention=True,
-            features=["txn_count"],
+            features=["amount"],
             segments=["retail"],
             parent_scenario="scenario-two-causes",
         )
@@ -371,15 +472,9 @@ def test_multi_cause_truth_components_keep_distinct_ids_and_are_scored_once_each
         incidents = _incident_rows(
             _alert(
                 episode_id="ep-multi-cause",
-                alert_id="alert-pipeline-component",
+                alert_id="alert-two-cause-components",
                 feature="amount_avg_7d",
                 at="2026-02-05T12:00:00.000000Z",
-            ),
-            _alert(
-                episode_id="ep-multi-cause",
-                alert_id="alert-fraud-component",
-                feature="txn_count_24h",
-                at="2026-02-05T13:00:00.000000Z",
             ),
             episode_id="ep-multi-cause",
         )
@@ -392,14 +487,12 @@ def test_multi_cause_truth_components_keep_distinct_ids_and_are_scored_once_each
             "recall": 1.0,
             "missed_truth_ids": [],
         }
-        links = {
-            match["feature"]: match["matched_truth_ids"]
-            for match in result.report["incident_matches"]
-        }
-        assert links == {
-            "amount_avg_7d": ["truth-pipeline-component"],
-            "txn_count_24h": ["truth-fraud-component"],
-        }
+        assert result.report["incident_matches"][0]["status"] == "ambiguous_match"
+        assert result.report["incident_matches"][0]["matched_truth_ids"] == []
+        assert result.report["incident_matches"][0]["candidate_truth_ids"] == [
+            "truth-fraud-component",
+            "truth-pipeline-component",
+        ]
     finally:
         store.close()
 
