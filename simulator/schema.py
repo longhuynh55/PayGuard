@@ -427,13 +427,33 @@ OPERATIONAL_DDL: tuple[str, ...] = (
             OR (SELECT amount FROM transactions WHERE txn_id = NEW.txn_id) IS NULL
             OR NEW.amount > (SELECT amount FROM transactions WHERE txn_id = NEW.txn_id)
             OR NEW.event_at <= (SELECT created_at FROM transactions WHERE txn_id = NEW.txn_id)
+            OR NOT EXISTS (
+                SELECT 1 FROM transaction_events AS settled
+                WHERE settled.txn_id = NEW.txn_id
+                  AND settled.event_type = 'settled'
+                  AND settled.event_at < NEW.event_at
+                  AND settled.available_at <= NEW.available_at
+            )
+            OR EXISTS (
+                SELECT 1 FROM transaction_events AS adjustment
+                WHERE adjustment.txn_id = NEW.txn_id
+                  AND adjustment.event_type IN ('refunded', 'reversed')
+            )
+            OR COALESCE(
+                (
+                    SELECT SUM(amount) FROM transaction_events AS adjustment
+                    WHERE adjustment.txn_id = NEW.txn_id
+                      AND adjustment.event_type IN ('refunded', 'reversed')
+                ),
+                0
+            ) + NEW.amount > (SELECT amount FROM transactions WHERE txn_id = NEW.txn_id)
         )
     ) OR (
         NEW.event_type NOT IN ('refunded', 'reversed')
         AND NEW.amount IS NOT NULL
     )
     BEGIN
-        SELECT RAISE(ABORT, 'transaction event amount and time must match refund or reversal rules');
+        SELECT RAISE(ABORT, 'transaction adjustment must be within original amount, unique, and settled');
     END
     """,
     """

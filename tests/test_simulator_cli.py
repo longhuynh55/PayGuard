@@ -18,6 +18,36 @@ from simulator.validate import validate_run
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_KNOWN_CLEAN_MINIMUM_SUPPORT_FP = (
+    "ep-0001",
+    "incident-c89881b3dc8c2d6e9ebd1354",
+)
+_EXPECTED_SMOKE_DATA_TICKETS = {
+    ("ep-0002", "incident-ea21a6a3c09cbde42c6a40b1"),
+    ("ep-0004", "incident-553672f4a8f9fcd91ee734d2"),
+    ("ep-0004", "incident-7cfa5401d22e49b6c3a7faa1"),
+    # Low-support coincidence: QR count shifts from n=3 to n=1 in ep-0002.
+    ("ep-0002", "incident-e346f09c6706875fcc708684"),
+    # False positive, fixed by BACKLOG-5 (minimum transaction support).
+    _KNOWN_CLEAN_MINIMUM_SUPPORT_FP,
+}
+
+
+def _assert_smoke_data_ticket_baseline(
+    run_dir: Path, data_ticket_pairs: set[tuple[str, str]]
+) -> None:
+    assert data_ticket_pairs == _EXPECTED_SMOKE_DATA_TICKETS
+    with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
+        non_pipeline_episode_ids = {
+            row[0]
+            for row in connection.execute(
+                "SELECT episode_id FROM episode_manifest "
+                "WHERE template IN ('clean', 'seasonal')"
+            )
+        }
+    assert {
+        pair for pair in data_ticket_pairs if pair[0] in non_pipeline_episode_ids
+    } == {_KNOWN_CLEAN_MINIMUM_SUPPORT_FP}
 
 
 def _cli(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -211,6 +241,80 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     assert "Validation summary:" in validated.stdout
 
 
+@pytest.mark.parametrize("pipeline_mode", ["null", "multiply_100"])
+def test_pipeline_modes_validate_adjustments_against_original_amount(
+    tmp_path: Path, pipeline_mode: str
+) -> None:
+    simulator_source = yaml.safe_load(
+        (ROOT / "configs" / "simulator.yaml").read_text(encoding="utf-8")
+    )
+    simulator_source["transactions"]["refund_probability"]["value"] = 0.2
+    simulator_config = tmp_path / "simulator-with-refunds.yaml"
+    simulator_config.write_text(
+        yaml.safe_dump(simulator_source, sort_keys=False), encoding="utf-8"
+    )
+
+    episode_source = yaml.safe_load(
+        (ROOT / "configs" / "episodes.yaml").read_text(encoding="utf-8")
+    )
+    episode_source["templates"]["data_pipeline"]["mode"]["value"] = pipeline_mode
+    episode_config = tmp_path / f"episodes-{pipeline_mode}.yaml"
+    episode_config.write_text(
+        yaml.safe_dump(episode_source, sort_keys=False), encoding="utf-8"
+    )
+
+    run_dir = tmp_path / f"pipeline-{pipeline_mode}"
+    generated = _cli(
+        "generate",
+        "--profile",
+        "smoke",
+        "--out",
+        str(run_dir),
+        "--config",
+        str(simulator_config),
+        "--episodes-config",
+        str(episode_config),
+    )
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+    assert "Validation summary: 16 passed, 0 failed" in generated.stdout
+
+    with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
+        effects = [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT value_json FROM run_metadata "
+                "WHERE key LIKE 'p1.6.incident_effect.v1:%'"
+            )
+        ]
+    affected_ids = {
+        txn_id
+        for effect in effects
+        for txn_id in effect["affected_transaction_ids"]
+    }
+    assert affected_ids
+    placeholders = ", ".join("?" for _ in affected_ids)
+    with sqlite3.connect(run_dir / "operational" / "observations.sqlite") as connection:
+        adjusted_affected_count = connection.execute(
+            "SELECT COUNT(*) FROM transaction_events "
+            "WHERE txn_id IN (" + placeholders + ") "
+            "AND event_type IN ('refunded', 'reversed')",
+            tuple(sorted(affected_ids)),
+        ).fetchone()[0]
+        assert adjusted_affected_count > 0
+        if pipeline_mode == "null":
+            null_adjustment_count = connection.execute(
+                "SELECT COUNT(*) FROM transaction_events AS event "
+                "JOIN transactions AS tx USING (txn_id) "
+                "WHERE tx.amount IS NULL "
+                "AND event.event_type IN ('refunded', 'reversed')"
+            ).fetchone()[0]
+            assert null_adjustment_count > 0
+
+    validated = _cli("validate", "--run", str(run_dir))
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+    assert "Validation summary: 16 passed, 0 failed" in validated.stdout
+
+
 def test_generate_checks_episode_duration_against_selected_simulator_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -346,10 +450,12 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     assert "P4 triage completed" in first.stdout
 
     with sqlite3.connect(database) as connection:
-        pipeline = connection.execute(
-            "SELECT decision_id FROM decisions WHERE action='data_ticket' "
-            "AND cause='data_pipeline' AND source='rule'"
-        ).fetchall()
+        data_ticket_pairs = set(
+            connection.execute(
+                "SELECT DISTINCT episode_id, incident_id FROM decisions "
+                "WHERE action='data_ticket'"
+            ).fetchall()
+        )
         agent_reviews = connection.execute(
             "SELECT reason, evidence_status FROM decisions "
             "WHERE action='human_review' AND source='agent'"
@@ -357,7 +463,7 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
         decision_columns = {
             row[1] for row in connection.execute('PRAGMA table_info("decisions")')
         }
-    assert len(pipeline) == 5
+    _assert_smoke_data_ticket_baseline(run_dir, data_ticket_pairs)
     assert agent_reviews
     assert all("agent_not_configured" in reason for reason, _ in agent_reviews)
     assert all(status in {"sufficient", "insufficient", "conflicting"} for _, status in agent_reviews)
@@ -449,10 +555,18 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         before = connection.execute(
             "SELECT * FROM decisions ORDER BY decision_id"
         ).fetchall()
-        rule_pipeline = connection.execute(
-            "SELECT COUNT(*) FROM decisions WHERE source='rule' AND action='data_ticket' "
-            "AND cause='data_pipeline'"
-        ).fetchone()[0]
+        rule_data_ticket_pairs = set(
+            connection.execute(
+                "SELECT DISTINCT episode_id, incident_id FROM decisions "
+                "WHERE source='rule' AND action='data_ticket'"
+            ).fetchall()
+        )
+        all_data_ticket_pairs = set(
+            connection.execute(
+                "SELECT DISTINCT episode_id, incident_id FROM decisions "
+                "WHERE action='data_ticket'"
+            ).fetchall()
+        )
         rule_slugs = connection.execute(
             "SELECT model_slug FROM decisions WHERE source='rule'"
         ).fetchall()
@@ -468,8 +582,11 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
             "ORDER BY episode_id"
         ).fetchall()
 
-    assert rule_pipeline == 5
-    assert len(rule_slugs) == rule_pipeline and all(row[0] is None for row in rule_slugs)
+    _assert_smoke_data_ticket_baseline(run_dir, all_data_ticket_pairs)
+    assert rule_data_ticket_pairs == _EXPECTED_SMOKE_DATA_TICKETS
+    assert len(rule_slugs) == len(rule_data_ticket_pairs) and all(
+        row[0] is None for row in rule_slugs
+    )
     assert duplicate_rule_groups == 0
     assert len(agent_rows) >= 3
     assert {row[0] for row in agent_rows} == {

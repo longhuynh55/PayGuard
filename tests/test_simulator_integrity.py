@@ -19,6 +19,7 @@ from simulator.storage import (
     utc_timestamp,
 )
 from simulator.transactions import _poisson_count, generate_transactions
+from simulator.validate import ValidationError, _collect_contract_violations
 from simulator.world import generate_world
 
 
@@ -384,6 +385,14 @@ def test_refund_reversal_event_amount_and_time_rules(p1_2_store) -> None:
         {**valid_refund, "event_id": "refund-too-large", "amount": 125001},
         {
             **valid_refund,
+            "event_id": "refund-second-within-total",
+            "event_type": "reversed",
+            "event_at": "2026-01-30T10:20:00Z",
+            "available_at": "2026-01-30T10:20:00Z",
+            "amount": 10000,
+        },
+        {
+            **valid_refund,
             "event_id": "refund-not-after-original",
             "event_at": "2026-01-30T10:00:00Z",
             "available_at": "2026-01-30T10:00:00Z",
@@ -395,10 +404,152 @@ def test_refund_reversal_event_amount_and_time_rules(p1_2_store) -> None:
         },
     ]
     for event in invalid_events:
-        with pytest.raises(sqlite3.IntegrityError, match="refund or reversal rules"):
+        with pytest.raises(sqlite3.IntegrityError, match="adjustment must be within"):
             insert_operational_record(
                 p1_2_store.operational, "transaction_events", event
             )
+
+
+def test_refund_reversal_event_requires_a_settled_parent(p1_2_store) -> None:
+    insert_operational_record(
+        p1_2_store.operational,
+        "transactions",
+        {
+            "txn_id": "txn-base-declined-only",
+            "episode_id": "base",
+            "customer_id": "customer-base",
+            "merchant_id": "merchant-base",
+            "created_at": "2026-01-30T11:00:00Z",
+            "event_at": "2026-01-30T11:00:00Z",
+            "available_at": "2026-01-30T11:00:00Z",
+            "amount": 125000,
+            "channel": "qr",
+        },
+    )
+    insert_operational_record(
+        p1_2_store.operational,
+        "transaction_events",
+        {
+            "event_id": "txn-base-declined-only:declined",
+            "txn_id": "txn-base-declined-only",
+            "episode_id": "base",
+            "event_type": "declined",
+            "event_at": "2026-01-30T11:05:00Z",
+            "available_at": "2026-01-30T11:05:00Z",
+            "amount": None,
+            "response_code": "05",
+        },
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="adjustment.*settled"):
+        insert_operational_record(
+            p1_2_store.operational,
+            "transaction_events",
+            {
+                "event_id": "txn-base-declined-only:refunded",
+                "txn_id": "txn-base-declined-only",
+                "episode_id": "base",
+                "event_type": "refunded",
+                "event_at": "2026-01-30T11:15:00Z",
+                "available_at": "2026-01-30T11:15:00Z",
+                "amount": 50000,
+                "response_code": None,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("total", "refund/reversal total exceeds its original amount"),
+        ("multiple", "more than one refund/reversal adjustment"),
+        ("unsettled", "adjustment requires a prior available settlement"),
+    ],
+)
+def test_validator_rejects_invalid_refund_reversal_history(
+    p1_2_store, case: str, message: str
+) -> None:
+    connection = p1_2_store.operational
+    connection.execute("DROP TRIGGER transaction_events_adjustment_amount")
+    event_template = {
+        "episode_id": "base",
+        "event_type": "refunded",
+        "event_at": "2026-01-30T10:15:00Z",
+        "available_at": "2026-01-30T10:15:00Z",
+        "response_code": None,
+    }
+    if case in {"total", "multiple"}:
+        amounts = (80000, 50000) if case == "total" else (50000, 10000)
+        for index, amount in enumerate(amounts):
+            event_at = f"2026-01-30T10:{15 + index * 5:02d}:00Z"
+            insert_operational_record(
+                connection,
+                "transaction_events",
+                {
+                    **event_template,
+                    "event_id": f"raw-adjustment-{index}",
+                    "txn_id": "txn-base-before-t0",
+                    "event_at": event_at,
+                    "available_at": event_at,
+                    "amount": amount,
+                },
+            )
+    else:
+        insert_operational_record(
+            connection,
+            "transactions",
+            {
+                "txn_id": "txn-base-unsettled-for-validator",
+                "episode_id": "base",
+                "customer_id": "customer-base",
+                "merchant_id": "merchant-base",
+                "created_at": "2026-01-30T11:00:00Z",
+                "event_at": "2026-01-30T11:00:00Z",
+                "available_at": "2026-01-30T11:00:00Z",
+                "amount": 125000,
+                "channel": "qr",
+            },
+        )
+        insert_operational_record(
+            connection,
+            "transaction_events",
+            {
+                **event_template,
+                "event_id": "raw-unsettled-decline",
+                "txn_id": "txn-base-unsettled-for-validator",
+                "event_type": "declined",
+                "event_at": "2026-01-30T11:05:00Z",
+                "available_at": "2026-01-30T11:05:00Z",
+                "amount": None,
+            },
+        )
+        insert_operational_record(
+            connection,
+            "transaction_events",
+            {
+                **event_template,
+                "event_id": "raw-unsettled-refund",
+                "txn_id": "txn-base-unsettled-for-validator",
+                "event_at": "2026-01-30T11:15:00Z",
+                "available_at": "2026-01-30T11:15:00Z",
+                "amount": 50000,
+            },
+        )
+
+    with pytest.raises(ValidationError, match=message):
+        _collect_contract_violations(connection)
+
+
+def test_validator_rejects_null_amount_without_private_pipeline_effect(p1_2_store) -> None:
+    connection = p1_2_store.operational
+    connection.execute(
+        "UPDATE transactions SET amount = NULL WHERE txn_id = 'txn-base-before-t0'"
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="NULL amount without a private data-pipeline null effect",
+    ):
+        _collect_contract_violations(connection)
 
 
 def test_operational_catalog_has_no_truth_or_generator_columns(p1_2_store) -> None:

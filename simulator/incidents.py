@@ -90,6 +90,7 @@ def _write_truth(
     affected_features: list[str],
     affected_rows: list[sqlite3.Row],
     accepted_actions: list[str],
+    pre_injection_amount_by_txn_id: dict[str, int] | None = None,
 ) -> str:
     event_times = [row["event_at"] for row in affected_rows]
     available_times = [row["available_at"] for row in affected_rows]
@@ -120,16 +121,22 @@ def _write_truth(
             "parent_scenario": None,
         },
     )
+    effect_manifest = {
+        "incident_truth_id": incident_truth_id,
+        "episode_id": episode_id,
+        "affected_transaction_ids": affected_transaction_ids,
+    }
+    if pre_injection_amount_by_txn_id is not None:
+        effect_manifest["pre_injection_amount_by_txn_id"] = {
+            txn_id: pre_injection_amount_by_txn_id[txn_id]
+            for txn_id in affected_transaction_ids
+        }
     insert_private_record(
         private,
         "run_metadata",
         {
             "key": f"p1.6.incident_effect.v1:{incident_truth_id}",
-            "value_json": {
-                "incident_truth_id": incident_truth_id,
-                "episode_id": episode_id,
-                "affected_transaction_ids": affected_transaction_ids,
-            },
+            "value_json": effect_manifest,
         },
     )
     return effect_available_at
@@ -219,6 +226,9 @@ def inject_data_pipeline(
             affected_features=["amount"],
             affected_rows=changed,
             accepted_actions=["data_ticket", "human_review"],
+            pre_injection_amount_by_txn_id={
+                row["txn_id"]: row["amount"] for row in changed
+            },
         )
 
     return IncidentSummary(
