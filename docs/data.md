@@ -319,3 +319,18 @@ Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID gi
 `scope_json` có bốn khóa `feature`, `segment`, `start_at`, `end_at`; giá trị là TEXT hoặc NULL khi snapshot lỗi không cung cấp được phạm vi. `checklist_results_json` là object ánh xạ tên checklist sang object kết quả; mỗi kết quả có `status` ∈ `pass`, `fail`, `pending`, `conflicting`, `error`, `not_applicable`, và có thể có `reason`, `scope_match`, `window_complete`, `requires_human_review`, `details`. Ba cờ là BOOLEAN; `details` là JSON. `evidence_status` không phải đầu vào checklist được lưu. `tool_trace_ids_json` là mảng các TEXT ID không rỗng.
 
 Một run directory chỉ dùng một agent provider. Runner từ chối chạy nếu DB đã có quyết định `source='agent'` với `model_slug` khác provider đang chọn (bao gồm `NULL` của `unconfigured`); hãy dùng bản sao mới của run directory cho mỗi provider.
+
+## 9. P5.1 harness artifacts
+
+Các file dưới đây nằm ngoài SQLite. Chúng không chứa truth, injector data, seed, prompt body, hay SQL; `seed-role-ledger.json` chỉ ghi episode ID và role operational đã được chạm. Cost ledger nằm ở benchmark root, ngoài mọi operational/private database mà triage hoặc tool đọc.
+
+| File | Cấu trúc / ràng buộc |
+|---|---|
+| `harness-manifest.json`, `base/generation-manifest.json` | JSON object: `schema_version = 1`, `profile = "smoke"`, `hashes` gồm Git HEAD/dirty flag và SHA-256 cho code, configs, prompt sources, sampling. Khi resume, hashes phải khớp. |
+| `base/base-manifest.json` | JSON object: schema/profile, `freeze_point`, `hashes`, `input_fingerprint` SHA-256, và số đếm pipeline. Fingerprint canonical của mọi bảng operational, coi `incidents` và `decisions` là rỗng. BASE freeze sau `model_scores`, `daily_metrics`, `alerts`, trước hai bảng này. |
+| `policies/<name>/run-manifest.json` | JSON object: schema, `policy_name`, `provider_name`, `policy_version`, `model_slug` (có thể NULL), `hashes`, `base_fingerprint`, `run_fingerprint`. Resume chỉ được tiếp tục nếu identity này trùng hoàn toàn. |
+| `locks/prompt-rule.json`, `locks/policy/<name>.json` | JSON object: `schema_version`, `lock_kind`, `locked_at` UTC, `identity.hashes`; policy lock còn có tên policy, `policy_version`, `model_slug`. Lock marker bất biến; phân tích chỉ dùng khi identity hiện tại khớp. |
+| `seed-role-ledger.json` | JSON object gồm `schema_version` và `entries` keyed bởi SHA-256. Mỗi entry ghi operation, policy, `roles` (role → episode ID list), usage (`analysis` hoặc `operational_execution`) và `touched_at` UTC. Cùng một operation/role/episode set chỉ có một entry khi resume. |
+| `cost-ledger.jsonl` | Append-only JSON Lines, mỗi event có `schema_version = 1`, `event`, `recorded_at` UTC, `amount_usd` dạng decimal text, `model_slug`, `policy`. `reserve` thêm reservation ID; `settle` chốt reservation và cờ `conservative`; `fake_call` ghi 0; `blocked` ghi ước lượng/cap khi bị từ chối. Reservation chưa settle sau crash vẫn được tính vào cap. |
+
+`hashes` có `git_head`, `git_dirty`, `code_hash`, `config_hash`/`config_hashes`, `prompt_hash`/`prompt_hashes`, và `sampling_hash`; các nội dung được băm bằng SHA-256 trên JSON canonical hoặc bytes của file. `input_fingerprint` của mỗi policy phải bằng BASE trước và sau triage. Chi tiết CLI/lock workflow ở [P5 implementation](p5-implementation.md).

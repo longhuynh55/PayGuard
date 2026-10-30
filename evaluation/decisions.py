@@ -138,6 +138,17 @@ def _select_decision_scope(
         if row["source"] == "agent"
     }
     candidates = agent_pairs or {(row["policy_version"], None) for row in decisions}
+    if not candidates:
+        if policy_version is None and model_slug is not None:
+            raise DecisionEvaluationError(
+                "an empty decision set requires --policy-version to identify its policy"
+            )
+        selected = (policy_version, model_slug)
+        return (), {
+            "policy_version": selected[0],
+            "model_slug": selected[1],
+            "excluded_decision_count": 0,
+        }
     if policy_version is None and model_slug is None:
         if len(candidates) > 1:
             raise DecisionEvaluationError(
@@ -420,6 +431,7 @@ def evaluate_decisions(
     episode_ids: Iterable[str],
     policy_version: str | None = None,
     model_slug: str | None = None,
+    report_path: str | Path | None = None,
 ) -> EvaluationResult:
     """Score in-memory operational decisions and write a private-side report.
 
@@ -450,16 +462,21 @@ def evaluate_decisions(
         selection=selection,
     )
 
-    private_root = Path(private_db_path).expanduser().resolve().parent
-    report_path = private_root / "reports" / "p4_5_decisions.json"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
+    output_path = (
+        Path(report_path).expanduser().resolve()
+        if report_path is not None
+        else Path(private_db_path).expanduser().resolve().parent
+        / "reports"
+        / "p4_5_decisions.json"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
         + "\n",
         encoding="utf-8",
         newline="",
     )
-    return EvaluationResult(report=report, report_path=report_path)
+    return EvaluationResult(report=report, report_path=output_path)
 
 
 def evaluate_operational_decisions(
@@ -468,6 +485,8 @@ def evaluate_operational_decisions(
     private_db_path: str | Path,
     policy_version: str | None = None,
     model_slug: str | None = None,
+    episode_ids: Iterable[str] | None = None,
+    report_path: str | Path | None = None,
 ) -> EvaluationResult:
     """Read persisted decisions from the operational DB, then score private truth.
 
@@ -503,16 +522,44 @@ def evaluate_operational_decisions(
             raise DecisionEvaluationError(
                 "operational database contains private evaluator tables"
             )
-        episode_ids = tuple(
+        all_episode_ids = tuple(
             str(row[0])
             for row in connection.execute(
                 "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
             )
         )
+        if not all_episode_ids:
+            raise DecisionEvaluationError(
+                "operational database has no registered non-base episodes"
+            )
+        if episode_ids is None:
+            selected_episode_ids = all_episode_ids
+        else:
+            requested_ids = tuple(episode_ids)
+            if any(
+                not isinstance(episode_id, str)
+                or not episode_id.strip()
+                or episode_id == "base"
+                for episode_id in requested_ids
+            ):
+                raise DecisionEvaluationError(
+                    "episode_ids must contain non-base episode IDs"
+                )
+            selected_episode_ids = tuple(sorted(set(requested_ids)))
+            if not selected_episode_ids or not set(selected_episode_ids).issubset(
+                all_episode_ids
+            ):
+                raise DecisionEvaluationError(
+                    "episode_ids must select registered episodes from the operational database"
+                )
+        placeholders = ", ".join("?" for _ in selected_episode_ids)
         decisions = tuple(
             dict(row)
             for row in connection.execute(
-                "SELECT * FROM decisions ORDER BY decision_at, episode_id, incident_id, decision_id"
+                "SELECT * FROM decisions WHERE episode_id IN ("
+                + placeholders
+                + ") ORDER BY decision_at, episode_id, incident_id, decision_id",
+                selected_episode_ids,
             )
         )
     except sqlite3.Error as exc:
@@ -525,7 +572,8 @@ def evaluate_operational_decisions(
     return evaluate_decisions(
         decisions,
         private_db_path=private_path,
-        episode_ids=episode_ids,
+        episode_ids=selected_episode_ids,
         policy_version=policy_version,
         model_slug=model_slug,
+        report_path=report_path,
     )

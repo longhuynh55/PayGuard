@@ -29,3 +29,25 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 - **Danh tính run:** manifest gồm hash code/config/prompt/sampling/base; kiểm tra trước resume, lệch → dừng. Sổ seed/role: development được phân tích, calibration chỉ sau khi khóa prompt/rule, test chỉ sau khi khóa policy.
 - **Sổ chi phí:** ledger bền cộng mọi lời gọi (mọi nhánh, retry, recheck, lần chạy trước restart); chặn trước khi vượt trần đã khóa.
 - **Nghiệm thu:** fingerprint input giống nhau giữa các policy và không đổi sau chạy; resume idempotent; fake provider end-to-end; truth chỉ evaluator đọc; commit trước tool giữ như P4.4b.
+
+### P5.1 round one — CLI, lock và ngân sách (quyết định người dùng 31/10/2026)
+
+Entrypoint được chốt:
+
+```bash
+python -m payguard run --profile smoke --policy rule_human --out data/p5-smoke
+python -m payguard run --profile smoke --policy rule_agent_fake --out data/p5-smoke
+```
+
+Lệnh thứ hai tái dùng BASE đã freeze; mỗi policy có manifest và operational DB copy riêng. Evaluator report của mỗi policy được giữ dưới `base/private/reports/p5_1/<policy>/`, tránh đặt truth-derived report trong đường dẫn agent/tool. Mặc định chỉ evaluator report trên `development`. Muốn phân tích `calibration` hoặc `test`, thêm `--analysis-role calibration|test`; role ledger ghi lại tập episode và usage. `triage measure` vẫn là mode riêng.
+
+Khóa trước khi phân tích held-out role bằng:
+
+```bash
+python -m payguard lock prompt-rule --out data/p5-smoke
+python -m payguard lock policy --policy rule_agent_fake --out data/p5-smoke
+```
+
+`prompt-rule` là lock dùng chung; `policy` được khóa riêng theo policy. Cả hai lưu thời điểm UTC và hash hiện tại của Git HEAD/dirty flag, code, configs, prompt sources, sampling; policy lock còn gắn `policy_version` và `model_slug`. Lệnh lock từ chối khi Git working tree có thay đổi chưa commit; file Git-ignore không được Git tính là thay đổi. Marker không bị ghi đè: cùng identity thì lệnh idempotent, identity mới cần benchmark root mới. Calibration cần hash khớp prompt/rule lock; test cần hash và policy khớp policy lock. Guard chạy trước evaluator đọc truth.
+
+Cost ledger là `cost-ledger.jsonl` chung dưới benchmark root, dùng append-only reservations/settlements cùng file lock; reservation chưa settle được tính vào ngân sách sau crash. LLM client reserve ước lượng trần input/output theo payload và sampling trước từng lần gọi, gồm retry; khi còn lại không đủ thì không gửi request. Fake provider thêm event chi phí 0. `configs/llm.yaml` giữ nguyên trần tạm $1 cho các lệnh P4; harness truyền trần benchmark $10 vào ledger và LLM client. Hai trần có phạm vi riêng, không cộng thành $11: P4 measurement/run dùng config $1, toàn bộ các policy/retry/recheck dưới cùng benchmark root dùng chung $10. File artifact và identity contract ở [data.md, mục 9](data.md#9-p51-harness-artifacts).

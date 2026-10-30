@@ -10,12 +10,14 @@ import urllib.error
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
 from simulator.storage import utc_timestamp
+from triage.cost_ledger import CostLimitExceeded, DurableCostLedger
 
 
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -222,12 +224,16 @@ class LLMClient:
         api_key: str | None = None,
         dotenv_path: str | Path | None = None,
         transport: Callable[[dict[str, Any], float], Any] | None = None,
+        cost_ledger: DurableCostLedger | None = None,
+        ledger_policy: str | None = None,
     ) -> None:
         self.config = config or load_llm_config(config_path)
         self._api_key = api_key
         self._dotenv_path = Path(dotenv_path) if dotenv_path is not None else None
         self._transport = transport
         self._spent_cost_usd = 0.0
+        self._cost_ledger = cost_ledger
+        self._ledger_policy = ledger_policy
 
     @property
     def spent_cost_usd(self) -> float:
@@ -275,19 +281,86 @@ class LLMClient:
             "response_format": {"type": "json_object"},
         }
         response: Any = None
+        response_record: LLMCallRecord | None = None
         request_failure: _RequestFailure | None = None
         for attempt in range(self.config.retry_count + 1):
+            reservation_id: str | None = None
+            reserved_amount = self._maximum_request_cost(payload)
+            if self._cost_ledger is not None:
+                if getattr(self, "_fake_cost_free", False):
+                    self._cost_ledger.record_fake_call(
+                        model_slug=self.config.canonical_slug,
+                        policy=self._ledger_policy,
+                    )
+                else:
+                    try:
+                        reservation_id = self._cost_ledger.reserve(
+                            reserved_amount,
+                            model_slug=self.config.canonical_slug,
+                            policy=self._ledger_policy,
+                        )
+                    except CostLimitExceeded as exc:
+                        record = self._empty_record(cache_key, started)
+                        return LLMResult(
+                            record,
+                            error=LLMError("cost_limit_exceeded", str(exc)),
+                        )
             try:
                 response = self._send(payload)
+                if not getattr(self, "_fake_cost_free", False):
+                    if isinstance(response, Mapping):
+                        response_record = self._record_from_response(
+                            response, cache_key, started
+                        )
+                        usage = response.get("usage")
+                        has_metered_usage = isinstance(usage, Mapping) and any(
+                            key in usage
+                            for key in (
+                                "prompt_tokens",
+                                "completion_tokens",
+                                "cost",
+                            )
+                        )
+                        settled_amount = (
+                            response_record.cost_usd if has_metered_usage else reserved_amount
+                        )
+                        conservative = not has_metered_usage
+                    else:
+                        settled_amount = reserved_amount
+                        conservative = True
+                    if reservation_id is not None:
+                        self._cost_ledger.settle(
+                            reservation_id,
+                            settled_amount,
+                            model_slug=self.config.canonical_slug,
+                            policy=self._ledger_policy,
+                            conservative=conservative,
+                        )
                 request_failure = None
                 break
             except _RequestFailure as exc:
+                if reservation_id is not None:
+                    self._cost_ledger.settle(
+                        reservation_id,
+                        reserved_amount,
+                        model_slug=self.config.canonical_slug,
+                        policy=self._ledger_policy,
+                        conservative=True,
+                    )
                 request_failure = exc
                 if not exc.retryable or attempt >= self.config.retry_count:
                     break
                 if self.config.retry_backoff_ms:
                     time.sleep(self.config.retry_backoff_ms / 1000.0)
             except Exception:
+                if reservation_id is not None:
+                    self._cost_ledger.settle(
+                        reservation_id,
+                        reserved_amount,
+                        model_slug=self.config.canonical_slug,
+                        policy=self._ledger_policy,
+                        conservative=True,
+                    )
                 request_failure = _RequestFailure("transport_error", "OpenRouter request failed.")
                 break
 
@@ -334,7 +407,7 @@ class LLMClient:
         content = message.get("content") if isinstance(message, Mapping) else None
         if not provider:
             provider = _optional_text(choice.get("provider"))
-        record = self._record_from_response(response, cache_key, started)
+        record = response_record or self._record_from_response(response, cache_key, started)
         if provider != record.provider:
             record = replace(record, provider=provider)
         self._spent_cost_usd += record.cost_usd
@@ -353,6 +426,15 @@ class LLMClient:
         except (json.JSONDecodeError, ValueError):
             return LLMResult(record, error=LLMError("invalid_json", "LLM content is not valid JSON."))
         return LLMResult(record, value=value, content=content)
+
+    def _maximum_request_cost(self, payload: Mapping[str, Any]) -> Decimal:
+        """Reserve against the UTF-8 byte upper bound for prompt tokens."""
+        encoded_bytes = len(_canonical_json(payload).encode("utf-8")) + 16
+        input_rate = Decimal(str(self.config.input_usd_per_million))
+        output_rate = Decimal(str(self.config.output_usd_per_million))
+        input_cost = Decimal(encoded_bytes) * input_rate / Decimal(1_000_000)
+        output_cost = Decimal(self.config.max_tokens) * output_rate / Decimal(1_000_000)
+        return input_cost + output_cost
 
     def _cache_key(
         self, prompt: str, *, episode_id: str, as_of_time: str, data_snapshot: str
@@ -399,6 +481,8 @@ class LLMClient:
                 prompt_tokens * self.config.input_usd_per_million
                 + completion_tokens * self.config.output_usd_per_million
             ) / 1_000_000
+        if getattr(self, "_fake_cost_free", False) and self._cost_ledger is not None:
+            cost_usd = 0.0
         return LLMCallRecord(
             model=_optional_text(response.get("model")),
             canonical_slug=self.config.canonical_slug,
@@ -473,6 +557,8 @@ class FakeLLMClient(LLMClient):
         config: LLMConfig | None = None,
         config_path: str | Path = DEFAULT_CONFIG_PATH,
         response_factory: Callable[[dict[str, Any]], Any] | None = None,
+        cost_ledger: DurableCostLedger | None = None,
+        ledger_policy: str | None = None,
     ) -> None:
         if responses is not None and response is not None:
             raise ValueError("provide either responses or response, not both")
@@ -481,8 +567,15 @@ class FakeLLMClient(LLMClient):
         initial = responses if responses is not None else [response if response is not None else {"sql": "SELECT 1"}]
         self._fake_responses = deque(initial)
         self._fake_response_factory = response_factory
+        self._fake_cost_free = True
         self.requests: list[dict[str, Any]] = []
-        super().__init__(config=config, config_path=config_path, transport=self._fake_send)
+        super().__init__(
+            config=config,
+            config_path=config_path,
+            transport=self._fake_send,
+            cost_ledger=cost_ledger,
+            ledger_policy=ledger_policy,
+        )
 
     def _fake_send(self, payload: dict[str, Any], _timeout_seconds: float) -> Any:
         self.requests.append(payload)
