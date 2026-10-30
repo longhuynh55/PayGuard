@@ -1,4 +1,4 @@
-policy_version: payguard.triage.p4.round1.v2
+policy_version: payguard.triage.p4.round2.v1
 
 # Round 1 deliberately grants no automatic close authority. These are policy
 # defaults, not values tuned from development, calibration, or test episodes.
@@ -12,7 +12,7 @@ agent_close_disabled: true
 tau_agent: null
 
 provenance:
-  policy_version: "P4.1 gate plus P4.2 round 1 runbook; no episode-based tuning."
+  policy_version: "P4.1 round 2 gate plus P4.2 round 1 runbook; no episode-based tuning."
   close_enabled: "P4.2 round 1 sub-plan: no runbook has close_enabled authority."
   agent_close_disabled: "P4.4 round 1 sub-plan: agent cannot close."
   tau_agent: "Unset while agent closing is disabled; calibration selection is deferred."
