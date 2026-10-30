@@ -41,10 +41,10 @@
 | P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ✅ P3 vòng 1 hoàn tất: P3.1–P3.4 và P3.5 `round1-done` (Vòng 1 đã bàn giao; chi tiết P3.4 và P3.5 tại [sub-plan](docs/p3-implementation.md)); phần vòng 2 chưa triển khai; BACKLOG-2 (28/10): `model score`/`model evaluate` không còn nạp `configs/episodes.yaml` |
 | P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1 vòng 1 và round 2 hoàn tất ✅; P4.2–P4.5 vòng 1 hoàn tất; P4.4b hoàn tất sau review r2 và fail-fast fix r3 (mỗi run directory dùng một agent provider); P4.6 round 1 hoàn tất với 2 incident theo quyết định người dùng 29/10; ca thứ ba hoãn tới pilot 60 P1 vòng 2 ([chi tiết](docs/p4-implementation.md)); BACKLOG-4 (29/10) sửa backlog P4.6; P3.6 tách cấu hình injector khỏi monitoring |
-| P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
+| P5 | Đánh giá ([evaluation](docs/evaluation.md)) · [sub-plan](docs/p5-implementation.md) | 🔁 30/10: chuẩn bị P5 (bảng quyết định UQ, matcher, support development, harness + sổ chi phí) chen trước P1.4 |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
-**Việc tiếp theo:** P1 vòng 2 với pilot 60 theo [sub-plan](docs/p1-implementation.md); ca P4.6 thứ ba hoãn tới pilot này theo quyết định người dùng 29/10 (mục 5). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Mốc ★ đạt 29/10; ngân sách benchmark đã khóa (mục 5: 10 USD, 60 episode). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
+**Việc tiếp theo:** xong đợt 1 P1 vòng 2 (P1.3) → các task chuẩn bị P5 theo [sub-plan P5](docs/p5-implementation.md) → P1.4 trở đi theo [sub-plan](docs/p1-implementation.md); ca P4.6 thứ ba hoãn tới pilot này theo quyết định người dùng 29/10 (mục 5). P3.5 vòng 1 đã lưu `daily_metrics`, `alerts` và `incidents` vào DB operational, có allowlist as-of; P4 đọc snapshot qua `read_as_of`. Mốc ★ đạt 29/10; ngân sách benchmark đã khóa (mục 5: 10 USD, 60 episode). Không thêm vòng review protocol trước khi có luồng mỏng chạy được. [19 ví dụ kiểm tra protocol](review/verify_plan_claims.py) kiểm tra phép tính, phân nhánh hành động, đơn vị rủi ro và cửa sổ gộp incident; chúng không kiểm tra implementation.
 
 ---
 
@@ -119,6 +119,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 30/10/2026 | Sau phản biện kiến trúc (orchestrator + supervisor), người dùng duyệt chen trước P1.4: bảng quyết định UQ, matcher hoàn chỉnh, bảng support development, harness + sổ chi phí bền ([sub-plan P5](docs/p5-implementation.md)); P4 vòng 2 vẫn sau P1. Chỉ orchestrator cập nhật Trạng thái MASTER; file điều phối lưu bền ngoài `/tmp`; đo `--durations` trước khi tối ưu test |
 | 30/10/2026 | Người dùng chốt P4.1 round 2: tối đa 2 recheck theo từng `incident_id`; incident con bắt đầu bộ đếm riêng. Khoảng cách tối thiểu là 24 giờ giữa hai `as_of_time` UTC liên tiếp; recheck thứ ba hoặc quá sớm chuyển `human_review`. |
 | 29/10/2026 | Người dùng khóa ngân sách benchmark 10 USD (gồm 4 baseline + ablation), giữ 60 episode; tăng episode chỉ khi duyệt lại sau pilot 60 |
 | 29/10/2026 | P4.6: smoke chỉ có 2 incident tới agent ngoài test → người dùng chọn đo 2 ca thay vì 3 (ca thứ ba hoãn tới pilot 60); 4 lời gọi thật, 13.217 token vào / 642 ra, ≈ 0,0005 USD; chưa khóa trần benchmark và số episode. Mốc ★ đạt |
