@@ -222,4 +222,6 @@ uv run pytest
 3. P1.6 vòng 2 (các template còn lại trong [data.md](data.md) mục Kịch bản sự cố, ca hai nguyên nhân).
 4. P1.7 + P1.8 vòng 2 (pilot 60 episode 12/24/24, báo cáo support đầy đủ, ca P4.6 thứ ba).
 
+**Backlog P1.3 vòng 2 (không chặn, [findings r2](../review/findings/P1.3-r2-r2.md)):** test trigger refund chèn adjustment hợp lệ trước nên che các ca null/vượt gốc/không sau gốc (mutation vẫn pass) → thử từng ca trên giao dịch chưa có adjustment; tập data_ticket tường minh thiếu kiểm `source='rule'`, `cause='data_pipeline'` và tổng số dòng; thiếu test âm cho các nhánh validator pre-injection (`validate.py:843/756/762/547/686`); `data.md` mục effect reference chưa link mô tả `pre_injection_amount_by_txn_id`.
+
 **Quy tắc baseline smoke (người dùng duyệt 29/10/2026):** khi thế giới nền đổi làm đổi dữ liệu smoke, coder được cập nhật các số đếm/fingerprint smoke ghi cứng trong test P1–P4 (ví dụ số `model_scores`, số incident, số alert). KHÔNG được nới bất biến (AS-OF, truth cô lập, pending không phải nhãn âm, quy tắc gate, khóa manifest) hay xóa assertion. Mỗi số đổi phải liệt kê cũ → mới kèm lý do trong báo cáo bàn giao; reviewer đối chiếu từng số.
