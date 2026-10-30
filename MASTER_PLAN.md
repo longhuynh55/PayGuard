@@ -1,6 +1,6 @@
 # PayGuard — Master Plan
 
-> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 26/10/2026.
+> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 30/10/2026.
 > Thiết kế chi tiết nằm trong `docs/` theo module; **mỗi nội dung chỉ viết ở một chỗ**, file khác link tới.
 
 | Tài liệu | Nội dung |
@@ -37,7 +37,7 @@
 | Stage | Module | Trạng thái |
 |---|---|---|
 | P0 | Research, thiết kế | ✅ Protocol cập nhật 25/10/2026 sau sửa rule/agent và đơn vị đánh giá; trạng thái runtime xem tại P1–P6 bên dưới |
-| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1 vòng 1 hoàn tất: P1.1–P1.2, P1.3–P1.8 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3, P1.4, P1.6, P1.7 và P1.8 vòng 2 chưa triển khai; bản 24/10 đã rollback |
+| P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1 vòng 1 hoàn tất: P1.1–P1.2, P1.3–P1.8 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3 vòng 2 runtime hoàn tất 29/10/2026 (pipeline jump checks đạt; full pytest còn assertion non-pipeline `not_applicable` không đạt, xem [P4 sub-plan](docs/p4-implementation.md)); cập nhật 30/10: false positive clean `ep-0001` được cô lập thành strict xfail theo quyết định người dùng, còn 304 passed, 1 xfailed; P1.4, P1.6, P1.7 và P1.8 vòng 2 chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ✅ P3 vòng 1 hoàn tất: P3.1–P3.4 và P3.5 `round1-done` (Vòng 1 đã bàn giao; chi tiết P3.4 và P3.5 tại [sub-plan](docs/p3-implementation.md)); phần vòng 2 chưa triển khai; BACKLOG-2 (28/10): `model score`/`model evaluate` không còn nạp `configs/episodes.yaml` |
 | P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1–P4.5 vòng 1 hoàn tất ✅; P4.4b hoàn tất sau review r2 và fail-fast fix r3 (mỗi run directory dùng một agent provider); P4.6 round 1 hoàn tất với 2 incident theo quyết định người dùng 29/10; ca thứ ba hoãn tới pilot 60 P1 vòng 2 ([chi tiết](docs/p4-implementation.md)); P3.6 tách cấu hình injector khỏi monitoring |

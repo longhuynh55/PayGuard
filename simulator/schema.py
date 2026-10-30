@@ -46,14 +46,21 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         txn_id TEXT NOT NULL PRIMARY KEY CHECK (length(txn_id) > 0),
         episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
         customer_id TEXT NOT NULL REFERENCES customers(customer_id),
-        merchant_id TEXT NOT NULL REFERENCES merchants(merchant_id),
+        merchant_id TEXT NULL REFERENCES merchants(merchant_id),
+        recipient_customer_id TEXT NULL REFERENCES customers(customer_id),
         created_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='created_at')}),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
         amount INTEGER NULL CHECK (amount IS NULL OR typeof(amount) = 'integer'),
-        channel TEXT NOT NULL CHECK (length(channel) > 0),
+        channel TEXT NOT NULL CHECK (channel IN ('qr', 'wallet', 'card')),
         UNIQUE (txn_id, episode_id),
-        CHECK (event_at = created_at)
+        CHECK (event_at = created_at),
+        CHECK (
+            (merchant_id IS NOT NULL AND recipient_customer_id IS NULL)
+            OR (merchant_id IS NULL AND recipient_customer_id IS NOT NULL)
+        ),
+        CHECK (recipient_customer_id IS NULL OR recipient_customer_id <> customer_id),
+        CHECK (recipient_customer_id IS NULL OR channel = 'wallet')
     )
     """,
     f"""
@@ -66,6 +73,9 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         ),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
+        amount INTEGER NULL CHECK (
+            amount IS NULL OR (typeof(amount) = 'integer' AND amount > 0)
+        ),
         response_code TEXT NULL,
         FOREIGN KEY (txn_id) REFERENCES transactions(txn_id),
         CHECK (available_at >= event_at)
@@ -408,6 +418,25 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     END
     """,
     """
+    CREATE TRIGGER IF NOT EXISTS transaction_events_adjustment_amount
+    BEFORE INSERT ON transaction_events
+    WHEN (
+        NEW.event_type IN ('refunded', 'reversed')
+        AND (
+            NEW.amount IS NULL
+            OR (SELECT amount FROM transactions WHERE txn_id = NEW.txn_id) IS NULL
+            OR NEW.amount > (SELECT amount FROM transactions WHERE txn_id = NEW.txn_id)
+            OR NEW.event_at <= (SELECT created_at FROM transactions WHERE txn_id = NEW.txn_id)
+        )
+    ) OR (
+        NEW.event_type NOT IN ('refunded', 'reversed')
+        AND NEW.amount IS NOT NULL
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction event amount and time must match refund or reversal rules');
+    END
+    """,
+    """
     CREATE TRIGGER IF NOT EXISTS transactions_customer_episode_insert
     BEFORE INSERT ON transactions
     WHEN (SELECT episode_id FROM customers WHERE customer_id = NEW.customer_id)
@@ -419,19 +448,31 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     """
     CREATE TRIGGER IF NOT EXISTS transactions_merchant_episode_insert
     BEFORE INSERT ON transactions
-    WHEN (SELECT episode_id FROM merchants WHERE merchant_id = NEW.merchant_id)
+    WHEN NEW.merchant_id IS NOT NULL
+     AND (SELECT episode_id FROM merchants WHERE merchant_id = NEW.merchant_id)
          NOT IN ('base', NEW.episode_id)
     BEGIN
         SELECT RAISE(ABORT, 'transaction merchant must be base or same episode');
     END
     """,
     """
+    CREATE TRIGGER IF NOT EXISTS transactions_recipient_episode_insert
+    BEFORE INSERT ON transactions
+    WHEN NEW.recipient_customer_id IS NOT NULL
+     AND (SELECT episode_id FROM customers WHERE customer_id = NEW.recipient_customer_id)
+         NOT IN ('base', NEW.episode_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'transaction recipient must be base or same episode');
+    END
+    """,
+    """
     CREATE TRIGGER IF NOT EXISTS transactions_identity_immutable
-    BEFORE UPDATE OF txn_id, episode_id, customer_id, merchant_id ON transactions
+    BEFORE UPDATE OF txn_id, episode_id, customer_id, merchant_id, recipient_customer_id ON transactions
     WHEN NEW.txn_id IS NOT OLD.txn_id
       OR NEW.episode_id IS NOT OLD.episode_id
       OR NEW.customer_id IS NOT OLD.customer_id
       OR NEW.merchant_id IS NOT OLD.merchant_id
+      OR NEW.recipient_customer_id IS NOT OLD.recipient_customer_id
     BEGIN
         SELECT RAISE(ABORT, 'transaction identity and episode relationships are immutable');
     END

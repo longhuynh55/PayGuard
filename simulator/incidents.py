@@ -157,7 +157,7 @@ def inject_data_pipeline(
     candidates = operational.execute(
         """
         SELECT txn_id, episode_id, amount, event_at, available_at, customer_id, merchant_id,
-               channel
+               recipient_customer_id, channel
         FROM transactions
         WHERE episode_id = ? AND event_at >= ? AND available_at >= ?
         ORDER BY event_at, txn_id
@@ -188,8 +188,17 @@ def inject_data_pipeline(
         if not changed:
             raise ValueError("data_pipeline requires at least one actually affected episode transaction")
 
-        customer_ids = {row["customer_id"] for row in changed}
-        merchant_ids = {row["merchant_id"] for row in changed}
+        customer_ids = {
+            row["customer_id"]
+            for row in changed
+        } | {
+            row["recipient_customer_id"]
+            for row in changed
+            if row["recipient_customer_id"] is not None
+        }
+        merchant_ids = {
+            row["merchant_id"] for row in changed if row["merchant_id"] is not None
+        }
         segments = [
             row[0]
             for row in operational.execute(

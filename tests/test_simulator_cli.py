@@ -188,7 +188,7 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     ] == "mvp-h90-v1"
     assert public_report["label_delay"]["training_snapshot_at_t0"]["model_version"] is None
     calibration = public_report["p2_cohort_support"]["calibration"]
-    assert calibration["positive_count"] == 24
+    assert calibration["positive_count"] == 23
     assert calibration["support_status"] == "sufficient"
     assert calibration["missing_support"] == []
     assert calibration["calibration_minimum_met"] is False
@@ -357,7 +357,7 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
         decision_columns = {
             row[1] for row in connection.execute('PRAGMA table_info("decisions")')
         }
-    assert len(pipeline) == 2
+    assert len(pipeline) == 5
     assert agent_reviews
     assert all("agent_not_configured" in reason for reason, _ in agent_reviews)
     assert all(status in {"sufficient", "insufficient", "conflicting"} for _, status in agent_reviews)
@@ -468,11 +468,13 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
             "ORDER BY episode_id"
         ).fetchall()
 
-    assert rule_pipeline == 2
+    assert rule_pipeline == 5
     assert len(rule_slugs) == rule_pipeline and all(row[0] is None for row in rule_slugs)
     assert duplicate_rule_groups == 0
     assert len(agent_rows) >= 3
-    assert {row[0] for row in agent_rows} == {"ep-0001", "ep-0003", "ep-0005"}
+    assert {row[0] for row in agent_rows} == {
+        "ep-0001", "ep-0002", "ep-0003", "ep-0004", "ep-0005"
+    }
     for _, trace_ids, input_tokens, output_tokens, total_tokens, cost_usd, model_slug, action in agent_rows:
         assert len(json.loads(trace_ids)) == 1
         assert input_tokens > 0 and output_tokens > 0 and total_tokens == input_tokens + output_tokens

@@ -493,10 +493,10 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     }
     print(f"P3.3 smoke incident counts: {incident_counts}")
     assert incident_counts == {
-        "ep-0001": 1,
-        "ep-0002": 1,
-        "ep-0003": 1,
-        "ep-0004": 1,
+        "ep-0001": 2,
+        "ep-0002": 2,
+        "ep-0003": 2,
+        "ep-0004": 2,
         "ep-0005": 1,
     }
     stored_metrics = []
@@ -572,7 +572,7 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
     assert evaluation_result.report["incident_counts"]["benign_matched"] == 0
-    assert evaluation_result.report["incident_counts"]["unmatched"] == 3
+    assert evaluation_result.report["incident_counts"]["unmatched"] == 5
     assert evaluation_result.report_path.is_file()
     for episode_id in ("ep-0003", "ep-0005"):
         if alert_counts.get(episode_id) == 5:

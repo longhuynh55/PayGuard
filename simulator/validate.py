@@ -654,11 +654,37 @@ def _collect_contract_violations(operational: sqlite3.Connection) -> str:
         ):
             violations.append(f"transaction {txn_id} is on the wrong side of T0 for {episode_id}")
         customer_episode = entity_episodes["customers"].get(row["customer_id"])
-        merchant_episode = entity_episodes["merchants"].get(row["merchant_id"])
+        merchant_id = row["merchant_id"]
+        recipient_customer_id = row["recipient_customer_id"]
+        merchant_episode = (
+            entity_episodes["merchants"].get(merchant_id)
+            if merchant_id is not None
+            else None
+        )
+        recipient_episode = (
+            entity_episodes["customers"].get(recipient_customer_id)
+            if recipient_customer_id is not None
+            else None
+        )
         if customer_episode not in {"base", episode_id}:
             violations.append(f"transaction {txn_id} references a customer from another episode")
-        if merchant_episode not in {"base", episode_id}:
+        if (merchant_id is None) == (recipient_customer_id is None):
+            violations.append(
+                f"transaction {txn_id} must have exactly one merchant or account recipient"
+            )
+        if row["channel"] not in {"qr", "wallet", "card"}:
+            violations.append(f"transaction {txn_id} has an unsupported channel")
+        if merchant_id is not None and merchant_episode not in {"base", episode_id}:
             violations.append(f"transaction {txn_id} references a merchant from another episode")
+        if recipient_customer_id is not None:
+            if recipient_episode not in {"base", episode_id}:
+                violations.append(
+                    f"transaction {txn_id} references a recipient from another episode"
+                )
+            if recipient_customer_id == row["customer_id"]:
+                violations.append(f"transaction {txn_id} transfers to its sending account")
+            if row["channel"] != "wallet":
+                violations.append(f"account transfer {txn_id} must use the wallet channel")
 
     for row in operational.execute("SELECT * FROM transaction_events"):
         parent = transactions.get(row["txn_id"])
@@ -675,6 +701,28 @@ def _collect_contract_violations(operational: sqlite3.Connection) -> str:
             episode_id != "base" and parent["episode_id"] not in {"base", episode_id}
         ):
             violations.append(f"transaction event {row['event_id']} crosses episode boundary")
+        if row["event_type"] in {"refunded", "reversed"}:
+            amount = row["amount"]
+            original_amount = parent["amount"]
+            if (
+                isinstance(amount, bool)
+                or not isinstance(amount, int)
+                or amount <= 0
+                or isinstance(original_amount, bool)
+                or not isinstance(original_amount, int)
+                or amount > original_amount
+            ):
+                violations.append(
+                    f"transaction event {row['event_id']} has an invalid refund/reversal amount"
+                )
+            if event_at <= parent["created_at"]:
+                violations.append(
+                    f"transaction event {row['event_id']} must follow its original transaction"
+                )
+        elif row["amount"] is not None:
+            violations.append(
+                f"transaction event {row['event_id']} amount must be NULL for {row['event_type']}"
+            )
 
     for row in operational.execute("SELECT * FROM label_events"):
         parent = transactions.get(row["txn_id"])
