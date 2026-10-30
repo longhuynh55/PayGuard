@@ -145,6 +145,36 @@ def _decision_already_recorded(
     return operational.execute(query + " LIMIT 1", parameters).fetchone() is not None
 
 
+def _prior_recheck_as_of_times(
+    operational: sqlite3.Connection,
+    incident: Mapping[str, Any],
+    *,
+    t0: str,
+    as_of_time: str,
+) -> tuple[str, ...]:
+    """Read earlier rechecks for this incident from the operational as-of view."""
+    incident_id = incident.get("incident_id")
+    episode_id = incident.get("episode_id")
+    if not isinstance(incident_id, str) or not isinstance(episode_id, str):
+        raise StorageError("recheck history requires a valid incident_id and episode_id")
+    decision_rows = read_as_of(
+        operational,
+        "decisions",
+        episode_id=episode_id,
+        t0=t0,
+        as_of_time=as_of_time,
+    )
+    return tuple(
+        sorted(
+            row["as_of_time"]
+            for row in decision_rows
+            if row["incident_id"] == incident_id
+            and row["action"] == "recheck"
+            and row["as_of_time"] <= as_of_time
+        )
+    )
+
+
 def _ensure_provider_matches_run_history(
     operational: sqlite3.Connection,
     *,
@@ -340,6 +370,12 @@ def run_triage(
                         expected_episode_id=episode_id,
                         as_of_time=as_of_time,
                         config=gate_config,
+                        prior_recheck_as_of_times=_prior_recheck_as_of_times(
+                            operational,
+                            incident,
+                            t0=t0,
+                            as_of_time=as_of_time,
+                        ),
                         tool_error=tool_error,
                         tool_error_reason=tool_error_reason,
                         usage=usage,
