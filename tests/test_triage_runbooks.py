@@ -310,6 +310,88 @@ def test_median_ratio_targets_route_data_ticket(tmp_path, ratio: float) -> None:
         store.close()
 
 
+def test_single_transaction_days_block_median_candidate_from_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        before_count=1,
+        after_count=1,
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pending"
+        assert unit["scope_match"] is True
+        assert unit["details"]["evaluation_status"] == "insufficient"
+        assert unit["details"]["matched_transition"][
+            "median_ratio_after_divided_by_before"
+        ] == 100
+        assert unit["details"]["change_detection"]["small_sample"] == {
+            "status": "insufficient",
+            "n_min": 2,
+            "under_minimum_days": [
+                {"business_date": "2026-02-01", "transaction_count": 1},
+                {"business_date": "2026-02-02", "transaction_count": 1},
+            ],
+            "daily_transaction_counts": [
+                {"business_date": "2026-02-01", "transaction_count": 1},
+                {"business_date": "2026-02-02", "transaction_count": 1},
+            ],
+        }
+        decision = _gate(incident, checks)
+        assert decision["action"] == "human_review"
+        assert decision["evidence_status"] == "insufficient"
+    finally:
+        store.close()
+
+
+def test_dense_median_candidate_still_routes_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        before_count=8,
+        after_count=8,
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pass"
+        assert unit["details"]["change_detection"]["small_sample"]["status"] == "pass"
+        assert unit["details"]["matched_transition"]["before_transaction_count"] == 8
+        assert unit["details"]["matched_transition"]["after_transaction_count"] == 8
+        assert _gate(incident, checks)["action"] == "data_ticket"
+    finally:
+        store.close()
+
+
+def test_single_transaction_days_block_null_candidate_from_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=10_000,
+        before_count=1,
+        after_count=1,
+        after_null_count=1,
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pending"
+        assert unit["details"]["change_detection"]["null_rate_increase"][
+            "status"
+        ] == "insufficient"
+        assert unit["details"]["change_detection"]["small_sample"][
+            "status"
+        ] == "insufficient"
+        decision = _gate(incident, checks)
+        assert decision["action"] == "human_review"
+        assert decision["evidence_status"] == "insufficient"
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("after", "expected_status"),
     [

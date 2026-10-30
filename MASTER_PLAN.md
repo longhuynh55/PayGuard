@@ -1,6 +1,6 @@
 # PayGuard — Master Plan
 
-> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 26/10/2026.
+> Đích đến, trạng thái, lộ trình theo stage, phạm vi MVP và nhật ký quyết định. Cập nhật: 30/10/2026.
 > Thiết kế chi tiết nằm trong `docs/` theo module; **mỗi nội dung chỉ viết ở một chỗ**, file khác link tới.
 
 | Tài liệu | Nội dung |
@@ -40,7 +40,7 @@
 | P1 | Simulator + injector ([data](docs/data.md)) | 🔁 Có [sub-plan triển khai](docs/p1-implementation.md); P1 vòng 1 hoàn tất: P1.1–P1.2, P1.3–P1.8 vòng 1 (`round1-done`, Vòng 1 đã bàn giao) ✅; P1.3, P1.4, P1.6, P1.7 và P1.8 vòng 2 chưa triển khai; bản 24/10 đã rollback |
 | P2 | Fraud model ([model](docs/model.md)) · [sub-plan](docs/p2-implementation.md) | ✅ P2 vòng 1 hoàn tất: P2.1 audit split, P2.2 feature as-of, P2.3 LightGBM + calibration, P2.4 Mondrian conformal trên score thô, P2.5 `model_scores` + smoke evaluation đều đã bàn giao; bản 24/10 đã rollback |
 | P3 | Monitoring ([monitoring](docs/monitoring.md)) · [sub-plan](docs/p3-implementation.md) | ✅ P3 vòng 1 hoàn tất: P3.1–P3.4 và P3.5 `round1-done` (Vòng 1 đã bàn giao; chi tiết P3.4 và P3.5 tại [sub-plan](docs/p3-implementation.md)); phần vòng 2 chưa triển khai; BACKLOG-2 (28/10): `model score`/`model evaluate` không còn nạp `configs/episodes.yaml` |
-| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1–P4.5 vòng 1 hoàn tất ✅; P4.4b hoàn tất sau review r2 và fail-fast fix r3 (mỗi run directory dùng một agent provider); P4.6 round 1 hoàn tất với 2 incident theo quyết định người dùng 29/10; ca thứ ba hoãn tới pilot 60 P1 vòng 2 ([chi tiết](docs/p4-implementation.md)); BACKLOG-4 (29/10) sửa backlog P4.6; P3.6 tách cấu hình injector khỏi monitoring |
+| P4 | Triage ([triage](docs/triage.md)) · [sub-plan](docs/p4-implementation.md) | 🔁 Sub-plan đã duyệt 26/10; P4.1–P4.5 vòng 1 hoàn tất ✅; P4.4b hoàn tất sau review r2 và fail-fast fix r3 (mỗi run directory dùng một agent provider); P4.6 round 1 hoàn tất với 2 incident theo quyết định người dùng 29/10; ca thứ ba hoãn tới pilot 60 P1 vòng 2 ([chi tiết](docs/p4-implementation.md)); BACKLOG-4 (29/10) sửa backlog P4.6; P3.6 tách cấu hình injector khỏi monitoring; BACKLOG-5 round 1 khóa `n_min` development-only để chặn routing từ transition thiếu mẫu (xem [triage](docs/triage.md)) ✅ |
 | P5 | Đánh giá ([evaluation](docs/evaluation.md)) | ⬜ |
 | P6 | Đóng gói ([app](docs/app.md)) | ⬜ |
 
@@ -119,6 +119,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 30/10/2026 | BACKLOG-5 round 1: `unit_or_null_change` kiểm tra `n_min` trên từng ngày pre/post trước khi chấp nhận candidate; `n_min` chọn và khóa trên development theo [triage.md](docs/triage.md) mục 3 |
 | 29/10/2026 | Người dùng khóa ngân sách benchmark 10 USD (gồm 4 baseline + ablation), giữ 60 episode; tăng episode chỉ khi duyệt lại sau pilot 60 |
 | 29/10/2026 | P4.6: smoke chỉ có 2 incident tới agent ngoài test → người dùng chọn đo 2 ca thay vì 3 (ca thứ ba hoãn tới pilot 60); 4 lời gọi thật, 13.217 token vào / 642 ra, ≈ 0,0005 USD; chưa khóa trần benchmark và số episode. Mốc ★ đạt |
 | 27/10/2026 | Người dùng đổi Reviewer sang Claude Opus 5.5 (sub-agent mới mỗi lượt review); `gpt-6.1-sol` thành dự phòng |
