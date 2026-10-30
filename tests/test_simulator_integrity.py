@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import random
 import sqlite3
+from collections import Counter
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,8 +18,26 @@ from simulator.storage import (
     list_operational_schema,
     utc_timestamp,
 )
-from simulator.transactions import generate_transactions
+from simulator.transactions import _poisson_count, generate_transactions
+from simulator.validate import ValidationError, _collect_contract_violations
 from simulator.world import generate_world
+
+
+def test_poisson_count_handles_zero_and_tiny_means() -> None:
+    assert _poisson_count(0.0, random.Random(1)) == 0
+    assert _poisson_count(1e-300, random.Random(1)) == 0
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        _poisson_count(-0.1, random.Random(1))
+
+
+def test_poisson_count_handles_large_means() -> None:
+    rng = random.Random(1701)
+    samples = [_poisson_count(1000.0, rng) for _ in range(512)]
+    very_large = _poisson_count(1_000_000_000.0, rng)
+
+    assert min(samples) >= 0
+    assert sum(samples) / len(samples) == pytest.approx(1000.0, rel=0.05)
+    assert 999_000_000 <= very_large <= 1_001_000_000
 
 
 def test_manual_fixture_writes_and_reads_from_separate_exports(p1_2_store) -> None:
@@ -256,6 +276,282 @@ def test_schema_rejects_malformed_timestamp_and_mismatched_label_time(p1_2_store
         )
 
 
+def test_schema_rejects_unsupported_transaction_channel(p1_2_store) -> None:
+    transaction = p1_2_store.operational.execute(
+        "SELECT * FROM transactions ORDER BY txn_id LIMIT 1"
+    ).fetchone()
+
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        p1_2_store.operational.execute(
+            """
+            INSERT INTO transactions
+                (txn_id, episode_id, customer_id, merchant_id, created_at,
+                 event_at, available_at, amount, channel)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'bank_transfer')
+            """,
+            (
+                "txn-unsupported-channel",
+                transaction["episode_id"],
+                transaction["customer_id"],
+                transaction["merchant_id"],
+                transaction["created_at"],
+                transaction["event_at"],
+                transaction["available_at"],
+                transaction["amount"],
+            ),
+        )
+
+
+def test_account_transfer_requires_one_other_base_customer_and_wallet_channel(
+    p1_2_store,
+) -> None:
+    insert_operational_record(
+        p1_2_store.operational,
+        "customers",
+        {
+            "customer_id": "customer-base-recipient",
+            "episode_id": "base",
+            "event_at": "2026-01-20T00:00:00Z",
+            "available_at": "2026-01-20T00:00:00Z",
+            "segment": "retail",
+            "province": "HCM",
+            "age_band": "35-44",
+        },
+    )
+    p1_2_store.operational.execute(
+        """
+        INSERT INTO transactions
+            (txn_id, episode_id, customer_id, merchant_id, recipient_customer_id,
+             created_at, event_at, available_at, amount, channel)
+        VALUES
+            ('txn-base-a2a', 'base', 'customer-base', NULL,
+             'customer-base-recipient', '2026-01-30T11:00:00.000000Z',
+             '2026-01-30T11:00:00.000000Z', '2026-01-30T11:00:00.000000Z',
+             125000, 'wallet')
+        """
+    )
+
+    invalid_rows = [
+        ("txn-base-a2a-self", "customer-base", "wallet"),
+        ("txn-base-a2a-card", "customer-base-recipient", "card"),
+    ]
+    for txn_id, recipient_id, channel in invalid_rows:
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            p1_2_store.operational.execute(
+                """
+                INSERT INTO transactions
+                    (txn_id, episode_id, customer_id, merchant_id, recipient_customer_id,
+                     created_at, event_at, available_at, amount, channel)
+                VALUES (?, 'base', 'customer-base', NULL, ?,
+                        '2026-01-30T11:00:00.000000Z',
+                        '2026-01-30T11:00:00.000000Z',
+                        '2026-01-30T11:00:00.000000Z', 125000, ?)
+                """,
+                (txn_id, recipient_id, channel),
+            )
+
+    with pytest.raises(sqlite3.IntegrityError, match="base or same episode"):
+        p1_2_store.operational.execute(
+            """
+            INSERT INTO transactions
+                (txn_id, episode_id, customer_id, merchant_id, recipient_customer_id,
+                 created_at, event_at, available_at, amount, channel)
+            VALUES
+                ('txn-base-a2a-cross-episode', 'base', 'customer-base', NULL,
+                 'customer-a', '2026-01-30T11:00:00.000000Z',
+                 '2026-01-30T11:00:00.000000Z', '2026-01-30T11:00:00.000000Z',
+                 125000, 'wallet')
+            """
+        )
+
+
+def test_refund_reversal_event_amount_and_time_rules(p1_2_store) -> None:
+    valid_refund = {
+        "event_id": "txn-base-before-t0:refunded",
+        "txn_id": "txn-base-before-t0",
+        "episode_id": "base",
+        "event_type": "refunded",
+        "event_at": "2026-01-30T10:15:00Z",
+        "available_at": "2026-01-30T10:15:00Z",
+        "amount": 50000,
+        "response_code": None,
+    }
+    insert_operational_record(
+        p1_2_store.operational, "transaction_events", valid_refund
+    )
+
+    invalid_events = [
+        {**valid_refund, "event_id": "refund-null-amount", "amount": None},
+        {**valid_refund, "event_id": "refund-too-large", "amount": 125001},
+        {
+            **valid_refund,
+            "event_id": "refund-second-within-total",
+            "event_type": "reversed",
+            "event_at": "2026-01-30T10:20:00Z",
+            "available_at": "2026-01-30T10:20:00Z",
+            "amount": 10000,
+        },
+        {
+            **valid_refund,
+            "event_id": "refund-not-after-original",
+            "event_at": "2026-01-30T10:00:00Z",
+            "available_at": "2026-01-30T10:00:00Z",
+        },
+        {
+            **valid_refund,
+            "event_id": "settlement-with-amount",
+            "event_type": "settled",
+        },
+    ]
+    for event in invalid_events:
+        with pytest.raises(sqlite3.IntegrityError, match="adjustment must be within"):
+            insert_operational_record(
+                p1_2_store.operational, "transaction_events", event
+            )
+
+
+def test_refund_reversal_event_requires_a_settled_parent(p1_2_store) -> None:
+    insert_operational_record(
+        p1_2_store.operational,
+        "transactions",
+        {
+            "txn_id": "txn-base-declined-only",
+            "episode_id": "base",
+            "customer_id": "customer-base",
+            "merchant_id": "merchant-base",
+            "created_at": "2026-01-30T11:00:00Z",
+            "event_at": "2026-01-30T11:00:00Z",
+            "available_at": "2026-01-30T11:00:00Z",
+            "amount": 125000,
+            "channel": "qr",
+        },
+    )
+    insert_operational_record(
+        p1_2_store.operational,
+        "transaction_events",
+        {
+            "event_id": "txn-base-declined-only:declined",
+            "txn_id": "txn-base-declined-only",
+            "episode_id": "base",
+            "event_type": "declined",
+            "event_at": "2026-01-30T11:05:00Z",
+            "available_at": "2026-01-30T11:05:00Z",
+            "amount": None,
+            "response_code": "05",
+        },
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="adjustment.*settled"):
+        insert_operational_record(
+            p1_2_store.operational,
+            "transaction_events",
+            {
+                "event_id": "txn-base-declined-only:refunded",
+                "txn_id": "txn-base-declined-only",
+                "episode_id": "base",
+                "event_type": "refunded",
+                "event_at": "2026-01-30T11:15:00Z",
+                "available_at": "2026-01-30T11:15:00Z",
+                "amount": 50000,
+                "response_code": None,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("total", "refund/reversal total exceeds its original amount"),
+        ("multiple", "more than one refund/reversal adjustment"),
+        ("unsettled", "adjustment requires a prior available settlement"),
+    ],
+)
+def test_validator_rejects_invalid_refund_reversal_history(
+    p1_2_store, case: str, message: str
+) -> None:
+    connection = p1_2_store.operational
+    connection.execute("DROP TRIGGER transaction_events_adjustment_amount")
+    event_template = {
+        "episode_id": "base",
+        "event_type": "refunded",
+        "event_at": "2026-01-30T10:15:00Z",
+        "available_at": "2026-01-30T10:15:00Z",
+        "response_code": None,
+    }
+    if case in {"total", "multiple"}:
+        amounts = (80000, 50000) if case == "total" else (50000, 10000)
+        for index, amount in enumerate(amounts):
+            event_at = f"2026-01-30T10:{15 + index * 5:02d}:00Z"
+            insert_operational_record(
+                connection,
+                "transaction_events",
+                {
+                    **event_template,
+                    "event_id": f"raw-adjustment-{index}",
+                    "txn_id": "txn-base-before-t0",
+                    "event_at": event_at,
+                    "available_at": event_at,
+                    "amount": amount,
+                },
+            )
+    else:
+        insert_operational_record(
+            connection,
+            "transactions",
+            {
+                "txn_id": "txn-base-unsettled-for-validator",
+                "episode_id": "base",
+                "customer_id": "customer-base",
+                "merchant_id": "merchant-base",
+                "created_at": "2026-01-30T11:00:00Z",
+                "event_at": "2026-01-30T11:00:00Z",
+                "available_at": "2026-01-30T11:00:00Z",
+                "amount": 125000,
+                "channel": "qr",
+            },
+        )
+        insert_operational_record(
+            connection,
+            "transaction_events",
+            {
+                **event_template,
+                "event_id": "raw-unsettled-decline",
+                "txn_id": "txn-base-unsettled-for-validator",
+                "event_type": "declined",
+                "event_at": "2026-01-30T11:05:00Z",
+                "available_at": "2026-01-30T11:05:00Z",
+                "amount": None,
+            },
+        )
+        insert_operational_record(
+            connection,
+            "transaction_events",
+            {
+                **event_template,
+                "event_id": "raw-unsettled-refund",
+                "txn_id": "txn-base-unsettled-for-validator",
+                "event_at": "2026-01-30T11:15:00Z",
+                "available_at": "2026-01-30T11:15:00Z",
+                "amount": 50000,
+            },
+        )
+
+    with pytest.raises(ValidationError, match=message):
+        _collect_contract_violations(connection)
+
+
+def test_validator_rejects_null_amount_without_private_pipeline_effect(p1_2_store) -> None:
+    connection = p1_2_store.operational
+    connection.execute(
+        "UPDATE transactions SET amount = NULL WHERE txn_id = 'txn-base-before-t0'"
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="NULL amount without a private data-pipeline null effect",
+    ):
+        _collect_contract_violations(connection)
+
+
 def test_operational_catalog_has_no_truth_or_generator_columns(p1_2_store) -> None:
     schema = list_operational_schema(p1_2_store.operational)
     assert set(schema) == {
@@ -314,8 +610,15 @@ def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path:
 
         assert len(world.customer_ids) == config.scale_for("smoke").customer_count.value
         assert len(world.merchant_ids) == config.scale_for("smoke").merchant_count.value
+        assert set(world.account_roles.values()) == {
+            "individual",
+            "household_business",
+            "internal_mule",
+        }
         assert summary.transaction_count > 0
-        assert summary.lifecycle_event_count == summary.transaction_count * 2
+        assert summary.lifecycle_event_count == pair.operational.execute(
+            "SELECT COUNT(*) FROM transaction_events"
+        ).fetchone()[0]
 
         customers = [dict(row) for row in pair.operational.execute("SELECT * FROM customers")]
         merchants = [dict(row) for row in pair.operational.execute("SELECT * FROM merchants")]
@@ -323,7 +626,18 @@ def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path:
         events = [dict(row) for row in pair.operational.execute("SELECT * FROM transaction_events")]
         assert {row["episode_id"] for row in customers + merchants + transactions + events} == {"base"}
         assert {row["customer_id"] for row in transactions} <= set(world.customer_ids)
-        assert {row["merchant_id"] for row in transactions} <= set(world.merchant_ids)
+        assert all(
+            (row["merchant_id"] is None) != (row["recipient_customer_id"] is None)
+            for row in transactions
+        )
+        assert {
+            row["merchant_id"] for row in transactions if row["merchant_id"] is not None
+        } <= set(world.merchant_ids)
+        assert {
+            row["recipient_customer_id"]
+            for row in transactions
+            if row["recipient_customer_id"] is not None
+        } <= set(world.customer_ids)
         assert all(row["segment"] in config.world.customer_segments.value for row in customers)
         assert all(row["province"] in config.world.customer_provinces.value for row in customers)
         assert all(row["age_band"] in config.world.customer_age_bands.value for row in customers)
@@ -352,7 +666,11 @@ def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path:
             assert row["available_at"] == row["created_at"]
             assert type(row["amount"]) is int
             assert config.transactions.minimum_amount.value <= row["amount"] <= config.transactions.maximum_amount.value
-            assert row["channel"] == config.transactions.channel.value
+            assert row["channel"] in config.transactions.channel_weights.value
+            if row["recipient_customer_id"] is not None:
+                assert row["recipient_customer_id"] != row["customer_id"]
+                assert row["channel"] == config.transactions.account_transfer_channel.value
+                assert row["recipient_customer_id"] in world.familiar_payees[row["customer_id"]]
             created_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
             local_created_at = created_at.astimezone(local_tz)
             assert start <= local_created_at.date() < t0
@@ -369,10 +687,20 @@ def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path:
             assert available_at >= event_at
             assert event_at < t0_utc
         assert set(events_by_transaction) == txn_ids
+        event_types_seen: set[str] = set()
         for row in transactions:
             created_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
             lifecycle = sorted(events_by_transaction[row["txn_id"]], key=lambda event: event["event_at"])
-            assert [event["event_type"] for event in lifecycle] == ["authorized", "settled"]
+            event_types = [event["event_type"] for event in lifecycle]
+            assert event_types[:2] == ["authorized", "settled"]
+            assert len(event_types) in (2, 3)
+            if len(event_types) == 3:
+                assert event_types[2] in {"refunded", "reversed"}
+                assert 0 < lifecycle[2]["amount"] <= row["amount"]
+                assert lifecycle[2]["event_at"] > row["created_at"]
+            else:
+                assert all(event["amount"] is None for event in lifecycle)
+            event_types_seen.update(event_types)
             authorized_at = created_at + timedelta(
                 seconds=config.transactions.authorization_delay_seconds.value
             )
@@ -384,13 +712,30 @@ def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path:
             assert lifecycle[0]["available_at"] == lifecycle[0]["event_at"]
             assert lifecycle[1]["event_at"] == utc_timestamp(settled_at)
             assert lifecycle[1]["available_at"] == lifecycle[1]["event_at"]
+        assert all(event["available_at"] == event["event_at"] for event in lifecycle)
+        assert event_types_seen >= {"refunded", "reversed"}
+        assert summary.account_transfer_count == sum(
+            row["recipient_customer_id"] is not None for row in transactions
+        )
+        assert summary.account_transfer_count > 0
 
         expected_count = (
             len(world.customer_ids)
             * (t0 - start).days
-            * config.world.expected_transactions_per_customer_local_day.value
+            * (
+                config.world.expected_transactions_per_customer_local_day.value
+                + (len(world.familiar_payees) / len(world.customer_ids))
+                * config.transactions.account_transfer_rate_per_individual_local_day.value
+            )
         )
         assert expected_count * 0.75 < len(transactions) < expected_count * 1.25
+        merchant_payments = [row for row in transactions if row["merchant_id"] is not None]
+        channel_counts = Counter(row["channel"] for row in merchant_payments)
+        assert set(channel_counts) == {"qr", "wallet", "card"}
+        for channel, weight in config.transactions.channel_weights.value.items():
+            assert channel_counts[channel] / len(merchant_payments) == pytest.approx(
+                weight, abs=0.08
+            )
         assert len(transactions_by_date) > 150
         assert len(set(transactions_by_date.values())) > 1
         peak_hours = sum(hour_counts.get(hour, 0) for hour in (11, 12, 13, 17, 18, 19, 20))
