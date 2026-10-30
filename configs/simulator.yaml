@@ -106,6 +106,34 @@ world:
     provenance:
       kind: assumption
       reference: Simulator validity constraint.
+  account_role_weights:
+    value: {individual: 0.75, household_business: 0.20, internal_mule: 0.05}
+    unit: account share by role
+    rationale: Synthetic role mix sized to represent all three world roles in smoke; not a population estimate.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 world construction; no market proportions are claimed.
+  familiar_account_payee_count:
+    value: 2
+    unit: familiar account payees per individual
+    rationale: Small synthetic contact set for repeat A2A payments.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 world construction; no observed contact-list size is claimed.
+  household_supplier_merchant_count:
+    value: 2
+    unit: supplier merchants per household-business account
+    rationale: Small synthetic supplier set for repeat household-business payments.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 world construction; no observed supplier count is claimed.
+  internal_mule_outbound_window_hours:
+    value: 4
+    unit: hours
+    rationale: Synthetic capability window for the later P1.4 mule behavior; P1.3 emits no mule cash-out chain.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 world capability; no timing estimate is claimed.
   customer_segments:
     value: [retail]
     unit: segment codes
@@ -160,10 +188,59 @@ transactions:
   channel:
     value: qr
     unit: channel code
-    rationale: One valid baseline channel for P1.3 round 1; additional channels are deferred.
+    rationale: Default channel selected by single-channel background calendar injections.
     provenance:
       kind: assumption
-      reference: P1.3 round 1 minimal transaction profile.
+      reference: Synthetic P1.6 injection assumption; no channel mix is claimed.
+  channel_weights:
+    value: {qr: 0.50, wallet: 0.30, card: 0.20}
+    unit: transaction probability by channel
+    rationale: Synthetic channel mix with positive representation for QR, wallet, and card; not a market-share estimate.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 simulator mix; no source-backed market proportions are claimed.
+  account_transfer_channel:
+    value: wallet
+    unit: channel code
+    rationale: Route synthetic account-to-account transfers through the wallet channel.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 A2A representation; no product-specific routing is claimed.
+  account_transfer_rate_per_individual_local_day:
+    value: 0.03
+    unit: A2A transfers per individual per local calendar day
+    rationale: Low-volume synthetic contact transfers that create an observable but sparse background flow.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 simulator scale; no market transaction rate is claimed.
+  refund_probability:
+    value: 0.01
+    unit: probability in [0, 1]
+    rationale: Synthetic chance that an eligible transaction receives one later refund event.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 lifecycle assumption; not an empirical rate.
+  reversal_probability:
+    value: 0.005
+    unit: probability in [0, 1]
+    rationale: Synthetic chance that an eligible transaction receives one later reversal event, exclusive of refund.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 lifecycle assumption; not an empirical rate.
+  adjustment_minimum_delay_minutes:
+    value: 15
+    unit: minutes after settlement
+    rationale: Keep any refund or reversal event after the original transaction and settlement.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 lifecycle timing; no processor delay is claimed.
+  adjustment_maximum_delay_hours:
+    value: 48
+    unit: hours after settlement
+    rationale: Upper bound for synthetic refund/reversal event timing.
+    provenance:
+      kind: assumption
+      reference: P1.3 round 2 lifecycle timing; no processor delay is claimed.
   authorization_response_code:
     value: "00"
     unit: response code

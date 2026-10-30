@@ -71,6 +71,7 @@ _PUBLIC_FORBIDDEN_KEYS = {
     "true_fraud_count",
     "truth_positive_count",
     "incident_truth_id",
+    "pre_injection_amount_by_txn_id",
     "accepted_actions",
     "effect_available_at",
     "parent_scenario",
@@ -488,6 +489,31 @@ def _validate_incident_truth(
                 f"incident effect reference episode does not match incident truth for {episode_id}"
             )
         affected_ids = effect_manifest["affected_transaction_ids"]
+        pre_injection_amounts = effect_manifest.get(
+            "pre_injection_amount_by_txn_id"
+        )
+        if template == "data_pipeline":
+            if (
+                not isinstance(pre_injection_amounts, dict)
+                or set(pre_injection_amounts) != set(affected_ids)
+                or any(
+                    type(amount) is not int or amount <= 0
+                    for amount in pre_injection_amounts.values()
+                )
+            ):
+                _fail(
+                    f"data-pipeline effect reference for {episode_id} must preserve each "
+                    "positive pre-injection amount in private metadata"
+                )
+            if truth["mechanism"] not in {
+                "amount_multiplier_100",
+                "amount_null_burst",
+            }:
+                _fail(f"data-pipeline truth has an unsupported mechanism for {episode_id}")
+        elif pre_injection_amounts is not None:
+            _fail(
+                f"non-pipeline effect reference for {episode_id} cannot carry pipeline amounts"
+            )
         affected_rows: list[dict[str, Any]] = []
         for offset in range(0, len(affected_ids), 500):
             batch = affected_ids[offset : offset + 500]
@@ -495,7 +521,8 @@ def _validate_incident_truth(
             affected_rows.extend(
                 dict(row)
                 for row in operational.execute(
-                    "SELECT txn_id, episode_id, event_at, available_at FROM transactions "
+                    "SELECT txn_id, episode_id, event_at, available_at, amount "
+                    "FROM transactions "
                     f"WHERE txn_id IN ({placeholders})",
                     tuple(batch),
                 )
@@ -507,6 +534,19 @@ def _validate_incident_truth(
                 f"incident effect reference for {episode_id} points to missing operational "
                 f"transactions: {missing_ids[:5]}"
             )
+        if template == "data_pipeline":
+            for row in affected_rows:
+                original_amount = pre_injection_amounts[row["txn_id"]]
+                expected_amount = (
+                    None
+                    if truth["mechanism"] == "amount_null_burst"
+                    else original_amount * 100
+                )
+                if row["amount"] != expected_amount:
+                    _fail(
+                        f"data-pipeline transaction {row['txn_id']} does not match its "
+                        "private pre-injection amount and mode"
+                    )
         wrong_episode_ids = sorted(
             row["txn_id"] for row in affected_rows if row["episode_id"] != episode_id
         )
@@ -603,8 +643,69 @@ def _validate_incident_truth(
     return f"{verified_incidents} incident truth rows match locked templates and docs/data.md section 5"
 
 
-def _collect_contract_violations(operational: sqlite3.Connection) -> str:
+def _pipeline_effect_amounts(
+    private: sqlite3.Connection | None,
+) -> tuple[dict[str, int], set[str], set[str]]:
+    if private is None:
+        return {}, set(), set()
+
+    truth_by_id = {
+        row["incident_truth_id"]: dict(row)
+        for row in private.execute("SELECT * FROM incident_truth")
+    }
+    prefix = "p1.6.incident_effect.v1:"
+    original_amount_by_txn_id: dict[str, int] = {}
+    pipeline_affected_ids: set[str] = set()
+    null_mode_ids: set[str] = set()
+    for metadata_row in private.execute(
+        "SELECT key, value_json FROM run_metadata WHERE substr(key, 1, ?) = ?",
+        (len(prefix), prefix),
+    ):
+        truth_id = metadata_row["key"][len(prefix) :]
+        truth = truth_by_id.get(truth_id)
+        if truth is None or truth["cause"] != "data_pipeline":
+            continue
+        try:
+            effect_manifest = json.loads(metadata_row["value_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            _fail(f"private data-pipeline effect reference {truth_id!r} is invalid JSON: {exc}")
+        if not isinstance(effect_manifest, dict):
+            _fail(f"private data-pipeline effect reference {truth_id!r} must be an object")
+        affected_ids = effect_manifest.get("affected_transaction_ids")
+        original_amounts = effect_manifest.get("pre_injection_amount_by_txn_id")
+        if (
+            effect_manifest.get("incident_truth_id") != truth_id
+            or effect_manifest.get("episode_id") != truth["episode_id"]
+            or not isinstance(affected_ids, list)
+            or not affected_ids
+            or any(not isinstance(txn_id, str) or not txn_id for txn_id in affected_ids)
+            or len(affected_ids) != len(set(affected_ids))
+            or not isinstance(original_amounts, dict)
+            or set(original_amounts) != set(affected_ids)
+        ):
+            _fail(f"private data-pipeline effect reference {truth_id!r} lacks original amounts")
+        for txn_id, amount in original_amounts.items():
+            if type(amount) is not int or amount <= 0:
+                _fail(f"private data-pipeline effect reference {truth_id!r} has an invalid original amount")
+            if txn_id in original_amount_by_txn_id:
+                _fail(f"transaction {txn_id} is listed in multiple data-pipeline effects")
+            original_amount_by_txn_id[txn_id] = amount
+            pipeline_affected_ids.add(txn_id)
+        if truth["mechanism"] == "amount_null_burst":
+            null_mode_ids.update(affected_ids)
+        elif truth["mechanism"] != "amount_multiplier_100":
+            _fail(f"data-pipeline truth {truth_id!r} has an unsupported mechanism")
+    return original_amount_by_txn_id, pipeline_affected_ids, null_mode_ids
+
+
+def _collect_contract_violations(
+    operational: sqlite3.Connection,
+    private: sqlite3.Connection | None = None,
+) -> str:
     violations: list[str] = []
+    original_amount_by_txn_id, pipeline_affected_ids, null_mode_ids = (
+        _pipeline_effect_amounts(private)
+    )
     registered = {
         row[0] for row in operational.execute("SELECT episode_id FROM episodes")
     }
@@ -645,6 +746,21 @@ def _collect_contract_violations(operational: sqlite3.Connection) -> str:
                 violations.append(f"{table} row is on the wrong side of T0 for {episode_id}")
 
     for txn_id, row in transactions.items():
+        if row["amount"] is None:
+            if txn_id not in null_mode_ids:
+                violations.append(
+                    f"transaction {txn_id} has NULL amount without a private data-pipeline null effect"
+                )
+        elif txn_id in null_mode_ids:
+            violations.append(
+                f"transaction {txn_id} is listed for a data-pipeline null effect but amount is not NULL"
+            )
+        elif txn_id in pipeline_affected_ids:
+            original_amount = original_amount_by_txn_id[txn_id]
+            if row["amount"] != original_amount * 100:
+                violations.append(
+                    f"transaction {txn_id} does not match its private data-pipeline amount effect"
+                )
         if row["created_at"] != row["event_at"]:
             violations.append(f"transaction {txn_id} has created_at != event_at")
         event_at = row["event_at"]
@@ -654,13 +770,47 @@ def _collect_contract_violations(operational: sqlite3.Connection) -> str:
         ):
             violations.append(f"transaction {txn_id} is on the wrong side of T0 for {episode_id}")
         customer_episode = entity_episodes["customers"].get(row["customer_id"])
-        merchant_episode = entity_episodes["merchants"].get(row["merchant_id"])
+        merchant_id = row["merchant_id"]
+        recipient_customer_id = row["recipient_customer_id"]
+        merchant_episode = (
+            entity_episodes["merchants"].get(merchant_id)
+            if merchant_id is not None
+            else None
+        )
+        recipient_episode = (
+            entity_episodes["customers"].get(recipient_customer_id)
+            if recipient_customer_id is not None
+            else None
+        )
         if customer_episode not in {"base", episode_id}:
             violations.append(f"transaction {txn_id} references a customer from another episode")
-        if merchant_episode not in {"base", episode_id}:
+        if (merchant_id is None) == (recipient_customer_id is None):
+            violations.append(
+                f"transaction {txn_id} must have exactly one merchant or account recipient"
+            )
+        if row["channel"] not in {"qr", "wallet", "card"}:
+            violations.append(f"transaction {txn_id} has an unsupported channel")
+        if merchant_id is not None and merchant_episode not in {"base", episode_id}:
             violations.append(f"transaction {txn_id} references a merchant from another episode")
+        if recipient_customer_id is not None:
+            if recipient_episode not in {"base", episode_id}:
+                violations.append(
+                    f"transaction {txn_id} references a recipient from another episode"
+                )
+            if recipient_customer_id == row["customer_id"]:
+                violations.append(f"transaction {txn_id} transfers to its sending account")
+            if row["channel"] != "wallet":
+                violations.append(f"account transfer {txn_id} must use the wallet channel")
 
-    for row in operational.execute("SELECT * FROM transaction_events"):
+    event_rows = [
+        dict(row) for row in operational.execute("SELECT * FROM transaction_events")
+    ]
+    events_by_txn_id: dict[str, list[dict[str, Any]]] = {}
+    for row in event_rows:
+        events_by_txn_id.setdefault(row["txn_id"], []).append(row)
+
+    adjustments_by_txn_id: dict[str, list[dict[str, Any]]] = {}
+    for row in event_rows:
         parent = transactions.get(row["txn_id"])
         if parent is None:
             violations.append(f"transaction event {row['event_id']} has no transaction parent")
@@ -675,6 +825,55 @@ def _collect_contract_violations(operational: sqlite3.Connection) -> str:
             episode_id != "base" and parent["episode_id"] not in {"base", episode_id}
         ):
             violations.append(f"transaction event {row['event_id']} crosses episode boundary")
+        if row["event_type"] in {"refunded", "reversed"}:
+            adjustments_by_txn_id.setdefault(row["txn_id"], []).append(row)
+            amount = row["amount"]
+            original_amount = original_amount_by_txn_id.get(
+                row["txn_id"], parent["amount"]
+            )
+            if (
+                isinstance(amount, bool)
+                or not isinstance(amount, int)
+                or amount <= 0
+                or isinstance(original_amount, bool)
+                or not isinstance(original_amount, int)
+                or amount > original_amount
+            ):
+                violations.append(
+                    f"transaction event {row['event_id']} has an invalid refund/reversal amount"
+                )
+            if event_at <= parent["created_at"]:
+                violations.append(
+                    f"transaction event {row['event_id']} must follow its original transaction"
+                )
+            settled_before = any(
+                candidate["event_type"] == "settled"
+                and candidate["event_at"] < event_at
+                and candidate["available_at"] <= row["available_at"]
+                for candidate in events_by_txn_id[row["txn_id"]]
+            )
+            if not settled_before:
+                violations.append(
+                    f"transaction event {row['event_id']} adjustment requires a prior available settlement"
+                )
+        elif row["amount"] is not None:
+            violations.append(
+                f"transaction event {row['event_id']} amount must be NULL for {row['event_type']}"
+            )
+
+    for txn_id, adjustments in adjustments_by_txn_id.items():
+        if len(adjustments) > 1:
+            violations.append(f"transaction {txn_id} has more than one refund/reversal adjustment")
+        original_amount = original_amount_by_txn_id.get(
+            txn_id, transactions[txn_id]["amount"]
+        )
+        if all(type(row["amount"]) is int and row["amount"] > 0 for row in adjustments):
+            if type(original_amount) is int and sum(
+                row["amount"] for row in adjustments
+            ) > original_amount:
+                violations.append(
+                    f"transaction {txn_id} refund/reversal total exceeds its original amount"
+                )
 
     for row in operational.execute("SELECT * FROM label_events"):
         parent = transactions.get(row["txn_id"])
@@ -1439,7 +1638,11 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
     if operational is not None:
         _evaluate(checks, "operational_schema", lambda: _check_schema(operational, operational=True))
         _evaluate(checks, "operational_integrity_and_foreign_keys", lambda: _integrity_check(operational, "operational"))
-        _evaluate(checks, "as_of_episode_contract", lambda: _collect_contract_violations(operational))
+        _evaluate(
+            checks,
+            "as_of_episode_contract",
+            lambda: _collect_contract_violations(operational, private),
+        )
         _evaluate(checks, "monitoring_output_contract", lambda: _validate_monitoring_outputs(operational))
         _evaluate(checks, "decision_output_contract", lambda: _validate_decisions(operational))
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
