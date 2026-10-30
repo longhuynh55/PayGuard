@@ -268,20 +268,22 @@ Evaluator ghi JSON tại `reports/p3_4_detection_recall.json` tương đối v�
 
 | Trường | Kiểu | Ý nghĩa |
 |---|---|---|
-| `schema_version` | `INTEGER` | Phiên bản cấu trúc JSON. |
+| `schema_version` | `INTEGER` | Phiên bản cấu trúc JSON; P5.2 dùng phiên bản `2`. |
 | `as_of_time` | `TEXT` UTC | Cutoff dùng để lọc snapshot incident theo `available_at`. |
-| `matching_scope` | `TEXT` | Tên phạm vi matcher được dùng. |
-| `deferred_to_round2` | `TEXT[]` JSON | Phần matcher chưa triển khai trong vòng 1. |
+| `matching_scope` | `TEXT` | Phạm vi gồm effect window cộng metric window, segment và feature. |
+| `metric_window_days` | `INTEGER` | Độ dài metric window lấy từ `configs/monitoring.yaml`, cấu hình public. |
+| `deferred_to_round2` | `TEXT[]` JSON | Trường tương thích; rỗng khi matcher P5.2 đã hoàn tất. |
 | `feature_mapping` | `OBJECT` JSON | Mapping tường minh từ feature monitoring sang feature truth. |
 | `detection_recall` | `OBJECT` JSON | Tổng số sự cố cần can thiệp được phát hiện. |
 | `by_scenario` | `OBJECT[]` JSON | Số đếm theo cặp `cause`/`template`; `recall` là NULL khi mẫu số bằng 0. |
 | `truth_counts` | `OBJECT` JSON | Tổng số truth, truth cần can thiệp và truth benign trong episode đã chọn. |
-| `incident_counts` | `OBJECT` JSON | Tổng số incident đã xét, matched, unmatched và matched với truth benign. |
-| `unmatched_incident_ids` | `TEXT[]` JSON | Incident unmatched; không được xem là benign. |
+| `incident_counts` | `OBJECT` JSON | Tổng số incident đã xét, matched, ambiguous, unmatched và matched với truth benign. |
+| `ambiguous_incident_ids` | `TEXT[]` JSON | Incident có hơn một truth ứng viên; cách tính xem [evaluation.md](evaluation.md), mục 2. |
+| `unmatched_incident_ids` | `TEXT[]` JSON | Incident không có truth ứng viên; cách tính xem [evaluation.md](evaluation.md), mục 2. |
 | `benign_incident_ids` | `TEXT[]` JSON | Incident khớp ít nhất một truth benign. |
-| `incident_matches` | `OBJECT[]` JSON | Trạng thái và các truth ID được ghép cho từng incident. Vòng 1 chỉ có `matched`/`unmatched`. |
+| `incident_matches` | `OBJECT[]` JSON | Trạng thái, truth ID được xác nhận và truth ID ứng viên cho từng incident. |
 
-Các object con có cấu trúc cố định: `detection_recall` gồm `detected`, `denominator`, `recall` (`REAL NULL`) và `missed_truth_ids`; mỗi phần tử `by_scenario` gồm `cause`, `template`, `detected`, `denominator`, `missed_truth_ids`, `recall` (`REAL NULL`) và `benign_truth_count`; `truth_counts` gồm `total`, `requires_intervention`, `benign`; `incident_counts` gồm `evaluated`, `matched`, `unmatched`, `benign_matched`; mỗi phần tử `incident_matches` gồm `incident_id`, `episode_id`, `feature`, `segment`, `incident_start_at`, `incident_end_at`, `status`, `matched_truth_ids`. `incident_start_at`/`incident_end_at` là mốc `available_at` sớm nhất/muộn nhất của các snapshot có thêm alert ID vào `alert_ids_json`; snapshot quyết định không mở rộng khoảng này. Timestamp dùng UTC; các mảng ID giữ thứ tự tất định.
+Các object con có cấu trúc cố định: `detection_recall` gồm `detected`, `denominator`, `recall` (`REAL NULL`) và `missed_truth_ids`; mỗi phần tử `by_scenario` gồm `cause`, `template`, `detected`, `denominator`, `missed_truth_ids`, `recall` (`REAL NULL`) và `benign_truth_count`; `truth_counts` gồm `total`, `requires_intervention`, `benign`; `incident_counts` gồm `evaluated`, `matched`, `ambiguous`, `unmatched`, `benign_matched`; mỗi phần tử `incident_matches` gồm `incident_id`, `episode_id`, `feature`, `segment`, `incident_start_at`, `incident_end_at`, `status`, `matched_truth_ids`, `candidate_truth_ids`. `status` là `matched`, `ambiguous_match` hoặc `unmatched`; `matched_truth_ids` chỉ chứa truth ID khi status là `matched`, còn `candidate_truth_ids` liệt kê mọi truth tương thích. Quy tắc scoring và workload thuộc [evaluation.md](evaluation.md), mục 2. `incident_start_at`/`incident_end_at` là mốc `available_at` sớm nhất/muộn nhất của các snapshot có thêm alert ID vào `alert_ids_json`; snapshot quyết định không mở rộng khoảng này. Timestamp dùng UTC; các mảng ID giữ thứ tự tất định.
 
 ## 8. Đầu ra triage (`decisions`)
 
@@ -317,5 +319,9 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 Khóa logic là `decision_id`; cùng ngữ cảnh và kết quả gate cho ID giống nhau, kết quả khác tạo ID khác. Các trường JSON phải parse đúng kiểu đã nêu. `decisions` là bảng operational append-only, có khóa bất biến như các bảng temporal operational khác; thuộc allowlist `read_as_of` và chỉ chứa episode khác `base`. `event_at = available_at = decision_at = as_of_time`, nên quyết định chỉ xuất hiện khi cutoff đạt thời điểm snapshot. Bảng không chứa truth. Evaluator được nối ở P4.5, còn module triage không import evaluator.
 
 `scope_json` có bốn khóa `feature`, `segment`, `start_at`, `end_at`; giá trị là TEXT hoặc NULL khi snapshot lỗi không cung cấp được phạm vi. `checklist_results_json` là object ánh xạ tên checklist sang object kết quả; mỗi kết quả có `status` ∈ `pass`, `fail`, `pending`, `conflicting`, `error`, `not_applicable`, và có thể có `reason`, `scope_match`, `window_complete`, `requires_human_review`, `details`. Ba cờ là BOOLEAN; `details` là JSON. `evidence_status` không phải đầu vào checklist được lưu. `tool_trace_ids_json` là mảng các TEXT ID không rỗng.
+
+### Báo cáo evaluator P4.5 (private)
+
+Evaluator ghi `reports/p4_5_decisions.json` tương đối với thư mục private DB. Báo cáo dùng `schema_version = 2`; `matching_scope` nêu phạm vi decision-scope, effect window, metric window, segment và feature; `metric_window_days` lấy từ cấu hình public `configs/monitoring.yaml`. Mỗi phần tử `decision_matches` gồm `decision_id`, `incident_id`, `episode_id`, `decision_at`, `status`, `matched_truth_ids`, `candidate_truth_ids`. Trạng thái dùng `matched`, `ambiguous_match`, `unmatched`; `matched_truth_ids` chỉ có truth được xác nhận duy nhất, `candidate_truth_ids` giữ mọi ứng viên. Quy tắc scoring và workload thuộc [evaluation.md](evaluation.md), mục 2–4; closure chưa khớp duy nhất được liệt kê riêng trong `decision_counts`.
 
 Một run directory chỉ dùng một agent provider. Runner từ chối chạy nếu DB đã có quyết định `source='agent'` với `model_slug` khác provider đang chọn (bao gồm `NULL` của `unconfigured`); hãy dùng bản sao mới của run directory cho mỗi provider.

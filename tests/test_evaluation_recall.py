@@ -59,6 +59,7 @@ def _add_truth(
     effect_start_at: str = "2026-02-05T00:00:00.000000Z",
     effect_end_at: str | None = "2026-02-06T00:00:00.000000Z",
     effect_available_at: str = "2026-02-05T00:00:00.000000Z",
+    parent_scenario: str | None = None,
 ) -> None:
     insert_private_record(
         store.private,
@@ -79,7 +80,7 @@ def _add_truth(
             "intervention_start_at": effect_available_at,
             "deadline_at": "2026-02-12T00:00:00.000000Z",
             "accepted_actions_json": ["human_review"] if requires_intervention else [],
-            "parent_scenario": None,
+            "parent_scenario": parent_scenario,
         },
     )
 
@@ -169,6 +170,7 @@ def test_matches_mapped_feature_and_marks_out_of_scope_incident_unmatched(tmp_pa
         assert result.report["incident_counts"] == {
             "evaluated": 3,
             "matched": 1,
+            "ambiguous": 0,
             "unmatched": 2,
             "benign_matched": 0,
         }
@@ -236,6 +238,210 @@ def test_effect_available_at_is_the_earliest_matchable_truth_time(tmp_path: Path
 
         assert result.report["detection_recall"]["recall"] == 0.0
         assert result.report["incident_counts"]["unmatched"] == 1
+    finally:
+        store.close()
+
+
+def test_late_incident_inside_public_metric_window_matches_truth(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "delayed-window-run")
+    try:
+        _add_episode(store, "ep-delayed-window", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-delayed-window",
+            truth_id="truth-delayed-window",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-delayed-window",
+                alert_id="alert-delayed-window",
+                feature="amount_avg_7d",
+                at="2026-02-11T12:00:00.000000Z",
+            ),
+            episode_id="ep-delayed-window",
+        )
+
+        result = _evaluate(store, incidents, ["ep-delayed-window"])
+
+        match = result.report["incident_matches"][0]
+        assert result.report["metric_window_days"] == 7
+        assert match["status"] == "matched"
+        assert match["matched_truth_ids"] == ["truth-delayed-window"]
+        assert match["candidate_truth_ids"] == ["truth-delayed-window"]
+        assert result.report["detection_recall"]["recall"] == 1.0
+    finally:
+        store.close()
+
+
+def test_multiple_truth_candidates_are_ambiguous_and_excluded_from_recall(
+    tmp_path: Path,
+) -> None:
+    store = create_export_stores(tmp_path / "ambiguous-run")
+    try:
+        _add_episode(store, "ep-ambiguous", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-ambiguous",
+            truth_id="truth-ambiguous-a",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario="scenario-two-causes",
+        )
+        _add_truth(
+            store,
+            episode_id="ep-ambiguous",
+            truth_id="truth-ambiguous-b",
+            cause="fraud_surge",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario="scenario-two-causes",
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-ambiguous",
+                alert_id="alert-ambiguous",
+                feature="amount_avg_7d",
+                at="2026-02-05T12:00:00.000000Z",
+            ),
+            episode_id="ep-ambiguous",
+        )
+
+        result = _evaluate(store, incidents, ["ep-ambiguous"])
+
+        assert result.report["incident_matches"][0]["status"] == "ambiguous_match"
+        assert result.report["incident_matches"][0]["matched_truth_ids"] == []
+        assert result.report["incident_matches"][0]["candidate_truth_ids"] == [
+            "truth-ambiguous-a",
+            "truth-ambiguous-b",
+        ]
+        assert result.report["incident_counts"] == {
+            "evaluated": 1,
+            "matched": 0,
+            "ambiguous": 1,
+            "unmatched": 0,
+            "benign_matched": 0,
+        }
+        assert result.report["ambiguous_incident_ids"] == [incidents[0]["incident_id"]]
+        assert result.report["detection_recall"] == {
+            "detected": 0,
+            "denominator": 2,
+            "recall": 0.0,
+            "missed_truth_ids": ["truth-ambiguous-a", "truth-ambiguous-b"],
+        }
+    finally:
+        store.close()
+
+
+def test_multi_cause_truth_components_keep_distinct_ids_and_are_scored_once_each(
+    tmp_path: Path,
+) -> None:
+    store = create_export_stores(tmp_path / "multi-cause-run")
+    try:
+        _add_episode(store, "ep-multi-cause", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-multi-cause",
+            truth_id="truth-pipeline-component",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario="scenario-two-causes",
+        )
+        _add_truth(
+            store,
+            episode_id="ep-multi-cause",
+            truth_id="truth-fraud-component",
+            cause="fraud_surge",
+            requires_intervention=True,
+            features=["txn_count"],
+            segments=["retail"],
+            parent_scenario="scenario-two-causes",
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-multi-cause",
+                alert_id="alert-pipeline-component",
+                feature="amount_avg_7d",
+                at="2026-02-05T12:00:00.000000Z",
+            ),
+            _alert(
+                episode_id="ep-multi-cause",
+                alert_id="alert-fraud-component",
+                feature="txn_count_24h",
+                at="2026-02-05T13:00:00.000000Z",
+            ),
+            episode_id="ep-multi-cause",
+        )
+
+        result = _evaluate(store, incidents, ["ep-multi-cause"])
+
+        assert result.report["detection_recall"] == {
+            "detected": 2,
+            "denominator": 2,
+            "recall": 1.0,
+            "missed_truth_ids": [],
+        }
+        links = {
+            match["feature"]: match["matched_truth_ids"]
+            for match in result.report["incident_matches"]
+        }
+        assert links == {
+            "amount_avg_7d": ["truth-pipeline-component"],
+            "txn_count_24h": ["truth-fraud-component"],
+        }
+    finally:
+        store.close()
+
+
+def test_multiple_incidents_can_match_one_truth_without_becoming_ambiguous(
+    tmp_path: Path,
+) -> None:
+    store = create_export_stores(tmp_path / "multiple-incidents-run")
+    try:
+        _add_episode(store, "ep-multiple-incidents", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-multiple-incidents",
+            truth_id="truth-shared",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-multiple-incidents",
+                alert_id="alert-shared-early",
+                feature="amount_avg_7d",
+                at="2026-02-05T12:00:00.000000Z",
+            ),
+            _alert(
+                episode_id="ep-multiple-incidents",
+                alert_id="alert-shared-late",
+                feature="amount_avg_7d",
+                at="2026-02-11T12:00:00.000000Z",
+            ),
+            episode_id="ep-multiple-incidents",
+        )
+
+        result = _evaluate(store, incidents, ["ep-multiple-incidents"])
+
+        assert result.report["incident_counts"]["matched"] == 2
+        assert result.report["incident_counts"]["ambiguous"] == 0
+        assert all(match["status"] == "matched" for match in result.report["incident_matches"])
+        assert result.report["detection_recall"]["detected"] == 1
     finally:
         store.close()
 
@@ -377,10 +583,13 @@ def test_unmatched_incident_is_not_relabelled_benign(tmp_path: Path) -> None:
         assert result.report["incident_counts"] == {
             "evaluated": 1,
             "matched": 0,
+            "ambiguous": 0,
             "unmatched": 1,
             "benign_matched": 0,
         }
         assert result.report["benign_incident_ids"] == []
+        assert result.report["incident_matches"][0]["status"] == "unmatched"
+        assert result.report["incident_matches"][0]["candidate_truth_ids"] == []
         assert result.report["detection_recall"]["recall"] == 0.0
     finally:
         store.close()

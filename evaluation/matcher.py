@@ -1,4 +1,4 @@
-"""Round-one incident-to-truth matching; this is the only truth reader."""
+"""Incident-to-truth matching; this is the only truth reader."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from functools import lru_cache
 import json
 from pathlib import Path
 import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import yaml
 
 from simulator.storage import utc_timestamp
 
@@ -57,6 +60,34 @@ def _parse_timestamp(value: Any, *, field: str) -> tuple[datetime, str]:
 def normalize_as_of_time(value: str) -> str:
     """Return a canonical UTC cutoff for filtering available P3.3 snapshots."""
     return _parse_timestamp(value, field="as_of_time")[1]
+
+
+@lru_cache(maxsize=1)
+def configured_metric_window_days() -> int:
+    """Read the public monitoring window; truth metadata cannot set this value."""
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "monitoring.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise EvaluationMatcherError(
+            f"could not read public monitoring config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(config, dict) or config.get("schema_version") != 1:
+        raise EvaluationMatcherError(
+            "public monitoring config schema_version must be 1"
+        )
+    window = config.get("window_days")
+    days = window.get("value") if isinstance(window, dict) else None
+    provenance = window.get("provenance") if isinstance(window, dict) else None
+    if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+        raise EvaluationMatcherError(
+            "public monitoring config window_days.value must be a positive integer"
+        )
+    if not isinstance(provenance, dict) or provenance.get("kind") != "contract":
+        raise EvaluationMatcherError(
+            "public monitoring config window_days must be a locked contract value"
+        )
+    return days
 
 
 def _episode_end_from_config(config_json: str, *, episode_id: str) -> str:
@@ -207,7 +238,7 @@ def _snapshot_alert_ids(value: Any, *, incident_id: str) -> tuple[str, ...]:
 
 
 def _truth_window(
-    truth: Mapping[str, Any], *, episode_end_at: str
+    truth: Mapping[str, Any], *, episode_end_at: str, metric_window_days: int
 ) -> tuple[datetime, datetime]:
     truth_id = truth.get("incident_truth_id")
     effect_start, _ = _parse_timestamp(
@@ -231,7 +262,7 @@ def _truth_window(
         raise EvaluationMatcherError(
             f"truth effect interval ends before it can become available: {truth_id!r}"
         )
-    return start, end
+    return start, end + timedelta(days=metric_window_days)
 
 
 def _segment_matches(incident_segment: str, affected_segments: tuple[str, ...]) -> bool:
@@ -284,13 +315,14 @@ def match_incidents(
 ) -> tuple[dict[str, Any], ...]:
     """Match P3.3 incident snapshots to selected private truths.
 
-    Round one emits only ``matched`` and ``unmatched``. Multi-truth attribution
-    is retained as links; ambiguity classification and delayed-window effects
-    beyond the current interval rule remain round-two work.
+    The truth interval includes the delayed effect of the public monitoring
+    window. An incident compatible with multiple truth components is ambiguous;
+    multiple incidents may independently match the same truth component.
     """
     selected_ids = set(episode_ids)
     _, as_of = _parse_timestamp(as_of_time, field="as_of_time")
     as_of_dt, _ = _parse_timestamp(as_of, field="as_of_time")
+    metric_window_days = configured_metric_window_days()
 
     truth_by_episode: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     seen_truth_ids: set[str] = set()
@@ -399,6 +431,7 @@ def match_incidents(
             truth_window = _truth_window(
                 truth,
                 episode_end_at=episode_end_at[first["episode_id"]],
+                metric_window_days=metric_window_days,
             )
             if _scope_matches(
                 first,
@@ -407,6 +440,13 @@ def match_incidents(
                 incident_window=incident_window,
             ):
                 matched_truth_ids.append(str(truth["incident_truth_id"]))
+        candidate_truth_ids = sorted(matched_truth_ids)
+        if not candidate_truth_ids:
+            status = "unmatched"
+        elif len(candidate_truth_ids) == 1:
+            status = "matched"
+        else:
+            status = "ambiguous_match"
         matches.append(
             {
                 "incident_id": incident_id,
@@ -415,8 +455,9 @@ def match_incidents(
                 "segment": first["segment"],
                 "incident_start_at": utc_timestamp(incident_window[0]),
                 "incident_end_at": utc_timestamp(incident_window[1]),
-                "status": "matched" if matched_truth_ids else "unmatched",
-                "matched_truth_ids": matched_truth_ids,
+                "status": status,
+                "matched_truth_ids": candidate_truth_ids if status == "matched" else [],
+                "candidate_truth_ids": candidate_truth_ids,
             }
         )
     return tuple(matches)

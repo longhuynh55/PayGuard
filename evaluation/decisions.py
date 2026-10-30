@@ -12,6 +12,7 @@ from typing import Any
 from evaluation.matcher import (
     EvaluationMatcherError,
     PrivateEvaluationData,
+    configured_metric_window_days,
     load_private_evaluation_data,
     match_incidents,
     normalize_as_of_time,
@@ -249,6 +250,7 @@ def _match_decisions(
             "decision_at": decision["decision_at"],
             "status": "unmatched",
             "matched_truth_ids": [],
+            "candidate_truth_ids": [],
         }
         snapshots = _scope_snapshots(decision)
         if snapshots is not None:
@@ -266,6 +268,7 @@ def _match_decisions(
                 ) from exc
             match_record["status"] = match["status"]
             match_record["matched_truth_ids"] = sorted(match["matched_truth_ids"])
+            match_record["candidate_truth_ids"] = sorted(match["candidate_truth_ids"])
         matches.append(match_record)
     return tuple(matches)
 
@@ -362,8 +365,9 @@ def _build_report(
         }
 
     return {
-        "schema_version": 1,
-        "matching_scope": "decision_scope_effect_available_at",
+        "schema_version": 2,
+        "matching_scope": "decision_scope_effect_window_plus_metric_window_segment_feature",
+        "metric_window_days": configured_metric_window_days(),
         "episode_ids": list(episode_ids),
         "selection": selection,
         "decision_counts": {
@@ -407,6 +411,7 @@ def _build_report(
             {
                 **match,
                 "matched_truth_ids": sorted(match["matched_truth_ids"]),
+                "candidate_truth_ids": sorted(match["candidate_truth_ids"]),
             }
             for match in matches
         ],

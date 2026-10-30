@@ -11,6 +11,7 @@ from typing import Any
 
 from evaluation.matcher import (
     MONITORING_FEATURE_TO_TRUTH_FEATURE,
+    configured_metric_window_days,
     load_private_evaluation_data,
     match_incidents,
     normalize_as_of_time,
@@ -38,6 +39,7 @@ def _build_report(
     detected_truth_ids = {
         truth_id
         for match in matches
+        if match["status"] == "matched"
         for truth_id in match["matched_truth_ids"]
     }
     required_truths = [
@@ -78,6 +80,9 @@ def _build_report(
         )
 
     matched_incidents = [match for match in matches if match["status"] == "matched"]
+    ambiguous_incidents = [
+        match for match in matches if match["status"] == "ambiguous_match"
+    ]
     unmatched_incidents = [match for match in matches if match["status"] == "unmatched"]
     benign_truth_ids = {
         str(row["incident_truth_id"]) for row in benign_truths
@@ -97,13 +102,11 @@ def _build_report(
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "as_of_time": as_of_time,
-        "matching_scope": "round1_minimal_time_segment_feature",
-        "deferred_to_round2": [
-            "ambiguous_match classification",
-            "full delayed-window effects",
-        ],
+        "matching_scope": "effect_window_plus_metric_window_segment_feature",
+        "metric_window_days": configured_metric_window_days(),
+        "deferred_to_round2": [],
         "feature_mapping": dict(sorted(MONITORING_FEATURE_TO_TRUTH_FEATURE.items())),
         "detection_recall": {
             "detected": detected_required,
@@ -124,15 +127,20 @@ def _build_report(
         "incident_counts": {
             "evaluated": len(matches),
             "matched": len(matched_incident_ids),
+            "ambiguous": len(ambiguous_incidents),
             "unmatched": len(unmatched_incident_ids),
             "benign_matched": len(benign_incident_ids),
         },
+        "ambiguous_incident_ids": sorted(
+            str(match["incident_id"]) for match in ambiguous_incidents
+        ),
         "unmatched_incident_ids": unmatched_incident_ids,
         "benign_incident_ids": benign_incident_ids,
         "incident_matches": [
             {
                 **match,
                 "matched_truth_ids": sorted(match["matched_truth_ids"]),
+                "candidate_truth_ids": sorted(match["candidate_truth_ids"]),
             }
             for match in matches
         ],

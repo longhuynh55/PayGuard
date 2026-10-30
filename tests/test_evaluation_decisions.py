@@ -372,6 +372,32 @@ def test_unmatched_close_is_not_treated_as_benign(tmp_path: Path) -> None:
         store.close()
 
 
+def test_ambiguous_close_retains_candidates_and_is_not_scored(tmp_path: Path) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(store, truth_id="truth-a")
+        _add_truth(store, truth_id="truth-b")
+        store.commit()
+
+        result = _evaluate(
+            store,
+            [_decision("ambiguous-close", "2026-02-06T00:00:00.000000Z", "close")],
+        )
+
+        match = result.report["decision_matches"][0]
+        assert match["status"] == "ambiguous_match"
+        assert match["matched_truth_ids"] == []
+        assert match["candidate_truth_ids"] == ["truth-a", "truth-b"]
+        assert result.report["decision_counts"]["ambiguous"] == 1
+        assert result.report["decision_counts"]["ambiguous_closures"] == 1
+        assert result.report["unsafe_truth_rate"]["unsafe"] == 0
+        assert result.report["unsafe_truth_rate"]["denominator"] == 2
+        assert result.report["unsafe_truth_rate"]["lower_bound_observed"] is True
+        assert result.report["metric_window_days"] == 7
+    finally:
+        store.close()
+
+
 def test_auto_routing_and_human_review_are_reported_separately(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
