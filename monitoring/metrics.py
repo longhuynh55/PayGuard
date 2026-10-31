@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 import io
@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+from statistics import median
 from typing import Any, TextIO
 from zoneinfo import ZoneInfo
 
@@ -413,14 +414,14 @@ def _base_metric(
     }
 
 
-def _weekday_volume_baselines(
+def _robust_volume_baselines(
     reference_rows: list[dict[str, Any]],
     *,
     reference_start: date,
     reference_end_exclusive: date,
     timezone: ZoneInfo,
-) -> tuple[dict[int, float], dict[tuple[int, str], float], int]:
-    """Compute daily transaction-count baselines by weekday from the locked reference."""
+) -> tuple[float, dict[str, float], int]:
+    """Compute phase-independent median daily counts from the locked reference."""
     reference_dates = tuple(
         reference_start + timedelta(days=offset)
         for offset in range((reference_end_exclusive - reference_start).days)
@@ -436,27 +437,23 @@ def _weekday_volume_baselines(
         counts_by_date[business_date] += 1
         channel_counts_by_date[business_date][str(row["channel"])] += 1
 
-    dates_by_weekday: dict[int, list[date]] = defaultdict(list)
-    for business_date in reference_dates:
-        dates_by_weekday[business_date.weekday()].append(business_date)
-    total_by_weekday: dict[int, float] = {}
+    total_baseline = float(median(counts_by_date.values())) if counts_by_date else 0.0
     channels = {
         channel
         for daily_counts in channel_counts_by_date.values()
         for channel in daily_counts
     }
-    channel_by_weekday: dict[tuple[int, str], float] = {}
-    for weekday, weekday_dates in dates_by_weekday.items():
-        day_count = len(weekday_dates)
-        if day_count == 0:
-            continue
-        total_by_weekday[weekday] = sum(counts_by_date[item] for item in weekday_dates) / day_count
-        for channel in channels:
-            channel_by_weekday[(weekday, channel)] = (
-                sum(channel_counts_by_date[item][channel] for item in weekday_dates) / day_count
+    channel_baselines = {
+        channel: float(
+            median(
+                channel_counts_by_date[business_date].get(channel, 0)
+                for business_date in reference_dates
             )
+        )
+        for channel in channels
+    }
 
-    return total_by_weekday, channel_by_weekday, sum(counts_by_date.values())
+    return total_baseline, channel_baselines, sum(counts_by_date.values())
 
 
 def _calendar_expected_volume_lift(
@@ -464,8 +461,8 @@ def _calendar_expected_volume_lift(
     *,
     window_start: date,
     window_end: date,
-    baseline_total_by_weekday: dict[int, float],
-    baseline_channel_by_weekday: dict[tuple[int, str], float],
+    baseline_total: float,
+    baseline_channel: dict[str, float],
     baseline_window_count: float,
 ) -> float | None:
     """Read the public calendar's weighted ``txn_count`` effect for one business date."""
@@ -498,15 +495,12 @@ def _calendar_expected_volume_lift(
             return None
         scoped_channels = scope.get("channel")
         if scoped_channels is None:
-            event_baseline = baseline_total_by_weekday.get(event_date.weekday())
-            if event_baseline is None:
-                return None
+            event_baseline = baseline_total
         elif isinstance(scoped_channels, list) and all(
             isinstance(channel, str) and channel for channel in scoped_channels
         ):
             event_baseline = sum(
-                baseline_channel_by_weekday.get((event_date.weekday(), channel), 0.0)
-                for channel in scoped_channels
+                baseline_channel.get(channel, 0.0) for channel in scoped_channels
             )
         else:
             return None
@@ -572,10 +566,10 @@ def compute_daily_metrics(
             < monitoring_config.reference_end_exclusive
         ]
         (
-            baseline_total_by_weekday,
-            baseline_channel_by_weekday,
+            baseline_volume_count,
+            baseline_channel_volume_count,
             reference_volume_count,
-        ) = _weekday_volume_baselines(
+        ) = _robust_volume_baselines(
             reference_volume_rows,
             reference_start=monitoring_config.reference_start,
             reference_end_exclusive=monitoring_config.reference_end_exclusive,
@@ -755,7 +749,7 @@ def compute_daily_metrics(
                 )
 
             volume_window_start = business_date
-            baseline_window_count = baseline_total_by_weekday.get(business_date.weekday(), 0.0)
+            baseline_window_count = baseline_volume_count
             volume_flags: list[str] = []
             if reference_volume_count == 0 or baseline_window_count <= 0:
                 volume_flags.append("no_reference_samples")
@@ -764,8 +758,8 @@ def compute_daily_metrics(
                 calendar_rows,
                 window_start=volume_window_start,
                 window_end=business_date,
-                baseline_total_by_weekday=baseline_total_by_weekday,
-                baseline_channel_by_weekday=baseline_channel_by_weekday,
+                baseline_total=baseline_volume_count,
+                baseline_channel=baseline_channel_volume_count,
                 baseline_window_count=baseline_window_count,
             )
             if expected_calendar_lift is None:
@@ -779,7 +773,7 @@ def compute_daily_metrics(
                 {
                     "baseline_window": reference_window,
                     "business_calendar_expected_relative_change": expected_calendar_lift,
-                    "method": "weekday_matched_1d_count",
+                    "method": "reference_median_1d_count",
                 },
                 sort_keys=True,
                 separators=(",", ":"),

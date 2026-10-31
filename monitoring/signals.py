@@ -47,8 +47,6 @@ class _SignalConfig:
     threshold_provenance: str
     volume_threshold: float
     volume_threshold_provenance: str
-    volume_without_calendar_threshold: float
-    volume_without_calendar_provenance: str
     volume_metric_id: str
     minimum_sample_count: int
 
@@ -142,45 +140,6 @@ def _load_signal_config(path: str | Path) -> _SignalConfig:
             "volume relative-change threshold must declare its provenance source"
         )
 
-    volume_without_calendar_config = signals.get("volume_without_calendar_threshold")
-    if not isinstance(volume_without_calendar_config, dict):
-        raise MonitoringSignalsError(
-            "monitoring signals.volume_without_calendar_threshold must be an object"
-        )
-    volume_without_calendar_threshold = volume_without_calendar_config.get("value")
-    volume_without_calendar_provenance = volume_without_calendar_config.get("provenance")
-    if (
-        isinstance(volume_without_calendar_threshold, bool)
-        or not isinstance(volume_without_calendar_threshold, (int, float))
-        or not math.isfinite(float(volume_without_calendar_threshold))
-        or float(volume_without_calendar_threshold) < 0
-    ):
-        raise MonitoringSignalsError(
-            "volume without-calendar threshold must be finite and non-negative"
-        )
-    if volume_without_calendar_config.get("unit") != "absolute relative change":
-        raise MonitoringSignalsError(
-            "volume without-calendar threshold unit must be 'absolute relative change'"
-        )
-    if not isinstance(volume_without_calendar_config.get("rationale"), str) or not volume_without_calendar_config[
-        "rationale"
-    ].strip():
-        raise MonitoringSignalsError(
-            "volume without-calendar threshold must state its rationale"
-        )
-    if (
-        not isinstance(volume_without_calendar_provenance, dict)
-        or volume_without_calendar_provenance.get("kind") != "source"
-    ):
-        raise MonitoringSignalsError(
-            "volume without-calendar threshold must declare source provenance"
-        )
-    volume_without_calendar_reference = volume_without_calendar_provenance.get("reference")
-    if not isinstance(volume_without_calendar_reference, str) or not volume_without_calendar_reference.strip():
-        raise MonitoringSignalsError(
-            "volume without-calendar threshold must declare its provenance source"
-        )
-
     daily_volume = raw.get("daily_volume")
     volume_metric_id = daily_volume.get("metric_id") if isinstance(daily_volume, dict) else None
     if not isinstance(volume_metric_id, str) or not volume_metric_id.strip():
@@ -202,8 +161,6 @@ def _load_signal_config(path: str | Path) -> _SignalConfig:
         threshold_provenance=provenance_reference,
         volume_threshold=float(volume_threshold),
         volume_threshold_provenance=volume_provenance_reference,
-        volume_without_calendar_threshold=float(volume_without_calendar_threshold),
-        volume_without_calendar_provenance=volume_without_calendar_reference,
         volume_metric_id=volume_metric_id,
         minimum_sample_count=minimum_sample_count,
     )
@@ -406,7 +363,7 @@ def compute_alerts(
                 volume_reference = None
             if (
                 not isinstance(volume_reference, dict)
-                or volume_reference.get("method") != "weekday_matched_1d_count"
+                or volume_reference.get("method") != "reference_median_1d_count"
                 or isinstance(
                     volume_reference.get("business_calendar_expected_relative_change"), bool
                 )
@@ -437,15 +394,10 @@ def compute_alerts(
             expected_change = float(
                 volume_reference["business_calendar_expected_relative_change"]
             )
-            threshold = (
-                config.volume_threshold
-                if expected_change != 0.0
-                else config.volume_without_calendar_threshold
-            )
-            # Alert on a material observed shift or a material departure from
-            # the public calendar expectation. The value remains the observed
-            # lift so downstream triage can compare it with the expectation.
-            triggered = abs(value) > threshold or abs(value - expected_change) > threshold
+            threshold = config.volume_threshold
+            # One operating point applies to every date: alert when the
+            # observed relative change departs from the public expectation.
+            triggered = abs(value - expected_change) > threshold
             if not triggered:
                 volume_below_threshold_count += 1
                 below_threshold_count += 1
@@ -484,15 +436,9 @@ def compute_alerts(
         },
         "volume_threshold": {
             "value": config.volume_threshold,
-            "comparison": "absolute observed or calendar-relative change > when calendar lift is nonzero",
+            "comparison": "absolute observed minus calendar-expected relative change >",
             "unit": "absolute relative change",
             "provenance": config.volume_threshold_provenance,
-        },
-        "volume_without_calendar_threshold": {
-            "value": config.volume_without_calendar_threshold,
-            "comparison": "absolute observed or calendar-relative change >",
-            "unit": "absolute relative change",
-            "provenance": config.volume_without_calendar_provenance,
         },
         "minimum_sample_count": config.minimum_sample_count,
         "daily_metric_rows_received": len(daily_metrics),

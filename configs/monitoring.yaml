@@ -31,6 +31,29 @@ window_days:
     kind: contract
     reference: docs/monitoring.md, section 1.
 
+metric_windows:
+  psi.txn_count_24h:
+    value: 7
+    unit: inclusive local business dates
+    rationale: PSI uses the locked seven-day monitoring window.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/evaluation.md, section 2.
+  psi.amount_avg_7d:
+    value: 7
+    unit: inclusive local business dates
+    rationale: PSI uses the locked seven-day monitoring window.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/evaluation.md, section 2.
+  volume.txn_count:
+    value: 1
+    unit: inclusive local business dates
+    rationale: The daily volume metric observes exactly one business date.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/evaluation.md, section 2.
+
 minimum_sample_count:
   value: 30
   unit: observations
@@ -78,16 +101,9 @@ signals:
       kind: source
       reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
   volume_relative_change_threshold:
-    value: 0.5
+    value: 4.25
     unit: absolute relative change
-    rationale: Materiality threshold for daily volume on public calendar dates; it also exceeds clean development's largest seven-day baseline shift.
+    rationale: Strictly exceed the maximum absolute one-day deviation from the public calendar expectation across the 30 clean development snapshots after the phase-independent median reference baseline.
     provenance:
       kind: source
-      reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
-  volume_without_calendar_threshold:
-    value: 6.0
-    unit: absolute relative change
-    rationale: Suppress the large day-to-day noise in the low-volume smoke world unless an unannounced shift exceeds the clean-development maximum.
-    provenance:
-      kind: source
-      reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
+      reference: docs/monitoring.md, section 1; maximum absolute delivered one-day residual over clean development episode ep-0001 (30 dates) after reference_median_1d_count; 4.25.

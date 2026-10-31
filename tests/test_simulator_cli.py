@@ -25,6 +25,7 @@ _KNOWN_CLEAN_MINIMUM_SUPPORT_FP = (
 _EXPECTED_SMOKE_DATA_TICKETS = {
     # P3.7 re-derived incident IDs after changing the amount alert set:
     # ep-0002/incident-ea21... -> incident-67c...; ep-0004/incident-553... -> incident-367...
+    # Fix1 changes only daily volume and evaluation windows, so these pipeline IDs stay stable.
     ("ep-0002", "incident-67c06d4b51c5196eb2894cd0"),
     ("ep-0004", "incident-367c348143656924203a5bc3"),
     # P3.7 no longer creates a separate jump-containing ticket for old ep-0004/incident-7cfa...
@@ -600,9 +601,9 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
     assert duplicate_rule_groups == 0
     assert len(agent_rows) >= 3
     assert {row[0] for row in agent_rows} == {
-        # P3.7 removes the clean ep-0001 background incident, so it no longer
-        # creates an agent review; seasonal and pipeline incidents remain.
-        "ep-0002", "ep-0003", "ep-0004", "ep-0005"
+        # Fix1 removes the clean ep-0001 background incident and the ep-0005
+        # seasonal incident below the shared volume residual threshold.
+        "ep-0002", "ep-0003", "ep-0004"
     }
     for _, trace_ids, input_tokens, output_tokens, total_tokens, cost_usd, model_slug, action in agent_rows:
         assert len(json.loads(trace_ids)) == 1
