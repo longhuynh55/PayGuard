@@ -576,6 +576,12 @@ def test_tool_error_forces_human_review_even_when_routing_evidence_passes() -> N
     assert result["action"] == "human_review"
     assert result["evidence_status"] == "insufficient"
     assert "database read failed" in result["reason"]
+    checklists = json.loads(result["checklist_results_json"])
+    assert checklists["__runner_guard"]["status"] == "not_applicable"
+    assert checklists["__runner_guard"]["details"] == {
+        "forced_human": True,
+        "reason_codes": ["runner_tool_error"],
+    }
 
 
 def test_checklist_tool_error_forces_human_instead_of_recheck() -> None:
@@ -622,6 +628,10 @@ def test_invalid_asof_episode_or_snapshot_schema_forces_human(
     )
 
     assert result["action"] == "human_review"
+    checklists = json.loads(result["checklist_results_json"])
+    assert checklists["__runner_guard"]["details"]["reason_codes"] == [
+        "invalid_snapshot"
+    ]
 
 
 @pytest.mark.parametrize(

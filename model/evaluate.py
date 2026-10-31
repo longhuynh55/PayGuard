@@ -7,7 +7,7 @@ from datetime import UTC, datetime, time, timedelta
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Sequence
 from zoneinfo import ZoneInfo
 
 import joblib
@@ -372,6 +372,7 @@ def evaluate_model_scores(
     *,
     model_directory: str | Path,
     simulator_config_path: str | Path = "configs/simulator.yaml",
+    episode_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate persisted scores against private simulator truth in a report only."""
     if operational is private:
@@ -379,19 +380,31 @@ def evaluate_model_scores(
     _, _, conformal, model_metadata = _read_model_artifacts(model_directory)
     simulator_config = load_simulator_config(simulator_config_path)
     t0, monitor_end = _monitoring_window(simulator_config)
-    episode_ids = [
-        str(row[0])
+    registered = [
+        (str(row[0]), str(row[1]))
         for row in operational.execute(
-            "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
+            "SELECT episode_id, role FROM episodes WHERE episode_id <> 'base' "
+            "ORDER BY episode_id"
         )
     ]
-    if not episode_ids:
-        raise ValueError("evaluation requires registered smoke episodes")
+    if not registered:
+        raise ValueError("evaluation requires registered non-base episodes")
+    if episode_ids is None:
+        selected_episode_ids = tuple(
+            episode_id for episode_id, role in registered if role == "development"
+        )
+    else:
+        selected_episode_ids = tuple(dict.fromkeys(episode_ids))
+        unknown = sorted(set(selected_episode_ids) - {episode_id for episode_id, _ in registered})
+        if unknown:
+            raise ValueError(f"evaluation episode IDs are not registered: {unknown!r}")
+    if not selected_episode_ids:
+        raise ValueError("evaluation requires at least one selected development or locked episode")
 
     episode_reports: list[dict[str, Any]] = []
     pooled_rows: list[dict[str, Any]] = []
     pooled_truth: dict[str, int] = {}
-    for episode_id in episode_ids:
+    for episode_id in selected_episode_ids:
         visible_scores = read_as_of(
             operational,
             "model_scores",

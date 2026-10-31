@@ -32,12 +32,13 @@ from payguard.identity import (
     benchmark_state_directory,
     current_hashes,
     current_run_identity,
-    find_harness_root,
-    policy_name_for_run,
+    identity_hash_mismatches,
+    lock_identity_hashes,
     policy_identity,
     record_role_touches,
     run_fingerprint,
 )
+from payguard.run_identity import verify_harness_policy_run
 
 
 PROFILE = "smoke"
@@ -111,10 +112,16 @@ def _ensure_harness_root(
         if manifest.get("schema_version") != 1 or manifest.get("profile") != PROFILE:
             raise HarnessError("existing output directory belongs to another harness/profile")
         assert_harness_state_directory(root, manifest)
-        if manifest.get("hashes") != dict(identity_hashes):
+        manifest_hashes = manifest.get("hashes")
+        differences = (
+            identity_hash_mismatches(manifest_hashes, identity_hashes)
+            if isinstance(manifest_hashes, dict)
+            else ("hashes",)
+        )
+        if differences:
             raise RunIdentityError(
-                "harness resume refused: current code/config/prompt/sampling hashes "
-                "do not match harness-manifest.json"
+                "harness resume refused: runtime/config/prompt/sampling hashes differ from "
+                f"harness-manifest.json: {', '.join(differences)}"
             )
         return
     existing = {item.name for item in root.iterdir()}
@@ -135,10 +142,16 @@ def _ensure_harness_root(
 
 def _validate_static_identity(path: Path, expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
     manifest = _read_json(path)
-    if manifest.get("schema_version") != 1 or manifest.get("hashes") != dict(expected):
+    manifest_hashes = manifest.get("hashes")
+    differences = (
+        identity_hash_mismatches(manifest_hashes, expected)
+        if isinstance(manifest_hashes, dict)
+        else ("hashes",)
+    )
+    if manifest.get("schema_version") != 1 or differences:
         raise RunIdentityError(
-            f"{label} resume refused: current code/config/prompt/sampling hashes "
-            f"do not match {path.name}"
+            f"{label} resume refused: runtime/config/prompt/sampling hashes differ from "
+            f"{path.name}: {', '.join(differences) or 'schema_version'}"
         )
     return manifest
 
@@ -398,9 +411,30 @@ def _ensure_policy_manifest(
     policy_dir.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing = _read_json(path)
-        if existing != dict(manifest):
+        existing_hashes = existing.get("hashes")
+        expected_hashes = manifest.get("hashes")
+        hash_differences = (
+            identity_hash_mismatches(existing_hashes, expected_hashes)
+            if isinstance(existing_hashes, dict) and isinstance(expected_hashes, dict)
+            else ("hashes",)
+        )
+        identity_fields = (
+            "schema_version",
+            "policy_name",
+            "provider_name",
+            "policy_version",
+            "model_slug",
+            "base_fingerprint",
+            "run_fingerprint",
+        )
+        field_differences = [
+            field for field in identity_fields if existing.get(field) != manifest.get(field)
+        ]
+        if hash_differences or field_differences:
+            details = [*hash_differences, *field_differences]
             raise RunIdentityError(
-                f"policy resume refused: manifest mismatch in {policy_dir}; "
+                f"policy resume refused: manifest mismatch in {policy_dir}; differing "
+                f"identity fields: {', '.join(details)}; "
                 "use a new benchmark root for changed inputs or policy; a new root "
                 "does not reset shared benchmark locks or spend"
             )
@@ -436,69 +470,6 @@ def _assert_policy_decisions_match_manifest(
             f"expected policy_version={expected_version!r}, agent model_slug="
             f"{expected_model_slug!r}, found {mismatches!r}"
         )
-
-
-def verify_harness_policy_run(policy_dir: str | Path) -> dict[str, Any]:
-    """Verify current identity and persisted decisions before standalone triage CLI use."""
-    run_path = Path(policy_dir).expanduser().resolve()
-    benchmark_root = find_harness_root(run_path)
-    if benchmark_root is None:
-        raise RunIdentityError(f"not a P5 harness policy run: {run_path}")
-    policy_name = policy_name_for_run(run_path)
-    if policy_name not in POLICY_PROVIDERS:
-        raise RunIdentityError("P5 harness triage requires a policy run directory")
-    if run_path.parent != benchmark_root / "policies" or run_path.name != policy_name:
-        raise RunIdentityError("P5 harness triage requires a policy run directory")
-
-    hashes = current_hashes(benchmark_root=benchmark_root)
-    harness_manifest = _read_json(benchmark_root / "harness-manifest.json")
-    assert_harness_state_directory(benchmark_root, harness_manifest)
-    if (
-        harness_manifest.get("schema_version") != 1
-        or harness_manifest.get("profile") != PROFILE
-        or harness_manifest.get("hashes") != hashes
-    ):
-        raise RunIdentityError(
-            "harness resume refused: current code/config/prompt/sampling hashes "
-            "do not match harness-manifest.json"
-        )
-
-    base_dir = benchmark_root / "base"
-    base_manifest = _validate_static_identity(
-        base_dir / "base-manifest.json",
-        hashes,
-        label="BASE",
-    )
-    base_fingerprint = base_manifest.get("input_fingerprint")
-    if not isinstance(base_fingerprint, str) or len(base_fingerprint) != 64:
-        raise RunIdentityError("BASE manifest has no valid input fingerprint")
-    base_database = base_dir / "operational" / "observations.sqlite"
-    _assert_base_is_frozen(base_database, base_fingerprint)
-
-    identity = current_run_identity(policy_name, benchmark_root=benchmark_root)
-    expected_manifest = _policy_manifest(
-        policy_name,
-        identity,
-        base_fingerprint=base_fingerprint,
-    )
-    manifest_path = run_path / "run-manifest.json"
-    actual_manifest = _read_json(manifest_path)
-    if actual_manifest != expected_manifest:
-        raise RunIdentityError(
-            f"policy resume refused: manifest mismatch in {run_path}; "
-            "use a new benchmark root for changed inputs or policy; a new root "
-            "does not reset shared benchmark locks or spend"
-        )
-
-    operational_path = run_path / "operational" / "observations.sqlite"
-    if operational_path.is_file():
-        actual_fingerprint = _input_fingerprint(operational_path)
-        if actual_fingerprint != base_fingerprint:
-            raise RunIdentityError(
-                f"policy {policy_name!r} input fingerprint differs from frozen BASE"
-            )
-        _assert_policy_decisions_match_manifest(operational_path, actual_manifest)
-    return actual_manifest
 
 
 def _decision_report_path(base_dir: Path, policy_name: str, analysis_role: str) -> Path:
@@ -554,8 +525,12 @@ def _policy_run(
     analysis_role: str,
 ) -> dict[str, Any]:
     identity = current_run_identity(policy_name, benchmark_root=root)
-    if identity["hashes"] != dict(identity_hashes):
-        raise RunIdentityError("code/config changed while the policy run was starting")
+    hash_differences = identity_hash_mismatches(identity["hashes"], identity_hashes)
+    if hash_differences:
+        raise RunIdentityError(
+            "policy run refused: runtime/config/prompt/sampling hashes changed while "
+            f"the policy was starting: {', '.join(hash_differences)}"
+        )
     manifest = _policy_manifest(policy_name, identity, base_fingerprint=base_fingerprint)
     policy_dir = root / "policies" / policy_name
     _ensure_policy_manifest(policy_dir, manifest)
@@ -572,10 +547,17 @@ def _policy_run(
     _assert_policy_decisions_match_manifest(operational_path, manifest)
 
     role_episode_ids = _episode_roles(operational_path)
+    role_order = ("development", "calibration", "test")
+    process_roles = role_order[: role_order.index(analysis_role) + 1]
+    process_episode_ids = {
+        role: role_episode_ids[role]
+        for role in process_roles
+        if role_episode_ids.get(role)
+    }
     assert_role_access(
         root,
-        operation="payguard.run.decisions_evaluation",
-        role_episode_ids={analysis_role: role_episode_ids[analysis_role]},
+        operation="payguard.run.policy_triage",
+        role_episode_ids=process_episode_ids,
         policy_name=policy_name,
     )
 
@@ -597,11 +579,16 @@ def _policy_run(
         simulator_config_path=SIMULATOR_CONFIG,
         triage_config_path=TRIAGE_CONFIG,
         agent_provider=provider,
+        episode_ids=tuple(
+            episode_id
+            for role in process_roles
+            for episode_id in role_episode_ids.get(role, ())
+        ),
     )
     record_role_touches(
         root,
         operation="payguard.run.policy_triage",
-        role_episode_ids=role_episode_ids,
+        role_episode_ids=process_episode_ids,
         policy_name=policy_name,
         usage="operational_execution",
     )
@@ -618,6 +605,10 @@ def _policy_run(
         raise RunIdentityError(
             f"input fingerprint changed during policy {policy_name!r}; BASE and policy copy differ"
         )
+    verify_harness_policy_run(
+        policy_dir,
+        required_roles=tuple(process_roles),
+    )
     evaluation = _evaluate_policy(
         operational_path,
         base_dir / "private" / "evaluator.sqlite",

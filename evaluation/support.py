@@ -20,12 +20,14 @@ from payguard.identity import (
     find_harness_root,
     policy_name_for_run,
 )
+from payguard.run_identity import verify_harness_policy_run
 from triage.gate import (
     GateConfig,
-    _checklist_requires_human_review,
-    _checklist_tool_failure,
-    _mandatory_runbook_reasons,
+    checklist_requires_human_review,
+    checklist_tool_failure,
+    mandatory_runbook_reasons,
 )
+from triage.decisions import CHECKLIST_RESULT_STATUSES
 from triage.runbooks import load_triage_config
 
 
@@ -113,6 +115,12 @@ def _checklist_results(decision: Mapping[str, Any]) -> dict[str, dict[str, Any]]
             raise DevelopmentSupportError(
                 f"decision checklist results are invalid for {decision.get('decision_id')!r}"
             )
+        status = value.get("status")
+        if not isinstance(status, str) or status not in CHECKLIST_RESULT_STATUSES:
+            raise DevelopmentSupportError(
+                f"decision checklist {name!r} is missing a valid status in "
+                f"{decision.get('decision_id')!r}"
+            )
         result[name] = value
     return result
 
@@ -120,17 +128,25 @@ def _checklist_results(decision: Mapping[str, Any]) -> dict[str, dict[str, Any]]
 def _has_forced_human_condition(
     decision: Mapping[str, Any], checklists: Mapping[str, Mapping[str, Any]]
 ) -> bool:
+    runner_guard = checklists.get("__runner_guard")
+    details = runner_guard.get("details") if isinstance(runner_guard, Mapping) else None
+    if isinstance(details, Mapping) and details.get("forced_human") is True:
+        reason_codes = details.get("reason_codes")
+        if isinstance(reason_codes, list) and reason_codes and all(
+            code in {"runner_tool_error", "invalid_snapshot"} for code in reason_codes
+        ):
+            return True
     if decision.get("evidence_status") == "conflicting":
         return True
     if any(
         result.get("status") == "conflicting"
         for result in checklists.values()
-    ) or _checklist_tool_failure(checklists) or _checklist_requires_human_review(
+    ) or checklist_tool_failure(checklists) or checklist_requires_human_review(
         checklists
     ):
         return True
     return bool(
-        _mandatory_runbook_reasons(decision.get("runbook"), checklists)
+        mandatory_runbook_reasons(decision.get("runbook"), checklists)
     )
 
 
@@ -177,7 +193,7 @@ def _uq_conditions_on_projection(
     eligible_incident_ids: set[str],
     agent_incident_ids: set[str],
     seasonal_evaluated_incident_ids: set[str],
-) -> tuple[int | None, str | None]:
+) -> tuple[set[str] | None, str | None]:
     """Estimate the on state only where recorded rule/agent scopes support it."""
     if agent_incident_ids - seasonal_evaluated_incident_ids:
         return None, (
@@ -185,7 +201,7 @@ def _uq_conditions_on_projection(
             "agent has no saved seasonal_calendar checklist."
         )
     if not eligible_incident_ids:
-        return 0, None
+        return set(), None
 
     projected_incidents: set[str] = set()
     for incident_id, agent_rows in eligible_agent_decisions.items():
@@ -220,14 +236,17 @@ def _uq_conditions_on_projection(
                 "Cannot estimate seasonal_calendar=on: a passing rule or agent decision "
                 "does not contain a comparable scope_json."
             )
-        same_scope = any(
-            agent_scope == rule_scope
-            for agent_scope in agent_scopes
-            for rule_scope in rule_scopes
+        had_prior_same_scope_close = any(
+            all(agent_scope.get(key) == rule_scope.get(key) for key in ("feature", "segment"))
+            and isinstance(rule.get("decision_at"), str)
+            and isinstance(agent.get("decision_at"), str)
+            and rule["decision_at"] <= agent["decision_at"]
+            for agent, agent_scope in zip(agent_rows, agent_scopes)
+            for rule, rule_scope in zip(close_candidates, rule_scopes)
         )
-        if not same_scope:
+        if not had_prior_same_scope_close:
             projected_incidents.add(incident_id)
-    return len(projected_incidents), None
+    return projected_incidents, None
 
 
 def _window_completeness(
@@ -448,6 +467,15 @@ def _agent_and_close_support(
     unmatched_agent_incidents: dict[str, set[str]] = defaultdict(set)
 
     truth_by_id = {str(row["incident_truth_id"]): row for row in truth_rows}
+    for truth in truth_rows:
+        grouped_agent_incidents[
+            (
+                str(truth["episode_id"]),
+                str(truth["cause"]),
+                str(truth["template"]),
+                truth.get("parent_scenario") is not None,
+            )
+        ]
     matches_by_incident = {str(row["incident_id"]): row for row in matches}
     for match in matches:
         if match.get("status") != "matched":
@@ -547,13 +575,14 @@ def _agent_and_close_support(
     else:
         uq_off_count = len(uq_conditions_1_to_3)
         uq_off_reason = None
-    uq_on_count, uq_on_reason = _uq_conditions_on_projection(
+    uq_on_incidents, uq_on_reason = _uq_conditions_on_projection(
         eligible_agent_decisions=eligible_agent_decisions,
         rule_decisions_by_incident=rule_decisions_by_incident,
         eligible_incident_ids=uq_conditions_1_to_3,
         agent_incident_ids=agent_incidents,
         seasonal_evaluated_incident_ids=seasonal_evaluated_agent_incidents,
     )
+    uq_on_count = len(uq_on_incidents) if uq_on_incidents is not None else None
 
     def conditions_1_to_4(count: int | None) -> int | None:
         if not agent_close_allowed:
@@ -569,7 +598,16 @@ def _agent_and_close_support(
         template: str | None = None,
         has_parent_scenario: bool | None = None,
     ) -> dict[str, Any]:
-        qualifying = group_incidents & uq_conditions_1_to_3
+        off_qualifying = (
+            group_incidents & uq_conditions_1_to_3 if uq_off_count is not None else None
+        )
+        on_qualifying = (
+            group_incidents & uq_on_incidents
+            if uq_on_incidents is not None and uq_on_count is not None
+            else None
+        )
+        off_count = len(off_qualifying) if off_qualifying is not None else None
+        on_count = len(on_qualifying) if on_qualifying is not None else None
         return {
             "episode_id": episode_id,
             "group_type": group_type,
@@ -577,10 +615,30 @@ def _agent_and_close_support(
             "template": template,
             "has_parent_scenario": has_parent_scenario,
             "incidents_reaching_agent": len(group_incidents),
-            "conditions_1_to_3_incidents": len(qualifying),
-            "conditions_1_to_4_incidents": (
-                len(qualifying) if agent_close_allowed else 0
+            "conditions_1_to_3_incidents": off_count,
+            "conditions_1_to_3_reason": uq_off_reason if off_count is None else None,
+            "conditions_1_to_4_incidents": conditions_1_to_4(off_count),
+            "conditions_1_to_4_reason": (
+                uq_off_reason if agent_close_allowed and off_count is None else None
             ),
+            "by_close_enabled": {
+                "off": {
+                    "conditions_1_to_3_incidents": off_count,
+                    "conditions_1_to_3_reason": uq_off_reason if off_count is None else None,
+                    "conditions_1_to_4_incidents": conditions_1_to_4(off_count),
+                    "conditions_1_to_4_reason": (
+                        uq_off_reason if agent_close_allowed and off_count is None else None
+                    ),
+                },
+                "on": {
+                    "conditions_1_to_3_incidents": on_count,
+                    "conditions_1_to_3_reason": uq_on_reason if on_count is None else None,
+                    "conditions_1_to_4_incidents": conditions_1_to_4(on_count),
+                    "conditions_1_to_4_reason": (
+                        uq_on_reason if agent_close_allowed and on_count is None else None
+                    ),
+                },
+            },
         }
 
     by_truth_group = [
@@ -904,6 +962,10 @@ def run_development_support(
         or policy_run.name != policy_name
     ):
         raise DevelopmentSupportError("P5.0b --run must identify a policy under harness policies/")
+    try:
+        verify_harness_policy_run(policy_run, required_roles=("development",))
+    except Exception as exc:
+        raise DevelopmentSupportError(f"P5.0b harness identity check failed: {exc}") from exc
 
     operational_path = policy_run / "operational" / "observations.sqlite"
     private_path = harness_root / "base" / "private" / "evaluator.sqlite"

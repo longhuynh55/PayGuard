@@ -7,12 +7,16 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 import payguard.identity as identity
 import payguard.harness as harness
+import payguard.run_identity as run_identity_module
+import evaluation.__main__ as evaluation_cli
+import triage.__main__ as triage_cli
 from evaluation.__main__ import main as evaluation_main
 from payguard.__main__ import main as payguard_main
 from payguard.config import load_benchmark_cost_cap
@@ -25,12 +29,15 @@ from payguard.identity import (
     record_role_touches,
 )
 from simulator.schema import PRIVATE_TABLES
+from triage.agent import build_agent_provider as actual_build_agent_provider
 from triage.cost_ledger import CostLedgerError, CostLimitExceeded, DurableCostLedger
 from triage.llm import FakeLLMClient, LLMClient, _RequestFailure, load_llm_config
 from triage.__main__ import main as triage_main
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_FAKE_GIT_HEAD = {"value": "a" * 40}
+_FAKE_GIT_DIRTY = {"value": False}
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +48,17 @@ def _shared_state_under_test_tmp_path(
         identity.BENCHMARK_STATE_DIR_ENV,
         str(tmp_path / "shared-benchmark-state"),
     )
+    _FAKE_GIT_HEAD["value"] = "a" * 40
+    _FAKE_GIT_DIRTY["value"] = False
+
+    def synthetic_git(*args: str) -> bytes:
+        if args == ("rev-parse", "--verify", "HEAD"):
+            return f"{_FAKE_GIT_HEAD['value']}\n".encode("ascii")
+        if args == ("status", "--porcelain", "--untracked-files=all"):
+            return b"?? scratch.txt\n" if _FAKE_GIT_DIRTY["value"] else b""
+        raise AssertionError(f"unexpected Git command in harness test: {args!r}")
+
+    monkeypatch.setattr(identity, "_git", synthetic_git)
 
 
 def _lock_both_policies(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -58,7 +76,9 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "benchmark"
+    original_dirty_entries = identity._dirty_entries
     _lock_both_policies(monkeypatch, root)
+    monkeypatch.setattr(identity, "_dirty_entries", original_dirty_entries)
     built_providers: list[tuple[str, DurableCostLedger | None]] = []
     original_build_provider = harness.build_agent_provider
 
@@ -76,6 +96,9 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
     )
     human_report_path = Path(human["evaluation"]["report_path"])
     human_report_before = human_report_path.read_bytes()
+    # A docs-only commit and untracked scratch file change only Git metadata.
+    _FAKE_GIT_HEAD["value"] = "b" * 40
+    _FAKE_GIT_DIRTY["value"] = True
     fake = run_benchmark(
         profile="smoke",
         policy_name="rule_agent_fake",
@@ -84,6 +107,16 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
     )
 
     assert human["base_fingerprint"] == fake["base_fingerprint"]
+    human_identity = json.loads(
+        (root / "policies/rule_human/run-manifest.json").read_text()
+    )["hashes"]
+    fake_identity = json.loads(
+        (root / "policies/rule_agent_fake/run-manifest.json").read_text()
+    )["hashes"]
+    assert human_identity["git_head"] != fake_identity["git_head"]
+    assert human_identity["git_dirty"] is False
+    assert fake_identity["git_dirty"] is True
+    assert identity.identity_hash_mismatches(human_identity, fake_identity) == ()
     assert human["input_fingerprint_before"] == human["input_fingerprint_after"]
     assert fake["input_fingerprint_before"] == fake["input_fingerprint_after"]
     assert human["input_fingerprint_after"] == fake["input_fingerprint_after"]
@@ -168,6 +201,46 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
             "test",
         ]
     ) == 0
+    assert triage_cli.main(
+        [
+            "run",
+            "--run",
+            str(root / "policies/rule_human"),
+            "--agent-provider",
+            "unconfigured",
+            "--episode-role",
+            "development",
+        ]
+    ) == 0
+
+    openrouter_build: dict[str, object] = {}
+
+    def fake_openrouter_builder(provider_name: str, _database: Path, **kwargs):
+        openrouter_build.update(provider_name=provider_name, **kwargs)
+        return SimpleNamespace(
+            model_slug=identity.policy_identity("rule_agent_openrouter_k1")["model_slug"]
+        )
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(harness, "build_agent_provider", fake_openrouter_builder)
+        scoped.setattr(
+            harness,
+            "run_triage",
+            lambda *_args, **_kwargs: {"decision_rows_inserted": 0},
+        )
+        openrouter = run_benchmark(
+            profile="smoke",
+            policy_name="rule_agent_openrouter_k1",
+            output_dir=root,
+            analysis_role="development",
+        )
+    assert openrouter["policy_name"] == "rule_agent_openrouter_k1"
+    assert openrouter_build["provider_name"] == "openrouter"
+    assert isinstance(openrouter_build["cost_ledger"], DurableCostLedger)
+    assert openrouter_build["cost_ledger"].path == (
+        benchmark_state_directory(root) / "cost-ledger.jsonl"
+    )
+    assert openrouter_build["cost_cap_usd"] == 10.0
 
     previous_decisions = fake["triage"]["decision_rows_total"]
     previous_fake_calls = fake["cost_ledger"]["fake_call_count"]
@@ -238,6 +311,281 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
         )
 
 
+def test_heldout_harness_triage_waits_for_lock_and_stale_run_cannot_be_scored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "harden-a2"
+    report = run_benchmark(
+        profile="smoke",
+        policy_name="rule_agent_fake",
+        output_dir=root,
+        analysis_role="development",
+    )
+    assert report["evaluation"]["episode_role"] == "development"
+    operational_path = (
+        root / "policies/rule_agent_fake/operational/observations.sqlite"
+    )
+    with sqlite3.connect(operational_path) as connection:
+        heldout_decisions = connection.execute(
+            "SELECT COUNT(*) FROM decisions d JOIN episodes e USING (episode_id) "
+            "WHERE e.role IN ('calibration', 'test')"
+        ).fetchone()[0]
+    assert heldout_decisions == 0
+
+    triage_calls: list[tuple[str, ...]] = []
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            harness,
+            "run_triage",
+            lambda *_args, **kwargs: triage_calls.append(tuple(kwargs["episode_ids"])),
+        )
+        with pytest.raises(RunIdentityError, match="required lock marker"):
+            run_benchmark(
+                profile="smoke",
+                policy_name="rule_agent_fake",
+                output_dir=root,
+                analysis_role="test",
+            )
+    assert triage_calls == []
+
+    code_b = {
+        **identity.current_hashes(benchmark_root=root),
+        "git_head": "b" * 40,
+        "code_hash": "f" * 64,
+    }
+    for manifest_path in (
+        root / "harness-manifest.json",
+        root / "base/base-manifest.json",
+    ):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["hashes"] = code_b
+        identity._atomic_write_json(manifest_path, manifest)
+    monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: code_b)
+    monkeypatch.setattr(harness, "current_hashes", lambda **_kwargs: code_b)
+    assert payguard_main(
+        [
+            "lock",
+            "policy",
+            "--policy",
+            "rule_agent_fake",
+            "--out",
+            str(root),
+        ]
+    ) == 0
+
+    evaluator_called = False
+
+    def mark_evaluator_called(*_args, **_kwargs):
+        nonlocal evaluator_called
+        evaluator_called = True
+        raise AssertionError("test truth must not be read for an unlocked decision identity")
+
+    monkeypatch.setattr(evaluation_cli, "evaluate_operational_decisions", mark_evaluator_called)
+    assert evaluation_main(
+        [
+            "decisions",
+            "--run",
+            str(root / "policies/rule_agent_fake"),
+            "--episode-role",
+            "test",
+        ]
+    ) == 2
+    assert "run-manifest hashes do not match" in capsys.readouterr().err
+    assert evaluator_called is False
+
+
+def test_lock_profile_must_match_root_and_pilot_maps_to_benchmark(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "smoke-harness"
+    root.mkdir()
+    hashes = identity.current_hashes(benchmark_root=root)
+    state_dir = benchmark_state_directory(root, create=False)
+    identity._atomic_write_json(
+        root / "harness-manifest.json",
+        {
+            "schema_version": 1,
+            "profile": "smoke",
+            "state_dir": str(state_dir),
+            "hashes": hashes,
+        },
+    )
+
+    assert payguard_main(
+        ["lock", "prompt-rule", "--profile", "benchmark", "--out", str(root)]
+    ) == 2
+    assert "does not match run manifest profile 'smoke'" in capsys.readouterr().err
+    assert not (state_dir / "locks/benchmark/prompt-rule.json").exists()
+
+    pilot_root = tmp_path / "pilot-run"
+    pilot_root.mkdir()
+    identity._atomic_write_json(
+        pilot_root / "generation-manifest.json",
+        {"schema_version": 1, "profile": "pilot", "hashes": hashes},
+    )
+    lock_path = create_lock(pilot_root, "prompt-rule", profile="pilot")
+    assert lock_path == state_dir / "locks/benchmark/prompt-rule.json"
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["profile"] == "benchmark"
+
+
+def test_standalone_openrouter_triage_uses_durable_benchmark_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = tmp_path / "standalone-openrouter"
+    operational_path = run_dir / "operational" / "observations.sqlite"
+    operational_path.parent.mkdir(parents=True)
+    with sqlite3.connect(operational_path) as connection:
+        connection.execute("CREATE TABLE episodes (episode_id TEXT, role TEXT)")
+        connection.execute("INSERT INTO episodes VALUES ('ep-dev-1', 'development')")
+        connection.execute("INSERT INTO episodes VALUES ('ep-test-1', 'test')")
+
+    built: dict[str, object] = {}
+    triaged_episode_ids: list[list[str]] = []
+
+    def fake_build_provider(provider_name: str, _database: Path, **kwargs):
+        built.update(provider_name=provider_name, **kwargs)
+        return SimpleNamespace(
+            model_slug=identity.policy_identity("rule_agent_openrouter_k1")["model_slug"]
+        )
+
+    monkeypatch.setattr(triage_cli, "build_agent_provider", fake_build_provider)
+    def capture_run_triage(*_args, **kwargs):
+        selected = list(kwargs["episode_ids"])
+        triaged_episode_ids.append(selected)
+        return {"episode_ids": selected}
+
+    monkeypatch.setattr(triage_cli, "run_triage", capture_run_triage)
+
+    assert triage_cli.main(
+        ["run", "--run", str(run_dir), "--agent-provider", "openrouter"]
+    ) == 0
+    capsys.readouterr()
+    ledger = built["cost_ledger"]
+    assert isinstance(ledger, DurableCostLedger)
+    assert ledger.path == benchmark_state_directory(run_dir) / "cost-ledger.jsonl"
+    assert ledger.cap_usd == Decimal("10.00")
+    assert built["ledger_policy"] == f"standalone:{run_dir.resolve()}"
+    assert built["cost_cap_usd"] is None
+
+    create_lock(run_dir, "prompt-rule")
+    create_lock(run_dir, "policy", policy_name="rule_agent_openrouter_k1")
+    assert triage_cli.main(
+        [
+            "run",
+            "--run",
+            str(run_dir),
+            "--agent-provider",
+            "openrouter",
+            "--episode-role",
+            "test",
+        ]
+    ) == 0
+    assert triaged_episode_ids == [["ep-dev-1"], ["ep-test-1"]]
+
+    monkeypatch.setattr(triage_cli, "build_agent_provider", actual_build_agent_provider)
+    actual_provider, _, _ = triage_cli._build_provider_for_run(
+        "openrouter",
+        operational_path,
+        run_dir,
+        llm_config_path=triage_cli.CONFIG_ROOT / "llm.yaml",
+        simulator_config_path=triage_cli.CONFIG_ROOT / "simulator.yaml",
+        triage_config_path=triage_cli.CONFIG_ROOT / "triage.yaml",
+    )
+    assert actual_provider.client.config.max_total_cost_usd == 1.0
+    standalone_ledger = actual_provider.client._cost_ledger
+    assert standalone_ledger.cap_usd == Decimal("10.00")
+    standalone_ledger.reserve(
+        "9.50",
+        model_slug=actual_provider.model_slug,
+        policy="standalone-ledger-cap-check",
+    )
+    with pytest.raises(CostLimitExceeded, match="would exceed"):
+        standalone_ledger.reserve(
+            "0.51",
+            model_slug=actual_provider.model_slug,
+            policy="standalone-ledger-cap-check",
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "config_name", "mutation"),
+    [
+        ("run", "triage", "policy_version"),
+        ("run", "triage", "same_policy_version_threshold"),
+        ("run", "simulator", "copy"),
+        ("run", "llm", "copy"),
+        ("measure", "triage", "same_policy_version_threshold"),
+        ("measure", "simulator", "copy"),
+        ("measure", "llm", "copy"),
+    ],
+)
+def test_standalone_triage_rejects_unlocked_config_paths_before_provider_or_side_effects(
+    command: str,
+    config_name: str,
+    mutation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = tmp_path / f"standalone-{command}-{config_name}-{mutation}"
+    operational_path = run_dir / "operational" / "observations.sqlite"
+    operational_path.parent.mkdir(parents=True)
+    with sqlite3.connect(operational_path) as connection:
+        connection.execute("CREATE TABLE episodes (episode_id TEXT, role TEXT)")
+        connection.execute("INSERT INTO episodes VALUES ('ep-dev-1', 'development')")
+        connection.execute("INSERT INTO episodes VALUES ('ep-test-1', 'test')")
+    if command == "run":
+        create_lock(run_dir, "prompt-rule")
+        create_lock(run_dir, "policy", policy_name="rule_agent_fake")
+
+    config_path = ROOT / "configs" / f"{config_name}.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if mutation == "policy_version":
+        config["policy_version"] = "unlocked-custom-policy-v999"
+    elif mutation == "same_policy_version_threshold":
+        config["runbooks"]["small_sample"]["n_min"]["value"] = 100000
+    custom_config = tmp_path / f"custom-{config_name}-{mutation}.yaml"
+    custom_config.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    provider_calls: list[str] = []
+    triage_calls: list[str] = []
+    monkeypatch.setattr(
+        triage_cli,
+        "build_agent_provider",
+        lambda provider_name, *_args, **_kwargs: (
+            provider_calls.append(provider_name)
+            or SimpleNamespace(
+                model_slug=identity.policy_identity("rule_agent_fake")["model_slug"]
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        triage_cli,
+        "run_triage",
+        lambda *_args, **_kwargs: triage_calls.append("run") or {"decision_rows_inserted": 0},
+    )
+    before_database = operational_path.read_bytes()
+    args = [command, "--run", str(run_dir), "--agent-provider", "fake"]
+    if command == "run":
+        args.extend(("--episode-role", "test"))
+    else:
+        args.extend(("--incidents", "1", "--out", str(tmp_path / "measure.json")))
+    args.extend((f"--{config_name}-config", str(custom_config)))
+
+    assert triage_cli.main(args) == 2
+    assert "not covered by the verified lock/run identity" in capsys.readouterr().err
+    assert provider_calls == []
+    assert triage_calls == []
+    assert operational_path.read_bytes() == before_database
+    assert not (benchmark_state_directory(run_dir) / "cost-ledger.jsonl").exists()
+    assert not (tmp_path / "measure.json").exists()
+
+
 @pytest.mark.parametrize(("command", "mutation"), [("run", "policy_version"), ("measure", "code_hash")])
 def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
     tmp_path: Path,
@@ -292,13 +640,17 @@ def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
                 "policy_version": changed_version,
             },
         )
-        expected_error = "policy resume refused: manifest mismatch"
-        monkeypatch.setattr(harness, "_assert_base_is_frozen", lambda *_args, **_kwargs: None)
+        expected_error = "policy resume refused: run-manifest policy_version differs"
+        monkeypatch.setattr(
+            run_identity_module,
+            "_assert_base_is_frozen",
+            lambda *_args, **_kwargs: None,
+        )
     else:
         changed_hashes = {**hashes, "code_hash": "f" * 64}
         monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: changed_hashes)
         monkeypatch.setattr(harness, "current_hashes", lambda **_kwargs: changed_hashes)
-        expected_error = "harness resume refused: current code/config/prompt/sampling hashes"
+        expected_error = "harness resume refused: runtime/config/prompt/sampling hashes"
 
     args = [command, "--run", str(policy_dir), "--agent-provider", "fake"]
     if command == "measure":
