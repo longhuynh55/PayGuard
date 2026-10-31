@@ -20,6 +20,7 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 ### P5.2 — Matcher hoàn chỉnh trước calibration
 - **Mục tiêu:** matcher đúng [evaluation.md](evaluation.md) mục 2: thời gian gồm hiệu ứng trễ của cửa sổ metric, segment, feature; trạng thái `matched` / `ambiguous_match` / `unmatched`.
 - **Nghiệm thu:** fixture phản ví dụ cho (a) incident mở muộn trong cửa sổ trễ vẫn `matched`; (b) hai truth cùng ứng viên → `ambiguous_match`, không chấm accuracy; (c) ca nhiều nguyên nhân; (d) unmatched không thành benign. Matcher khóa trên development; không đọc calibration/test để chỉnh. Hành vi trên smoke hiện có được liệt kê cũ → mới.
+- **Trạng thái:** ✅ merge 31/10 sau review r2 PASS ([r1](../review/findings/P5.2-r1.md), [r2](../review/findings/P5.2-r2.md)). Không chặn chuyển backlog: fixture hai nguyên nhân khác feature; feature monitoring lạ nhận lookback 0 không báo lỗi; status cặp `parent_scenario` (`ambiguous_match` hay `matched` nhiều truth) — người dùng chốt trước P5.0b; kẹp `scope.end_at` về `decision_at`.
 
 ### P5.0b — Bảng support trên development
 - **Mục tiêu:** đo trên episode `development` (không calibration/test): số truth duy nhất theo episode và nhóm nguyên nhân; matched/ambiguous/unmatched; cửa sổ đủ; rule coverage; số ca tới agent; số ca đủ điều kiện đóng. Báo cáo private.
@@ -28,7 +29,7 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 ### P5.1 — Harness tối thiểu và sổ chi phí bền
 - **Mục tiêu:** một lệnh chạy dữ liệu → model → monitoring → alert → triage → báo cáo (MASTER mục 1). Base đóng băng sau scores/metrics/alerts, trước mọi incident/decision; mỗi policy chạy trên bản copy operational riêng; incident tính lại theo lịch sử decision riêng.
 - **Danh tính run:** manifest gồm hash code/config/prompt/sampling/base; kiểm tra trước resume, lệch → dừng. Sổ seed/role: development được phân tích, calibration chỉ sau khi khóa prompt/rule, test chỉ sau khi khóa policy.
-- **Sổ chi phí:** ledger bền cộng mọi lời gọi (mọi nhánh, retry, recheck, lần chạy trước restart); chặn trước khi vượt trần đã khóa.
+- **Sổ chi phí:** ledger bền cộng mọi lời gọi (mọi nhánh, retry, recheck, lần chạy trước restart); chặn trước khi vượt trần đã khóa. **Người dùng chốt 31/10/2026 (review P5.1 r1, finding 2):** sổ chi phí và sổ role/lock nằm ở **một đường dẫn cố định ngoài mọi benchmark root** (và ngoài mọi DB/file tool agent đọc được), dùng chung cho mọi root, mọi lần đổi code; trần 10 USD và lock calibration/test áp cho toàn benchmark.
 - **Nghiệm thu:** fingerprint input giống nhau giữa các policy và không đổi sau chạy; resume idempotent; fake provider end-to-end; truth chỉ evaluator đọc; commit trước tool giữ như P4.4b.
 
 ### P5.1 round one — CLI, lock và ngân sách (quyết định người dùng 31/10/2026)

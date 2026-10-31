@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from model.features import FEATURE_LOOKBACK_DAYS
+
 from evaluation.matcher import (
     MONITORING_FEATURE_TO_TRUTH_FEATURE,
     load_private_evaluation_data,
@@ -34,11 +36,12 @@ def _build_report(
     matches: tuple[dict[str, Any], ...],
     truth_rows: tuple[dict[str, Any], ...],
     as_of_time: str,
+    metric_window_days: int,
 ) -> dict[str, Any]:
     detected_truth_ids = {
         truth_id
         for match in matches
-        for truth_id in match["matched_truth_ids"]
+        for truth_id in match["candidate_truth_ids"]
     }
     required_truths = [
         row for row in truth_rows if row["requires_intervention"] == 1
@@ -78,6 +81,9 @@ def _build_report(
         )
 
     matched_incidents = [match for match in matches if match["status"] == "matched"]
+    ambiguous_incidents = [
+        match for match in matches if match["status"] == "ambiguous_match"
+    ]
     unmatched_incidents = [match for match in matches if match["status"] == "unmatched"]
     benign_truth_ids = {
         str(row["incident_truth_id"]) for row in benign_truths
@@ -97,13 +103,12 @@ def _build_report(
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 3,
         "as_of_time": as_of_time,
-        "matching_scope": "round1_minimal_time_segment_feature",
-        "deferred_to_round2": [
-            "ambiguous_match classification",
-            "full delayed-window effects",
-        ],
+        "matching_scope": "effect_window_plus_metric_and_feature_lookback_segment_feature",
+        "metric_window_days": metric_window_days,
+        "feature_lookback_days": dict(sorted(FEATURE_LOOKBACK_DAYS.items())),
+        "deferred_to_round2": [],
         "feature_mapping": dict(sorted(MONITORING_FEATURE_TO_TRUTH_FEATURE.items())),
         "detection_recall": {
             "detected": detected_required,
@@ -124,15 +129,20 @@ def _build_report(
         "incident_counts": {
             "evaluated": len(matches),
             "matched": len(matched_incident_ids),
+            "ambiguous": len(ambiguous_incidents),
             "unmatched": len(unmatched_incident_ids),
             "benign_matched": len(benign_incident_ids),
         },
+        "ambiguous_incident_ids": sorted(
+            str(match["incident_id"]) for match in ambiguous_incidents
+        ),
         "unmatched_incident_ids": unmatched_incident_ids,
         "benign_incident_ids": benign_incident_ids,
         "incident_matches": [
             {
                 **match,
                 "matched_truth_ids": sorted(match["matched_truth_ids"]),
+                "candidate_truth_ids": sorted(match["candidate_truth_ids"]),
             }
             for match in matches
         ],
@@ -162,11 +172,13 @@ def evaluate_detection_recall(
         episode_ids=context.episode_ids,
         episode_end_at=context.episode_end_at,
         as_of_time=cutoff,
+        metric_window_days=context.metric_window_days,
     )
     report = _build_report(
         matches=matches,
         truth_rows=context.truth_rows,
         as_of_time=cutoff,
+        metric_window_days=context.metric_window_days,
     )
 
     private_root = Path(private_db_path).expanduser().resolve().parent

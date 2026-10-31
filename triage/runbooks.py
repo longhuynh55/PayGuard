@@ -43,6 +43,7 @@ class _UnitOrNullPolicy:
     median_ratio_targets: tuple[float, ...]
     median_ratio_multiplicative_band: float
     null_rate_increase: float
+    small_sample_n_min: int
     comparison_period_days: int
     minimum_post_change_days: int
 
@@ -93,6 +94,9 @@ def _load_unit_or_null_policy(config: Mapping[str, Any]) -> _UnitOrNullPolicy:
     section = runbooks.get("unit_or_null_change") if isinstance(runbooks, Mapping) else None
     if not isinstance(section, Mapping):
         raise RunbookConfigError("triage config is missing runbooks.unit_or_null_change")
+    small_sample_section = runbooks.get("small_sample") if isinstance(runbooks, Mapping) else None
+    if not isinstance(small_sample_section, Mapping):
+        raise RunbookConfigError("triage config is missing runbooks.small_sample")
 
     targets = _configured_value(
         section.get("median_ratio_targets"), name="median_ratio_targets"
@@ -104,6 +108,11 @@ def _load_unit_or_null_policy(config: Mapping[str, Any]) -> _UnitOrNullPolicy:
     )
     null_increase = _configured_value(
         section.get("null_rate_increase"), name="null_rate_increase"
+    )
+    small_sample_n_min = _configured_value(
+        small_sample_section.get("n_min"),
+        name="small_sample.n_min",
+        provenance_kinds=frozenset({"development_tuning"}),
     )
     comparison_days = _configured_value(
         section.get("comparison_period_days"), name="comparison_period_days"
@@ -139,6 +148,10 @@ def _load_unit_or_null_policy(config: Mapping[str, Any]) -> _UnitOrNullPolicy:
             or not 0 < float(value) <= 1
         ):
             raise RunbookConfigError(f"{name} must be finite and in (0, 1]")
+    if isinstance(small_sample_n_min, bool) or not isinstance(small_sample_n_min, int):
+        raise RunbookConfigError("small_sample.n_min must be an integer")
+    if small_sample_n_min < 2:
+        raise RunbookConfigError("small_sample.n_min must be at least two")
     if isinstance(comparison_days, bool) or comparison_days != 1:
         raise RunbookConfigError("comparison_period_days is fixed at one day by the runbook")
     if isinstance(post_days, bool) or post_days != 1:
@@ -148,6 +161,7 @@ def _load_unit_or_null_policy(config: Mapping[str, Any]) -> _UnitOrNullPolicy:
         median_ratio_targets=tuple(float(value) for value in targets),
         median_ratio_multiplicative_band=float(multiplicative_band),
         null_rate_increase=float(null_increase),
+        small_sample_n_min=small_sample_n_min,
         comparison_period_days=1,
         minimum_post_change_days=1,
     )
@@ -331,6 +345,18 @@ def _compare_transition(
     daily: Mapping[date, _DailyAmounts],
     policy: _UnitOrNullPolicy,
 ) -> dict[str, Any]:
+    daily_transaction_counts = [
+        {
+            "business_date": day.isoformat(),
+            "transaction_count": daily[day].transaction_count,
+        }
+        for day in (*before_days, *after_days)
+    ]
+    small_sample_days = [
+        item
+        for item in daily_transaction_counts
+        if item["transaction_count"] < policy.small_sample_n_min
+    ]
     before_amounts = [amount for day in before_days for amount in daily[day].amounts]
     after_amounts = [amount for day in after_days for amount in daily[day].amounts]
     before_non_null = [amount for amount in before_amounts if amount is not None]
@@ -368,6 +394,10 @@ def _compare_transition(
         "after_last_business_date": max(after_days).isoformat(),
         "before_transaction_count": len(before_amounts),
         "after_transaction_count": len(after_amounts),
+        "small_sample_n_min": policy.small_sample_n_min,
+        "daily_transaction_counts": daily_transaction_counts,
+        "small_sample_days": small_sample_days,
+        "small_sample": bool(small_sample_days),
         "before_median_amount": before_median,
         "after_median_amount": after_median,
         "median_ratio_after_divided_by_before": ratio,
@@ -550,11 +580,15 @@ def _scope_amount_transactions(
             comparison["channel"] = channel
             comparisons.append(comparison)
 
-    triggered = [
+    candidate_transitions = [
         item
         for item in comparisons
         if item["matched_median_ratio_target"] is not None
         or item["null_rate_threshold_met"]
+    ]
+    triggered = [item for item in candidate_transitions if not item["small_sample"]]
+    small_sample_candidates = [
+        item for item in candidate_transitions if item["small_sample"]
     ]
     if triggered:
         change = triggered[0]
@@ -582,6 +616,11 @@ def _scope_amount_transactions(
                 "observed_increase": change["null_rate_increase"],
                 "threshold": policy.null_rate_increase,
             },
+            "small_sample": {
+                "status": "pass",
+                "n_min": policy.small_sample_n_min,
+                "daily_transaction_counts": change["daily_transaction_counts"],
+            },
             "abrupt_change_within_one_day": {
                 "status": "pass",
                 "comparison_days": policy.comparison_period_days,
@@ -604,7 +643,7 @@ def _scope_amount_transactions(
             "change_detection": checks,
             "matched_transition": change,
             "channel": change["channel"],
-            "candidate_transition_count": len(triggered),
+            "candidate_transition_count": len(candidate_transitions),
             "compared_day_pair_count": len(comparisons),
         }
         if not window_complete:
@@ -621,6 +660,68 @@ def _scope_amount_transactions(
             reason="A contracted median-ratio or NULL-rate change passed over an adjacent business-day boundary.",
             scope_match=True,
             window_complete=True,
+            details=details,
+        )
+    if small_sample_candidates:
+        change = small_sample_candidates[0]
+        change_date = date.fromisoformat(change["after_start_business_date"])
+        post_change_days_observed = max(0, (as_of_local_date - change_date).days)
+        window_complete = post_change_days_observed >= policy.minimum_post_change_days
+        details = {
+            "episode_id": incident["episode_id"],
+            "as_of_time": as_of_time,
+            "incident_feature": feature,
+            "incident_segment": segment,
+            "incident_metric_window": source_window_details,
+            "change_detection": {
+                "median_ratio": {
+                    "status": (
+                        "insufficient"
+                        if change["matched_median_ratio_target"] is not None
+                        else "fail"
+                    ),
+                    "observed_ratio": change["median_ratio_after_divided_by_before"],
+                    "matched_target": change["matched_median_ratio_target"],
+                    "targets": list(policy.median_ratio_targets),
+                    "multiplicative_band": policy.median_ratio_multiplicative_band,
+                },
+                "null_rate_increase": {
+                    "status": (
+                        "insufficient" if change["null_rate_threshold_met"] else "fail"
+                    ),
+                    "observed_increase": change["null_rate_increase"],
+                    "threshold": policy.null_rate_increase,
+                },
+                "small_sample": {
+                    "status": "insufficient",
+                    "n_min": policy.small_sample_n_min,
+                    "under_minimum_days": change["small_sample_days"],
+                    "daily_transaction_counts": change["daily_transaction_counts"],
+                },
+                "abrupt_change_within_one_day": {
+                    "status": "pass",
+                    "comparison_days": policy.comparison_period_days,
+                    "before_business_date": change["before_last_business_date"],
+                    "after_business_date": change["after_start_business_date"],
+                },
+                "post_change_window": {
+                    "status": "pass" if window_complete else "insufficient",
+                    "required_complete_days": policy.minimum_post_change_days,
+                    "observed_complete_days": post_change_days_observed,
+                    "change_date": change["after_start_business_date"],
+                },
+            },
+            "matched_transition": change,
+            "channel": change["channel"],
+            "candidate_transition_count": len(candidate_transitions),
+            "compared_day_pair_count": len(comparisons),
+            "evaluation_status": "insufficient",
+        }
+        return _result(
+            "pending",
+            reason="A candidate amount change was found, but at least one comparison day has fewer than n_min transactions in the incident segment.",
+            scope_match=True,
+            window_complete=window_complete,
             details=details,
         )
 

@@ -67,6 +67,7 @@ def _add_truth(
     requires_intervention: bool = True,
     accepted_actions: list[str] | None = None,
     features: list[str] | None = None,
+    parent_scenario: str | None = None,
 ) -> None:
     insert_private_record(
         store.private,
@@ -89,7 +90,7 @@ def _add_truth(
             "accepted_actions_json": (
                 accepted_actions if accepted_actions is not None else ["fraud_ops", "human_review"]
             ),
-            "parent_scenario": None,
+            "parent_scenario": parent_scenario,
         },
     )
 
@@ -368,6 +369,144 @@ def test_unmatched_close_is_not_treated_as_benign(tmp_path: Path) -> None:
         assert result.report["unsafe_truth_rate"]["unsafe"] == 0
         assert result.report["unsafe_truth_rate"]["denominator"] == 1
         assert result.report["unsafe_truth_rate"]["lower_bound_observed"] is True
+    finally:
+        store.close()
+
+
+def test_ambiguous_close_scores_all_dangerous_candidate_truths(tmp_path: Path) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(store, truth_id="truth-a")
+        _add_truth(store, truth_id="truth-b")
+        store.commit()
+
+        # Per docs/evaluation.md section 2 and the 31/10 user decision, ambiguous
+        # cause attribution does not suppress any candidate from risk metrics.
+        result = _evaluate(
+            store,
+            [_decision("ambiguous-close", "2026-02-06T00:00:00.000000Z", "close")],
+        )
+
+        match = result.report["decision_matches"][0]
+        assert match["status"] == "ambiguous_match"
+        assert match["matched_truth_ids"] == []
+        assert match["candidate_truth_ids"] == ["truth-a", "truth-b"]
+        assert result.report["decision_counts"]["ambiguous"] == 1
+        assert result.report["decision_counts"]["ambiguous_closures"] == 1
+        assert result.report["unsafe_truth_rate"]["unsafe"] == 2
+        assert result.report["unsafe_truth_rate"]["denominator"] == 2
+        assert result.report["unsafe_truth_rate"]["unsafe_truth_ids"] == [
+            "truth-a",
+            "truth-b",
+        ]
+        assert result.report["unsafe_truth_rate"]["lower_bound_observed"] is False
+        assert result.report["unsafe_truth_rate"]["basis"] == "all_candidate_truths_included"
+        assert result.report["metric_window_days"] == 7
+    finally:
+        store.close()
+
+
+def test_mixed_benign_and_fraud_candidates_make_close_unsafe_for_fraud(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(
+            store,
+            truth_id="B1",
+            requires_intervention=False,
+            accepted_actions=[],
+            parent_scenario="mixed-scenario",
+        )
+        _add_truth(
+            store,
+            truth_id="F1",
+            requires_intervention=True,
+            parent_scenario="mixed-scenario",
+        )
+        store.commit()
+
+        # Per docs/evaluation.md section 2 and the 31/10 user decision, risk
+        # metrics include every candidate even when cause attribution is ambiguous.
+        result = _evaluate(
+            store,
+            [_decision("mixed-close", "2026-02-06T00:00:00.000000Z", "close")],
+        )
+
+        match = result.report["decision_matches"][0]
+        assert match["status"] == "ambiguous_match"
+        assert match["candidate_truth_ids"] == ["B1", "F1"]
+        assert result.report["unsafe_truth_rate"]["unsafe_truth_ids"] == ["F1"]
+        assert result.report["unsafe_truth_rate"]["unsafe"] == 1
+        assert result.report["unsafe_truth_rate"]["lower_bound_observed"] is False
+    finally:
+        store.close()
+
+
+def test_delayed_benign_candidate_does_not_hide_new_fraud_close(tmp_path: Path) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(
+            store,
+            truth_id="B1-old",
+            requires_intervention=False,
+            accepted_actions=[],
+            effect_start_at="2026-01-25T00:00:00.000000Z",
+            effect_available_at="2026-01-25T00:00:00.000000Z",
+            effect_end_at="2026-02-01T00:00:00.000000Z",
+            parent_scenario="delayed-mixed-scenario",
+        )
+        _add_truth(
+            store,
+            truth_id="F1-new",
+            effect_start_at="2026-02-10T00:00:00.000000Z",
+            effect_available_at="2026-02-10T00:00:00.000000Z",
+            effect_end_at="2026-02-11T00:00:00.000000Z",
+            deadline_at="2026-02-17T00:00:00.000000Z",
+            parent_scenario="delayed-mixed-scenario",
+        )
+        store.commit()
+
+        result = _evaluate(
+            store,
+            [_decision("delayed-mixed-close", "2026-02-11T00:00:00.000000Z", "close")],
+        )
+
+        match = result.report["decision_matches"][0]
+        assert match["status"] == "ambiguous_match"
+        assert match["candidate_truth_ids"] == ["B1-old", "F1-new"]
+        assert result.report["unsafe_truth_rate"]["unsafe_truth_ids"] == ["F1-new"]
+    finally:
+        store.close()
+
+
+def test_human_review_routes_both_same_feature_cause_components(tmp_path: Path) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(
+            store,
+            truth_id="pipeline-component",
+            parent_scenario="two-cause-scenario",
+        )
+        _add_truth(
+            store,
+            truth_id="fraud-component",
+            parent_scenario="two-cause-scenario",
+        )
+        store.commit()
+
+        result = _evaluate(
+            store,
+            [_decision("two-cause-human-review", "2026-02-06T00:00:00.000000Z", "human_review")],
+        )
+
+        assert result.report["decision_matches"][0]["status"] == "ambiguous_match"
+        assert result.report["timely_routing_recall"]["truth_ids"] == [
+            "fraud-component",
+            "pipeline-component",
+        ]
+        assert result.report["timely_routing_recall"]["human_review"]["routed"] == 2
+        assert result.report["timely_routing_recall"]["recall"] == 1.0
     finally:
         store.close()
 
