@@ -1,0 +1,9 @@
+schema_version: 1
+
+benchmark:
+  cost_cap_usd:
+    value: 10.0
+    unit: USD
+    provenance:
+      kind: locked_contract
+      reference: MASTER_PLAN.md, section 5.

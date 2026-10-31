@@ -19,6 +19,7 @@ from triage.runbooks import load_triage_config
 
 SCHEMA_VERSION = 1
 CONFIG_FILES = (
+    "configs/benchmark.yaml",
     "configs/episodes.yaml",
     "configs/llm.yaml",
     "configs/model.yaml",
@@ -32,6 +33,7 @@ POLICY_PROVIDERS = {
     "rule_agent_fake": ("fake", "fake/payguard-p4-round1"),
 }
 ROLES = frozenset({"development", "calibration", "test"})
+BENCHMARK_STATE_DIR_ENV = "PAYGUARD_BENCHMARK_STATE_DIR"
 
 
 class RunIdentityError(ValueError):
@@ -40,6 +42,33 @@ class RunIdentityError(ValueError):
 
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def benchmark_state_directory(benchmark_root: str | Path | None = None) -> Path:
+    """Return the one shared cost/role/lock directory, independent of run identity."""
+    configured = os.environ.get(BENCHMARK_STATE_DIR_ENV)
+    state_dir = (
+        Path(configured).expanduser().resolve()
+        if configured and configured.strip()
+        else (Path.home() / ".payguard-benchmark").resolve()
+    )
+    if benchmark_root is not None:
+        root = Path(benchmark_root).expanduser().resolve()
+        try:
+            state_dir.relative_to(root)
+        except ValueError:
+            pass
+        else:
+            raise RunIdentityError(
+                f"shared benchmark state directory must be outside benchmark root {root}"
+            )
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise RunIdentityError(
+            f"cannot create shared benchmark state directory {state_dir}: {exc}"
+        ) from exc
+    return state_dir
 
 
 def _canonical(value: Any) -> bytes:
@@ -205,29 +234,28 @@ def run_fingerprint(identity: Mapping[str, Any], *, base_fingerprint: str) -> st
     return _sha256(_canonical({"identity": identity, "base_fingerprint": base_fingerprint}))
 
 
-def _locks_directory(root: Path) -> Path:
-    return root / "locks"
-
-
 def _lock_file(root: Path, kind: str, policy_name: str | None = None) -> Path:
+    state_dir = benchmark_state_directory(root)
     if kind == "prompt-rule":
         if policy_name is not None:
             raise RunIdentityError("prompt-rule lock is shared and does not take --policy")
-        return _locks_directory(root) / "prompt-rule.json"
+        return state_dir / "locks" / "prompt-rule.json"
     if kind == "policy":
         if policy_name not in POLICY_PROVIDERS:
             raise RunIdentityError("policy lock requires a supported --policy")
-        return _locks_directory(root) / "policy" / f"{policy_name}.json"
+        return state_dir / "locks" / "policy" / f"{policy_name}.json"
     raise RunIdentityError(f"unknown lock kind: {kind!r}")
 
 
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+            + "\n"
+        )
     temporary.replace(path)
 
 
@@ -263,7 +291,8 @@ def create_lock(
             raise RunIdentityError(f"existing lock marker is invalid: {lock_path}") from exc
         if existing.get("identity") != identity:
             raise RunIdentityError(
-                f"lock already exists with different hashes: {lock_path}; use a new benchmark root"
+                f"global benchmark lock already exists with different hashes: {lock_path}; "
+                "a new benchmark root cannot reset it"
             )
         return lock_path
     _atomic_write_json(lock_path, marker)
@@ -325,8 +354,8 @@ def assert_role_access(
 
 
 @contextmanager
-def _role_ledger_lock(root: Path) -> Iterator[None]:
-    lock_path = root / "seed-role-ledger.json.lock"
+def _role_ledger_lock(state_dir: Path) -> Iterator[None]:
+    lock_path = state_dir / "seed-role-ledger.json.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -346,7 +375,8 @@ def record_role_touches(
     usage: str,
 ) -> None:
     root = Path(benchmark_root).expanduser().resolve()
-    path = root / "seed-role-ledger.json"
+    state_dir = benchmark_state_directory(root)
+    path = state_dir / "seed-role-ledger.json"
     roles = {
         role: sorted(set(episode_ids))
         for role, episode_ids in sorted(role_episode_ids.items())
@@ -355,13 +385,17 @@ def record_role_touches(
     if not roles:
         return
     entry_material = {
+        "benchmark_root": str(root),
+        "code_identity_hash": _sha256(
+            _canonical(current_hashes(benchmark_root=root))
+        ),
         "operation": operation,
         "policy_name": policy_name,
         "roles": roles,
         "usage": usage,
     }
     entry_id = _sha256(_canonical(entry_material))
-    with _role_ledger_lock(root):
+    with _role_ledger_lock(state_dir):
         if path.exists():
             try:
                 ledger = json.loads(path.read_text(encoding="utf-8"))

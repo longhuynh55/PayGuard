@@ -49,8 +49,10 @@ class DurableCostLedger:
         self.cap_usd = _money(cap_usd)
         if self.cap_usd <= 0:
             raise CostLedgerError("cost cap must be positive")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.touch(exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        os.close(descriptor)
+        os.chmod(self.path, 0o600)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -101,7 +103,11 @@ class DurableCostLedger:
                 reservation_id = event.get("reservation_id")
                 if reservation_id not in reservations or reservation_id in settled:
                     raise CostLedgerError("cost ledger settles an unknown reservation")
-                spent += _money(event.get("amount_usd", "-1"))
+                settled_amount = _money(event.get("amount_usd", "-1"))
+                actual_overrun = settled_amount > reservations[reservation_id]
+                if "overrun" in event and event["overrun"] is not actual_overrun:
+                    raise CostLedgerError("cost ledger overrun flag does not match its reservation")
+                spent += settled_amount
                 settled.add(reservation_id)
             elif kind == "fake_call":
                 if _money(event.get("amount_usd", "-1")) != 0:
@@ -163,6 +169,11 @@ class DurableCostLedger:
                         policy=policy,
                     )
                 )
+                if spent > self.cap_usd:
+                    raise CostLimitExceeded(
+                        "durable LLM cost ledger has already exceeded the benchmark cap "
+                        f"({_format_money(spent)} > {_format_money(self.cap_usd)} USD)"
+                    )
                 raise CostLimitExceeded(
                     "durable LLM cost ledger would exceed the benchmark cap "
                     f"({_format_money(spent + pending)} + {_format_money(amount)} > "
@@ -194,7 +205,7 @@ class DurableCostLedger:
             _, _, settled, *_ = self._state_locked()
             events = self._events_locked()
             reservations = {
-                event["reservation_id"]
+                event["reservation_id"]: _money(event.get("amount_usd", "-1"))
                 for event in events
                 if event.get("event") == "reserve"
             }
@@ -208,6 +219,7 @@ class DurableCostLedger:
                     model_slug=model_slug,
                     policy=policy,
                     conservative=conservative,
+                    overrun=amount > reservations[reservation_id],
                 )
             )
 
@@ -226,6 +238,18 @@ class DurableCostLedger:
     def snapshot(self) -> dict[str, Any]:
         with self._locked():
             spent, pending, _, fake_calls, blocked = self._state_locked()
+            events = self._events_locked()
+        reservation_amounts = {
+            event["reservation_id"]: _money(event["amount_usd"])
+            for event in events
+            if event.get("event") == "reserve"
+        }
+        overrun_amounts = [
+            _money(event["amount_usd"]) - reservation_amounts[event["reservation_id"]]
+            for event in events
+            if event.get("event") == "settle"
+            and _money(event["amount_usd"]) > reservation_amounts[event["reservation_id"]]
+        ]
         reserved = pending
         committed = spent + reserved
         remaining = max(Decimal(0), self.cap_usd - committed)
@@ -237,5 +261,8 @@ class DurableCostLedger:
             "remaining_usd": _format_money(remaining),
             "fake_call_count": fake_calls,
             "blocked_request_count": blocked,
+            "overrun": bool(overrun_amounts),
+            "overrun_count": len(overrun_amounts),
+            "overrun_usd": _format_money(sum(overrun_amounts, Decimal(0))),
         }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import sqlite3
@@ -57,6 +58,20 @@ def test_write_attach_and_pragma_statements_are_rejected(p1_2_store) -> None:
 
     assert all(not result.ok for result in results)
     assert [result.error.code for result in results] == ["sql_not_read_only"] * 4
+
+
+def test_truth_database_attach_is_rejected_by_run_sql(p1_2_store) -> None:
+    private_path = p1_2_store.private_path
+    before = hashlib.sha256(private_path.read_bytes()).hexdigest()
+    escaped_path = str(private_path).replace("'", "''")
+    result = _run(
+        p1_2_store,
+        f"ATTACH DATABASE '{escaped_path}' AS truth",
+        question="Attach the evaluator truth database",
+    )
+
+    assert result.error and result.error.code == "sql_not_read_only"
+    assert hashlib.sha256(private_path.read_bytes()).hexdigest() == before
 
 
 def test_readonly_authorizer_blocks_main_database_and_multiple_statements(p1_2_store) -> None:

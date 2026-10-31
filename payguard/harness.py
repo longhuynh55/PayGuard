@@ -22,13 +22,17 @@ from triage.agent import build_agent_provider
 from triage.cost_ledger import DurableCostLedger
 from triage.runner import run_triage
 
+from payguard.config import load_benchmark_cost_cap
 from payguard.identity import (
     POLICY_PROVIDERS,
     ROLES,
     RunIdentityError,
     assert_role_access,
+    benchmark_state_directory,
     current_hashes,
     current_run_identity,
+    find_harness_root,
+    policy_name_for_run,
     policy_identity,
     record_role_touches,
     run_fingerprint,
@@ -36,7 +40,7 @@ from payguard.identity import (
 
 
 PROFILE = "smoke"
-BENCHMARK_COST_CAP_USD = 10.0
+BENCHMARK_COST_CAP_USD = load_benchmark_cost_cap()
 MODEL_RUN_ID = "payguard-p5"
 ROOT = Path(__file__).resolve().parents[1]
 SIMULATOR_CONFIG = ROOT / "configs/simulator.yaml"
@@ -398,6 +402,95 @@ def _ensure_policy_manifest(
     _write_json(path, manifest)
 
 
+def _assert_policy_decisions_match_manifest(
+    operational_path: Path,
+    manifest: Mapping[str, Any],
+) -> None:
+    if not operational_path.is_file():
+        return
+    with _connection(operational_path, read_only=True) as operational:
+        rows = operational.execute(
+            "SELECT DISTINCT source, policy_version, model_slug FROM decisions "
+            "ORDER BY source, policy_version, model_slug"
+        ).fetchall()
+    expected_version = manifest.get("policy_version")
+    expected_model_slug = manifest.get("model_slug")
+    mismatches = [
+        (str(row[0]), row[1], row[2])
+        for row in rows
+        if row[1] != expected_version
+        or (row[0] == "agent" and row[2] != expected_model_slug)
+        or (row[0] == "rule" and row[2] is not None)
+    ]
+    if mismatches:
+        raise RunIdentityError(
+            "policy resume refused: decision rows do not match run-manifest.json; "
+            f"expected policy_version={expected_version!r}, agent model_slug="
+            f"{expected_model_slug!r}, found {mismatches!r}"
+        )
+
+
+def verify_harness_policy_run(policy_dir: str | Path) -> dict[str, Any]:
+    """Verify current identity and persisted decisions before standalone triage CLI use."""
+    run_path = Path(policy_dir).expanduser().resolve()
+    benchmark_root = find_harness_root(run_path)
+    if benchmark_root is None:
+        raise RunIdentityError(f"not a P5 harness policy run: {run_path}")
+    policy_name = policy_name_for_run(run_path)
+    if policy_name not in POLICY_PROVIDERS:
+        raise RunIdentityError("P5 harness triage requires a policy run directory")
+    if run_path.parent != benchmark_root / "policies" or run_path.name != policy_name:
+        raise RunIdentityError("P5 harness triage requires a policy run directory")
+
+    hashes = current_hashes(benchmark_root=benchmark_root)
+    harness_manifest = _read_json(benchmark_root / "harness-manifest.json")
+    if (
+        harness_manifest.get("schema_version") != 1
+        or harness_manifest.get("profile") != PROFILE
+        or harness_manifest.get("hashes") != hashes
+    ):
+        raise RunIdentityError(
+            "harness resume refused: current code/config/prompt/sampling hashes "
+            "do not match harness-manifest.json"
+        )
+
+    base_dir = benchmark_root / "base"
+    base_manifest = _validate_static_identity(
+        base_dir / "base-manifest.json",
+        hashes,
+        label="BASE",
+    )
+    base_fingerprint = base_manifest.get("input_fingerprint")
+    if not isinstance(base_fingerprint, str) or len(base_fingerprint) != 64:
+        raise RunIdentityError("BASE manifest has no valid input fingerprint")
+    base_database = base_dir / "operational" / "observations.sqlite"
+    _assert_base_is_frozen(base_database, base_fingerprint)
+
+    identity = current_run_identity(policy_name, benchmark_root=benchmark_root)
+    expected_manifest = _policy_manifest(
+        policy_name,
+        identity,
+        base_fingerprint=base_fingerprint,
+    )
+    manifest_path = run_path / "run-manifest.json"
+    actual_manifest = _read_json(manifest_path)
+    if actual_manifest != expected_manifest:
+        raise RunIdentityError(
+            f"policy resume refused: manifest mismatch in {run_path}; "
+            "use a new benchmark root for changed inputs or policy"
+        )
+
+    operational_path = run_path / "operational" / "observations.sqlite"
+    if operational_path.is_file():
+        actual_fingerprint = _input_fingerprint(operational_path)
+        if actual_fingerprint != base_fingerprint:
+            raise RunIdentityError(
+                f"policy {policy_name!r} input fingerprint differs from frozen BASE"
+            )
+        _assert_policy_decisions_match_manifest(operational_path, actual_manifest)
+    return actual_manifest
+
+
 def _decision_report_path(base_dir: Path, policy_name: str, analysis_role: str) -> Path:
     name = "decisions.json" if analysis_role == "development" else f"decisions_{analysis_role}.json"
     return (
@@ -466,6 +559,7 @@ def _policy_run(
         raise RunIdentityError(
             f"policy {policy_name!r} input fingerprint differs from frozen BASE"
         )
+    _assert_policy_decisions_match_manifest(operational_path, manifest)
 
     role_episode_ids = _episode_roles(operational_path)
     assert_role_access(
@@ -477,14 +571,14 @@ def _policy_run(
 
     provider_name = str(POLICY_PROVIDERS[policy_name][0])
     ledger = DurableCostLedger(
-        root / "cost-ledger.jsonl",
+        benchmark_state_directory(root) / "cost-ledger.jsonl",
         cap_usd=BENCHMARK_COST_CAP_USD,
     )
     provider = build_agent_provider(
         provider_name,
         operational_path,
         llm_config_path=LLM_CONFIG,
-        cost_ledger=ledger if provider_name == "fake" else None,
+        cost_ledger=ledger,
         ledger_policy=policy_name,
         cost_cap_usd=BENCHMARK_COST_CAP_USD,
     )
@@ -522,6 +616,7 @@ def _policy_run(
         role_episode_ids,
         analysis_role,
     )
+    cost_summary = ledger.snapshot()
     report = {
         "schema_version": 1,
         "profile": PROFILE,
@@ -536,7 +631,8 @@ def _policy_run(
         "base_pipeline": dict(base_pipeline),
         "triage": triage_summary,
         "evaluation": evaluation,
-        "cost_ledger": ledger.snapshot(),
+        "cost_ledger": cost_summary,
+        "cost_overrun": cost_summary["overrun"],
     }
     persisted_report = {
         **report,
@@ -615,6 +711,7 @@ def run_benchmark(
         "input_fingerprint": report["input_fingerprint_after"],
         "evaluation_report": report["evaluation"]["report_path"],
         "analysis_role": analysis_role,
+        "cost_overrun": report["cost_overrun"],
     }
     summary["policy_input_fingerprints"] = {
         name: value["input_fingerprint"] for name, value in sorted(policies.items())
