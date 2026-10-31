@@ -1,4 +1,4 @@
-"""Round-one incident-to-truth matching; this is the only truth reader."""
+"""Incident-to-truth matching; this is the only truth reader."""
 
 from __future__ import annotations
 
@@ -12,7 +12,11 @@ import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import yaml
+
+from model.features import FEATURE_LOOKBACK_DAYS
 from simulator.storage import utc_timestamp
+from simulator.validate import RUN_METADATA_KEY
 
 
 # P3 metrics use aggregate feature names, while P1 truth records the changed
@@ -35,6 +39,7 @@ class PrivateEvaluationData:
     episode_ids: tuple[str, ...]
     templates: Mapping[str, str]
     episode_end_at: Mapping[str, str]
+    metric_window_days: int
     truth_rows: tuple[dict[str, Any], ...]
 
 
@@ -57,6 +62,123 @@ def _parse_timestamp(value: Any, *, field: str) -> tuple[datetime, str]:
 def normalize_as_of_time(value: str) -> str:
     """Return a canonical UTC cutoff for filtering available P3.3 snapshots."""
     return _parse_timestamp(value, field="as_of_time")[1]
+
+
+def _public_metric_window_days() -> int:
+    """Read the locked public monitoring window, without caching run state."""
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "monitoring.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise EvaluationMatcherError(
+            f"could not read public monitoring config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(config, dict) or config.get("schema_version") != 1:
+        raise EvaluationMatcherError(
+            "public monitoring config schema_version must be 1"
+        )
+    window = config.get("window_days")
+    days = window.get("value") if isinstance(window, dict) else None
+    provenance = window.get("provenance") if isinstance(window, dict) else None
+    if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+        raise EvaluationMatcherError(
+            "public monitoring config window_days.value must be a positive integer"
+        )
+    if not isinstance(provenance, dict) or provenance.get("kind") != "contract":
+        raise EvaluationMatcherError(
+            "public monitoring config window_days must be a locked contract value"
+        )
+    return days
+
+
+def _window_days_from_config(
+    config: Mapping[str, Any], *, source: str
+) -> int | None:
+    """Extract an optional resolved monitoring window from a run config."""
+    for key in ("monitoring", "monitoring_config"):
+        monitoring_config = config.get(key)
+        if isinstance(monitoring_config, Mapping) and "window_days" in monitoring_config:
+            break
+    else:
+        monitoring_config = config
+        if "window_days" not in monitoring_config:
+            return None
+    if not isinstance(monitoring_config, Mapping):
+        return None
+    window = monitoring_config["window_days"]
+    days = window.get("value") if isinstance(window, Mapping) else window
+    if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+        raise EvaluationMatcherError(
+            f"{source} window_days must be a positive integer"
+        )
+    return days
+
+
+def _resolved_metric_window_days(
+    connection: sqlite3.Connection, manifest_configs: Iterable[str]
+) -> int:
+    """Use run-resolved settings when present and verify the public contract."""
+    public_days = _public_metric_window_days()
+    resolved_values: list[tuple[str, int]] = []
+
+    for index, config_json in enumerate(manifest_configs):
+        try:
+            snapshot = json.loads(config_json)
+        except json.JSONDecodeError as exc:
+            raise EvaluationMatcherError(
+                f"episode manifest config {index} is not valid JSON"
+            ) from exc
+        if isinstance(snapshot, Mapping):
+            days = _window_days_from_config(
+                snapshot, source=f"episode manifest config {index}"
+            )
+            if days is not None:
+                resolved_values.append((f"episode manifest config {index}", days))
+
+    try:
+        run_metadata = connection.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?",
+            (RUN_METADATA_KEY,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise EvaluationMatcherError("could not read private run metadata") from exc
+    if run_metadata is not None:
+        try:
+            metadata = json.loads(run_metadata["value_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise EvaluationMatcherError(
+                f"run metadata {RUN_METADATA_KEY!r} is not valid JSON"
+            ) from exc
+        if isinstance(metadata, Mapping):
+            resolved = metadata.get("resolved_config")
+            if isinstance(resolved, Mapping):
+                days = _window_days_from_config(
+                    resolved,
+                    source=f"run metadata {RUN_METADATA_KEY!r} resolved_config",
+                )
+                if days is not None:
+                    resolved_values.append(
+                        (
+                            f"run metadata {RUN_METADATA_KEY!r} resolved_config",
+                            days,
+                        )
+                    )
+
+    distinct_values = {days for _, days in resolved_values}
+    if len(distinct_values) > 1:
+        details = ", ".join(f"{source}={days}" for source, days in resolved_values)
+        raise EvaluationMatcherError(
+            f"run monitoring window configs disagree: {details}"
+        )
+    if distinct_values:
+        resolved_days = next(iter(distinct_values))
+        if resolved_days != public_days:
+            raise EvaluationMatcherError(
+                "run-resolved monitoring window does not match the locked public "
+                f"contract ({resolved_days} != {public_days} days)"
+            )
+        return resolved_days
+    return public_days
 
 
 def _episode_end_from_config(config_json: str, *, episode_id: str) -> str:
@@ -136,6 +258,10 @@ def load_private_evaluation_data(
                 row["config_json"], episode_id=episode_id
             )
 
+        metric_window_days = _resolved_metric_window_days(
+            connection, (row["config_json"] for row in manifests)
+        )
+
         truth_rows = connection.execute(
             f"SELECT * FROM incident_truth WHERE episode_id IN ({placeholders}) "
             "ORDER BY episode_id, incident_truth_id",
@@ -162,6 +288,7 @@ def load_private_evaluation_data(
         episode_ids=ids,
         templates=templates,
         episode_end_at=episode_ends,
+        metric_window_days=metric_window_days,
         truth_rows=tuple(normalized_truth),
     )
 
@@ -207,7 +334,11 @@ def _snapshot_alert_ids(value: Any, *, incident_id: str) -> tuple[str, ...]:
 
 
 def _truth_window(
-    truth: Mapping[str, Any], *, episode_end_at: str
+    truth: Mapping[str, Any],
+    *,
+    episode_end_at: str,
+    metric_window_days: int,
+    feature_lookback_days: int,
 ) -> tuple[datetime, datetime]:
     truth_id = truth.get("incident_truth_id")
     effect_start, _ = _parse_timestamp(
@@ -231,7 +362,9 @@ def _truth_window(
         raise EvaluationMatcherError(
             f"truth effect interval ends before it can become available: {truth_id!r}"
         )
-    return start, end
+    return start, end + timedelta(
+        days=metric_window_days + feature_lookback_days
+    )
 
 
 def _segment_matches(incident_segment: str, affected_segments: tuple[str, ...]) -> bool:
@@ -281,16 +414,23 @@ def match_incidents(
     episode_ids: Iterable[str],
     episode_end_at: Mapping[str, str],
     as_of_time: str,
+    metric_window_days: int,
 ) -> tuple[dict[str, Any], ...]:
     """Match P3.3 incident snapshots to selected private truths.
 
-    Round one emits only ``matched`` and ``unmatched``. Multi-truth attribution
-    is retained as links; ambiguity classification and delayed-window effects
-    beyond the current interval rule remain round-two work.
+    The truth interval includes the public monitoring window and the monitored
+    feature's own lookback. Ambiguous candidates remain available for risk and
+    routing metrics; multiple incidents may independently match one truth.
     """
     selected_ids = set(episode_ids)
     _, as_of = _parse_timestamp(as_of_time, field="as_of_time")
     as_of_dt, _ = _parse_timestamp(as_of, field="as_of_time")
+    if (
+        isinstance(metric_window_days, bool)
+        or not isinstance(metric_window_days, int)
+        or metric_window_days <= 0
+    ):
+        raise EvaluationMatcherError("metric_window_days must be a positive integer")
 
     truth_by_episode: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     seen_truth_ids: set[str] = set()
@@ -391,6 +531,7 @@ def match_incidents(
                 f"incident {incident_id!r} has no visible alert snapshot"
             )
         incident_window = (min(alert_available_times), max(alert_available_times))
+        feature_lookback_days = FEATURE_LOOKBACK_DAYS.get(first["feature"], 0)
         matched_truth_ids: list[str] = []
         for truth in sorted(
             truth_by_episode.get(first["episode_id"], ()),
@@ -399,6 +540,8 @@ def match_incidents(
             truth_window = _truth_window(
                 truth,
                 episode_end_at=episode_end_at[first["episode_id"]],
+                metric_window_days=metric_window_days,
+                feature_lookback_days=feature_lookback_days,
             )
             if _scope_matches(
                 first,
@@ -407,6 +550,13 @@ def match_incidents(
                 incident_window=incident_window,
             ):
                 matched_truth_ids.append(str(truth["incident_truth_id"]))
+        candidate_truth_ids = sorted(matched_truth_ids)
+        if not candidate_truth_ids:
+            status = "unmatched"
+        elif len(candidate_truth_ids) == 1:
+            status = "matched"
+        else:
+            status = "ambiguous_match"
         matches.append(
             {
                 "incident_id": incident_id,
@@ -415,8 +565,9 @@ def match_incidents(
                 "segment": first["segment"],
                 "incident_start_at": utc_timestamp(incident_window[0]),
                 "incident_end_at": utc_timestamp(incident_window[1]),
-                "status": "matched" if matched_truth_ids else "unmatched",
-                "matched_truth_ids": matched_truth_ids,
+                "status": status,
+                "matched_truth_ids": candidate_truth_ids if status == "matched" else [],
+                "candidate_truth_ids": candidate_truth_ids,
             }
         )
     return tuple(matches)

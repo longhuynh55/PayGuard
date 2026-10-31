@@ -52,7 +52,7 @@ Ví dụ cùng một sự cố có một lần đóng sai: policy tạo 7 incide
 
 Không có alert không tính là unsafe closure; vẫn là bỏ sót trong detection/timely-routing recall. Luôn báo các metric này cùng nhau để policy không phát alert/không đóng không được diễn giải thành thành công nghiệp vụ.
 
-Nếu có closure `ambiguous_match` / `unmatched` chưa phân xử được truth: báo số lượng theo policy, nguồn và độ bao phủ đánh giá. Chỉ tính được unsafe truth/episode rate quan sát trên các liên kết xác nhận thì đánh dấu là **cận dưới quan sát**, không gán closure chưa biết là benign và không gọi zero quan sát là không có lỗi. Nếu có tập truth ứng viên, báo thêm kịch bản bảo thủ tính mọi liên kết ứng viên nguy hiểm là unsafe; thiếu tập ứng viên thì không tuyên bố cận trên đầy đủ. Các ca này vẫn trong workload/chi phí.
+Nếu closure `ambiguous_match` có tập truth ứng viên, metric rủi ro và routing tính mọi ứng viên theo mục 2; ambiguity chỉ loại ca khỏi chấm nguyên nhân, reward benign và utility. Closure `unmatched` không có ứng viên nên vẫn nằm trong workload, không được xem là benign, và làm unsafe truth/episode rate chỉ là **cận dưới quan sát**. Báo số ca unmatched theo policy, nguồn và độ bao phủ; zero quan sát không có nghĩa là không có lỗi.
 
 **Routing đúng hạn:** có ít nhất một quyết định trên incident ghép với sự cố (kể cả incident con) thỏa đồng thời:
 1. action ∈ `accepted_actions` của sự cố;
