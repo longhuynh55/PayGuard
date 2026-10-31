@@ -878,6 +878,13 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         assert decision["action"] != "close"
         if unit_check["status"] == "pass":
             assert decision["action"] == "data_ticket"
+        elif unit_check["status"] == "pending":
+            # User decision 31/10/2026: later pipeline incidents without the injector jump
+            # may be small-sample insufficient and must remain with human review.
+            assert not window_contains_jump
+            assert unit_check["details"]["evaluation_status"] == "insufficient"
+            assert decision["action"] == "human_review"
+            assert decision["action"] not in {"data_ticket", "close"}
         else:
             assert unit_check["status"] == "not_applicable"
             comparisons = unit_check["details"].get("comparisons", [])
@@ -887,6 +894,7 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
                 for item in comparisons
             )
             assert decision["action"] == "human_review"
+            assert decision["action"] not in {"data_ticket", "close"}
 
     first_jump_decisions = []
     for episode_id in sorted(pipeline_ids):
@@ -913,10 +921,6 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         assert checks["unit_or_null_change"]["status"] == "not_applicable"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="unit_or_null_change lacks minimum transaction support; fixed by BACKLOG-5",
-)
 def test_clean_ep0001_card_window_minimum_support_false_positive(
     _smoke_runbook_context,
 ) -> None:
@@ -925,4 +929,11 @@ def test_clean_ep0001_card_window_minimum_support_false_positive(
         _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
     ]
     checks = check_unit_or_null_change(store.operational, incident)
-    assert checks["unit_or_null_change"]["status"] == "not_applicable"
+    # User decision 31/10/2026: this known sparse card case follows small_sample → insufficient.
+    unit_check = checks["unit_or_null_change"]
+    assert unit_check["status"] == "pending"
+    assert unit_check["details"]["evaluation_status"] == "insufficient"
+    decision = _gate(incident, checks)
+    assert decision["action"] == "human_review"
+    assert decision["action"] not in {"data_ticket", "close"}
+    assert decision["evidence_status"] == "insufficient"

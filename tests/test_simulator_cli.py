@@ -26,10 +26,9 @@ _EXPECTED_SMOKE_DATA_TICKETS = {
     ("ep-0002", "incident-ea21a6a3c09cbde42c6a40b1"),
     ("ep-0004", "incident-553672f4a8f9fcd91ee734d2"),
     ("ep-0004", "incident-7cfa5401d22e49b6c3a7faa1"),
-    # Low-support coincidence: QR count shifts from n=3 to n=1 in ep-0002.
-    ("ep-0002", "incident-e346f09c6706875fcc708684"),
-    # False positive, fixed by BACKLOG-5 (minimum transaction support).
-    _KNOWN_CLEAN_MINIMUM_SUPPORT_FP,
+    # BACKLOG-5 removes ep-0002/incident-e346f09c6706875fcc708684: QR n=3->1
+    # while both days already have the x100 shift, a low-support coincidence per review finding 2.
+    # Source: review/findings/P1.3-r2-r1.md.
 }
 
 
@@ -45,9 +44,10 @@ def _assert_smoke_data_ticket_baseline(
                 "WHERE template IN ('clean', 'seasonal')"
             )
         }
+    assert _KNOWN_CLEAN_MINIMUM_SUPPORT_FP not in data_ticket_pairs
     assert {
         pair for pair in data_ticket_pairs if pair[0] in non_pipeline_episode_ids
-    } == {_KNOWN_CLEAN_MINIMUM_SUPPORT_FP}
+    } == set()
 
 
 def _cli(*arguments: str) -> subprocess.CompletedProcess[str]:
