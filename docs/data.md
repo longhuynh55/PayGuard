@@ -139,7 +139,24 @@ Sinh sự kiện nhãn tới ít nhất `last_transaction_at + H` để đánh g
 ## 4. Episode — "thế giới song song"
 
 - Giữ nguyên thế giới (khách hàng, merchant, hành vi, mạng người nhận) và lịch sử trước T0; **sinh lại 30 ngày sau T0** cho mỗi episode với seed riêng và 0–2 sự cố chèn vào.
-- **Pilot 60 episode:** 20 clean + 40 injected (role 12/24/24, clean 4/8/8). **Cơ cấu injected — người dùng chốt 31/10/2026** (thay "4 episode hai nguyên nhân" bản đầu; lý do: [P5.0a](p5-implementation.md) chỉ ra so sánh UQ chỉ khác 0 ở ca fraud trùng ngày lịch): **10** episode hai nguyên nhân fraud + mùa vụ (dev 2 / cal 4 / test 4) và **5** episode fraud một nguyên nhân trùng ngày `business_calendar` (1 / 2 / 2); bớt tương ứng ở nhóm rule đã phủ (`data_pipeline`, `fraud_surge`), mỗi nhóm vẫn ≥ 1 dev / 2 cal / 2 test. Tỉ lệ gộp vì vậy không đại diện phân phối tự nhiên: luôn báo theo nhóm và ghi cơ cấu. Số episode cuối cùng do ngân sách LLM quyết định, 60 là sàn ([MASTER_PLAN.md](../MASTER_PLAN.md) mục Ngân sách). Chia vai trò development/calibration/test: [evaluation.md](evaluation.md).
+- **Pilot 60 episode:** 20 clean + 40 injected (role 12/24/24, clean 4/8/8). **Cơ cấu injected — người dùng chốt 31/10/2026** (thay "4 episode hai nguyên nhân" bản đầu; lý do: [P5.0a](p5-implementation.md) chỉ ra so sánh UQ chỉ khác 0 ở ca fraud trùng ngày lịch): **10** episode hai nguyên nhân fraud + mùa vụ (dev 2 / cal 4 / test 4) và **5** episode fraud một nguyên nhân trùng ngày `business_calendar` (1 / 2 / 2); bớt tương ứng ở nhóm rule đã phủ (`data_pipeline`, `fraud_surge`), mỗi nhóm vẫn ≥ 1 dev / 2 cal / 2 test. Tỉ lệ gộp vì vậy không đại diện phân phối tự nhiên: luôn báo theo nhóm và ghi cơ cấu.
+  - **Bảng phân bổ 60 episode (người dùng duyệt 31/10/2026, audit B3):**
+
+    | Kịch bản | dev | cal | test | Tổng |
+    |---|---|---|---|---|
+    | clean | 4 | 8 | 8 | 20 |
+    | hai nguyên nhân fraud + mùa vụ | 2 | 4 | 4 | 10 |
+    | fraud một nguyên nhân trùng ngày lịch | 1 | 2 | 2 | 5 |
+    | seasonal đơn | 1 | 2 | 2 | 5 |
+    | `data_pipeline` | 1 | 2 | 2 | 5 |
+    | `fraud_surge` | 1 | 2 | 2 | 5 |
+    | `new_fraud` (social engineering) | 1 | 1 | 1 | 3 |
+    | `legit_business_spike` | 1 | 1 | 1 | 3 |
+    | merchant mới, ít giao dịch | 0 | 1 | 1 | 2 |
+    | concept drift "im lặng" | 0 | 1 | 1 | 2 |
+    | **Tổng** | **12** | **24** | **24** | **60** |
+
+    Merchant mới và concept drift không có episode development: **chỉ đánh giá, không viết rule/ngưỡng trên chúng** (ngưỡng `n_min` đã chọn trên clean development; drift là ca khó của agent). Bảng này thay "mỗi nhóm ≥ 1/2/2" ở câu trên cho `new_fraud`/`legit_business_spike`. Số episode cuối cùng do ngân sách LLM quyết định, 60 là sàn ([MASTER_PLAN.md](../MASTER_PLAN.md) mục Ngân sách). Chia vai trò development/calibration/test: [evaluation.md](evaluation.md).
 - Episode smoke đều sinh nền giao dịch và card-testing P1.4 sau T0 cùng nhãn trễ; template `clean` nghĩa là không có sự cố P1.6 được chèn, không hàm ý mọi giao dịch đều hợp lệ. Template, seed, manifest và truth chỉ nằm trong private; operational `episodes` chỉ giữ ID + role.
 - Ngày tháng trong episode là danh nghĩa: không có lịch cố định (không có Tết); sự kiện mùa vụ được chèn và ghi vào `business_calendar` — trừ biến thể "trend không có trong lịch".
 
@@ -299,6 +316,8 @@ Các object con có cấu trúc cố định: `detection_recall` gồm `detected
 ## 8. Đầu ra triage (`decisions`)
 
 `decisions` là bảng operational ghi một dòng cho mỗi lần gate chạy, kể cả khi kết quả là `recheck`. Bảng chỉ chứa kết luận triage, checklist/tool output và chi phí thực thi; không đọc hoặc lưu truth, template, cơ chế injector hay metadata private.
+
+**Nguồn khi báo cáo (người dùng chốt 31/10/2026, audit B5):** schema không đổi; mọi report tách theo nguồn coi `source='agent' AND model_slug IS NULL` (do `UnconfiguredAgent` của baseline rule + human) là **chuyển người (baseline)**, không tính vào nhánh agent. Nhánh agent chỉ gồm `source='agent'` có `model_slug` khác NULL.
 
 | Cột | Kiểu | Null? | Ý nghĩa / ràng buộc |
 |---|---|---|---|
