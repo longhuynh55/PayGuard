@@ -427,15 +427,17 @@ def test_mixed_benign_and_fraud_candidates_make_close_unsafe_for_fraud(
         )
         store.commit()
 
-        # Per docs/evaluation.md section 2 and the 31/10 user decision, risk
-        # metrics include every candidate even when cause attribution is ambiguous.
+        # Per docs/evaluation.md section 2 and the 31/10 user decision, the pair
+        # shares parent_scenario, so it is matched to both components (was
+        # ambiguous_match). Risk metrics include every candidate in any case.
         result = _evaluate(
             store,
             [_decision("mixed-close", "2026-02-06T00:00:00.000000Z", "close")],
         )
 
         match = result.report["decision_matches"][0]
-        assert match["status"] == "ambiguous_match"
+        assert match["status"] == "matched"
+        assert match["matched_truth_ids"] == ["B1", "F1"]
         assert match["candidate_truth_ids"] == ["B1", "F1"]
         assert result.report["unsafe_truth_rate"]["unsafe_truth_ids"] == ["F1"]
         assert result.report["unsafe_truth_rate"]["unsafe"] == 1
@@ -474,7 +476,8 @@ def test_delayed_benign_candidate_does_not_hide_new_fraud_close(tmp_path: Path) 
         )
 
         match = result.report["decision_matches"][0]
-        assert match["status"] == "ambiguous_match"
+        assert match["status"] == "matched"
+        assert match["matched_truth_ids"] == ["B1-old", "F1-new"]
         assert match["candidate_truth_ids"] == ["B1-old", "F1-new"]
         assert result.report["unsafe_truth_rate"]["unsafe_truth_ids"] == ["F1-new"]
     finally:
@@ -501,13 +504,84 @@ def test_human_review_routes_both_same_feature_cause_components(tmp_path: Path) 
             [_decision("two-cause-human-review", "2026-02-06T00:00:00.000000Z", "human_review")],
         )
 
-        assert result.report["decision_matches"][0]["status"] == "ambiguous_match"
+        assert result.report["decision_matches"][0]["status"] == "matched"
+        assert result.report["decision_matches"][0]["matched_truth_ids"] == [
+            "fraud-component",
+            "pipeline-component",
+        ]
         assert result.report["timely_routing_recall"]["truth_ids"] == [
             "fraud-component",
             "pipeline-component",
         ]
         assert result.report["timely_routing_recall"]["human_review"]["routed"] == 2
         assert result.report["timely_routing_recall"]["recall"] == 1.0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("parent_benign", "parent_fraud", "expected_status"),
+    [
+        ("same-scenario", "same-scenario", "matched"),
+        ("scenario-a", "scenario-b", "ambiguous_match"),
+        ("same-scenario", None, "ambiguous_match"),
+        (None, None, "ambiguous_match"),
+    ],
+    ids=["same-parent", "different-parents", "one-null-parent", "both-null-parents"],
+)
+def test_parent_scenario_rule_changes_status_but_not_risk_or_routing(
+    tmp_path: Path,
+    parent_benign: str | None,
+    parent_fraud: str | None,
+    expected_status: str,
+) -> None:
+    store = _store(tmp_path, include_truth=False)
+    try:
+        _add_truth(
+            store,
+            truth_id="B1",
+            requires_intervention=False,
+            accepted_actions=[],
+            parent_scenario=parent_benign,
+        )
+        _add_truth(store, truth_id="F1", parent_scenario=parent_fraud)
+        store.commit()
+
+        result = _evaluate(
+            store,
+            [
+                _decision(
+                    "pair-close",
+                    "2026-02-06T00:00:00.000000Z",
+                    "close",
+                    incident_id="incident-close",
+                ),
+                _decision(
+                    "pair-review",
+                    "2026-02-06T00:00:00.000000Z",
+                    "human_review",
+                    incident_id="incident-review",
+                ),
+            ],
+        )
+
+        close_match, review_match = result.report["decision_matches"]
+        assert close_match["status"] == expected_status
+        assert review_match["status"] == expected_status
+        assert close_match["candidate_truth_ids"] == ["B1", "F1"]
+        if expected_status == "matched":
+            assert close_match["matched_truth_ids"] == ["B1", "F1"]
+        else:
+            assert close_match["matched_truth_ids"] == []
+        # Risk and routing use every candidate in all four parent layouts.
+        assert result.report["unsafe_truth_rate"]["unsafe_truth_ids"] == ["F1"]
+        assert result.report["unsafe_truth_rate"]["unsafe"] == 1
+        assert result.report["unsafe_truth_rate"]["lower_bound_observed"] is False
+        assert result.report["dangerous_closure_rate"]["dangerous_incident_ids"] == [
+            "incident-close"
+        ]
+        assert result.report["timely_routing_recall"]["truth_ids"] == ["F1"]
+        assert result.report["timely_routing_recall"]["human_review"]["routed"] == 1
     finally:
         store.close()
 

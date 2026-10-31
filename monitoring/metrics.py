@@ -114,6 +114,47 @@ def _config_value(raw: Any, *, field: str, expected_provenance: str | None = Non
     return raw["value"]
 
 
+def _validate_metric_windows(
+    raw: Any,
+    *,
+    window_days: int,
+    volume_metric_id: str,
+    psi_metric_ids: tuple[str, ...],
+) -> None:
+    """Reject public metric windows that monitoring does not compute.
+
+    PSI is computed over ``window_days`` and daily volume over exactly one business
+    date. ``evaluation.matcher`` reads the same ``metric_windows`` as truth windows,
+    so a value that monitoring ignores would move matching without any error.
+    """
+    if not isinstance(raw, dict) or not raw:
+        raise MonitoringMetricsError("monitoring config metric_windows must be a non-empty object")
+    for metric_id in (volume_metric_id, *psi_metric_ids):
+        if metric_id not in raw:
+            raise MonitoringMetricsError(
+                f"monitoring config metric_windows must declare {metric_id!r}"
+            )
+    for metric_id, entry in raw.items():
+        days = _config_value(
+            entry, field=f"metric_windows.{metric_id}", expected_provenance="contract"
+        )
+        if isinstance(days, bool) or not isinstance(days, int):
+            raise MonitoringMetricsError(
+                f"monitoring metric_windows.{metric_id} must be an integer number of days"
+            )
+        if metric_id == volume_metric_id and days != 1:
+            raise MonitoringMetricsError(
+                f"monitoring metric_windows {metric_id!r} must be 1 day: daily volume is "
+                f"computed for one business date, got {days}"
+            )
+        is_psi = metric_id in psi_metric_ids or str(metric_id).startswith("psi.")
+        if is_psi and days != window_days:
+            raise MonitoringMetricsError(
+                f"monitoring metric_windows {metric_id!r} must equal window_days "
+                f"({window_days}), got {days}"
+            )
+
+
 def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
     config_path = Path(path)
     try:
@@ -223,6 +264,12 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
         raise MonitoringMetricsError("monitoring review-rate feature must be decision_region")
     if review_metric_id in ({item.metric_id for item in features} | {volume_metric_id}):
         raise MonitoringMetricsError("monitoring metric_id values must be unique")
+    _validate_metric_windows(
+        raw.get("metric_windows"),
+        window_days=window_days,
+        volume_metric_id=volume_metric_id,
+        psi_metric_ids=tuple(item.metric_id for item in features),
+    )
 
     return _MonitoringConfig(
         reference_start=reference_start,

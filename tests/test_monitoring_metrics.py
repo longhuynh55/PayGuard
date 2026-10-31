@@ -5,17 +5,21 @@ from datetime import UTC, date, datetime, time, timedelta
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
 from zoneinfo import ZoneInfo
 
 import pytest
+import yaml
 
 from evaluation import evaluate_detection_recall
 from model.evaluate import score_monitoring_episodes, train_operational_model
 from monitoring.incidents import compute_incidents
 from monitoring.metrics import (
+    MonitoringMetricsError,
+    _load_monitoring_config,
     _robust_volume_baselines,
     compute_daily_metrics,
     population_stability_index,
@@ -762,7 +766,14 @@ def p37_smoke_match_context(
         for alert in alert_results[episode.episode_id].alerts
         if alert["metric"] == "volume.txn_count" and alert["feature"] == "txn_count"
     ]
-    assert seasonal_volume_alerts, "seasonal smoke has no daily volume alert"
+    # Not a seasonal detection. Smoke raises no volume alert on the seasonal day itself
+    # (docs/monitoring.md, section 1). In this run the only volume alert in a seasonal
+    # episode is the T0 (2026-02-01) card-testing background alert on ep-0003, and this
+    # check counts it. The strict-xfail seasonal test below carries the real assertion.
+    assert seasonal_volume_alerts, (
+        "no volume alert in seasonal smoke episodes: this only counts the T0 background "
+        "alert and is NOT a seasonal detection (see the strict xfail seasonal test)"
+    )
 
     signals_output = tmp_path / "alerts.csv"
     report_output = tmp_path / "signals_report.json"
@@ -826,3 +837,44 @@ def test_smoke_seasonal_volume_incidents_match_truth(
 ) -> None:
     seasonal_episode_ids, matched_volume_episode_ids = p37_smoke_match_context
     assert seasonal_episode_ids <= matched_volume_episode_ids
+
+
+def _write_monitoring_config(tmp_path: Path, mutate) -> Path:
+    raw = yaml.safe_load((ROOT / "configs" / "monitoring.yaml").read_text(encoding="utf-8"))
+    mutate(raw)
+    path = tmp_path / "monitoring.yaml"
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_public_monitoring_config_passes_metric_window_validation() -> None:
+    assert _load_monitoring_config(ROOT / "configs" / "monitoring.yaml").window_days == 7
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda raw: raw["metric_windows"]["volume.txn_count"].update(value=2),
+            "must be 1 day",
+        ),
+        (
+            lambda raw: raw["metric_windows"]["psi.amount_avg_7d"].update(value=6),
+            "must equal window_days",
+        ),
+        (
+            lambda raw: raw["metric_windows"].pop("volume.txn_count"),
+            "must declare",
+        ),
+    ],
+    ids=["volume-not-one-day", "psi-not-window-days", "volume-window-missing"],
+)
+def test_monitoring_loader_rejects_metric_windows_it_does_not_compute(
+    tmp_path: Path,
+    mutate,
+    message: str,
+) -> None:
+    path = _write_monitoring_config(tmp_path, mutate)
+
+    with pytest.raises(MonitoringMetricsError, match=re.escape(message)):
+        _load_monitoring_config(path)

@@ -19,8 +19,8 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 
 ### P5.2 — Matcher hoàn chỉnh trước calibration
 - **Mục tiêu:** matcher đúng [evaluation.md](evaluation.md) mục 2: thời gian gồm hiệu ứng trễ của cửa sổ metric, segment, feature; trạng thái `matched` / `ambiguous_match` / `unmatched`.
-- **Nghiệm thu:** fixture phản ví dụ cho (a) incident mở muộn trong cửa sổ trễ vẫn `matched`; (b) hai truth cùng ứng viên → `ambiguous_match`, không chấm accuracy; (c) ca nhiều nguyên nhân; (d) unmatched không thành benign. Matcher khóa trên development; không đọc calibration/test để chỉnh. Hành vi trên smoke hiện có được liệt kê cũ → mới.
-- **Trạng thái:** ✅ merge 31/10 sau review r2 PASS ([r1](../review/findings/P5.2-r1.md), [r2](../review/findings/P5.2-r2.md)). Không chặn chuyển backlog: fixture hai nguyên nhân khác feature; feature monitoring lạ nhận lookback 0 không báo lỗi; status cặp `parent_scenario` (`ambiguous_match` hay `matched` nhiều truth) — người dùng chốt trước P5.0b; kẹp `scope.end_at` về `decision_at`.
+- **Nghiệm thu:** fixture phản ví dụ cho (a) incident mở muộn trong cửa sổ trễ vẫn `matched`; (b) hai truth cùng ứng viên → `ambiguous_match`, không chấm accuracy (ngoại lệ đã chốt 31/10: cùng `parent_scenario` khác NULL → `matched` nhiều truth, [evaluation.md](evaluation.md) mục 2); (c) ca nhiều nguyên nhân; (d) unmatched không thành benign. Matcher khóa trên development; không đọc calibration/test để chỉnh. Hành vi trên smoke hiện có được liệt kê cũ → mới.
+- **Trạng thái:** ✅ merge 31/10 sau review r2 PASS ([r1](../review/findings/P5.2-r1.md), [r2](../review/findings/P5.2-r2.md)). Không chặn chuyển backlog: fixture hai nguyên nhân khác feature; feature monitoring lạ nhận lookback 0 không báo lỗi; status cặp `parent_scenario` (`ambiguous_match` hay `matched` nhiều truth) — người dùng đã chốt 31/10 là `matched` nhiều truth, thực hiện ở BACKLOG-7; kẹp `scope.end_at` về `decision_at`.
 
 ### P5.0a — Bảng quyết định UQ (orchestrator, 31/10/2026)
 

@@ -441,6 +441,13 @@ def load_private_evaluation_data(
                 f"requires_intervention is invalid for {row['incident_truth_id']!r}"
             )
         row["template"] = templates[row["episode_id"]]
+        parent_scenario = row.get("parent_scenario")
+        if parent_scenario is not None and (
+            not isinstance(parent_scenario, str) or not parent_scenario.strip()
+        ):
+            raise EvaluationMatcherError(
+                f"parent_scenario must be NULL or non-empty text for {row['incident_truth_id']!r}"
+            )
         normalized_truth.append(row)
 
     return PrivateEvaluationData(
@@ -566,6 +573,16 @@ def _scope_matches(
     return feature_matches and segment_matches and time_matches
 
 
+def _shares_parent_scenario(parents: Mapping[str, str | None]) -> bool:
+    """True when every candidate carries the same non-NULL parent_scenario.
+
+    User decision 31/10/2026 (docs/evaluation.md, section 2): such candidates form
+    one matched incident with every component truth in ``matched_truth_ids``.
+    """
+    values = set(parents.values())
+    return len(values) == 1 and None not in values
+
+
 def match_incidents(
     incidents: Iterable[Mapping[str, Any]],
     truth_rows: Iterable[Mapping[str, Any]],
@@ -578,8 +595,10 @@ def match_incidents(
     """Match P3.3 incident snapshots to selected private truths.
 
     The truth interval includes each metric's public window and the monitored
-    feature's own lookback. Ambiguous candidates remain available for risk and
-    routing metrics; multiple incidents may independently match one truth.
+    feature's own lookback. Candidates that all share one non-NULL
+    ``parent_scenario`` are matched together; other multi-candidate incidents stay
+    ``ambiguous_match``. Every candidate remains available for risk and routing
+    metrics, and multiple incidents may independently match one truth.
     """
     selected_ids = set(episode_ids)
     _, as_of = _parse_timestamp(as_of_time, field="as_of_time")
@@ -710,7 +729,7 @@ def match_incidents(
             raise EvaluationMatcherError(
                 f"monitoring feature {monitoring_feature!r} has no public metric window"
             ) from exc
-        matched_truth_ids: list[str] = []
+        candidate_parents: dict[str, str | None] = {}
         for truth in sorted(
             truth_by_episode.get(first["episode_id"], ()),
             key=lambda item: str(item["incident_truth_id"]),
@@ -727,11 +746,13 @@ def match_incidents(
                 truth_window=truth_window,
                 incident_window=incident_window,
             ):
-                matched_truth_ids.append(str(truth["incident_truth_id"]))
-        candidate_truth_ids = sorted(matched_truth_ids)
+                candidate_parents[str(truth["incident_truth_id"])] = truth.get(
+                    "parent_scenario"
+                )
+        candidate_truth_ids = sorted(candidate_parents)
         if not candidate_truth_ids:
             status = "unmatched"
-        elif len(candidate_truth_ids) == 1:
+        elif len(candidate_truth_ids) == 1 or _shares_parent_scenario(candidate_parents):
             status = "matched"
         else:
             status = "ambiguous_match"

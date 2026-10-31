@@ -447,7 +447,7 @@ def test_run_resolved_per_metric_windows_must_match_public_contract(tmp_path: Pa
         store.close()
 
 
-def test_multiple_truth_candidates_are_ambiguous_and_counted_for_recall(
+def test_same_parent_scenario_candidates_match_together_and_count_for_recall(
     tmp_path: Path,
 ) -> None:
     store = create_export_stores(tmp_path / "ambiguous-run")
@@ -486,20 +486,25 @@ def test_multiple_truth_candidates_are_ambiguous_and_counted_for_recall(
 
         result = _evaluate(store, incidents, ["ep-ambiguous"])
 
-        assert result.report["incident_matches"][0]["status"] == "ambiguous_match"
-        assert result.report["incident_matches"][0]["matched_truth_ids"] == []
+        # 31/10 user decision: every candidate shares parent_scenario, so the
+        # incident is matched to both component truths (was ambiguous_match).
+        assert result.report["incident_matches"][0]["status"] == "matched"
+        assert result.report["incident_matches"][0]["matched_truth_ids"] == [
+            "truth-ambiguous-a",
+            "truth-ambiguous-b",
+        ]
         assert result.report["incident_matches"][0]["candidate_truth_ids"] == [
             "truth-ambiguous-a",
             "truth-ambiguous-b",
         ]
         assert result.report["incident_counts"] == {
             "evaluated": 1,
-            "matched": 0,
-            "ambiguous": 1,
+            "matched": 1,
+            "ambiguous": 0,
             "unmatched": 0,
             "benign_matched": 0,
         }
-        assert result.report["ambiguous_incident_ids"] == [incidents[0]["incident_id"]]
+        assert result.report["ambiguous_incident_ids"] == []
         assert result.report["detection_recall"] == {
             "detected": 2,
             "denominator": 2,
@@ -555,12 +560,102 @@ def test_same_feature_multi_cause_truth_components_both_count_for_recall(
             "recall": 1.0,
             "missed_truth_ids": [],
         }
-        assert result.report["incident_matches"][0]["status"] == "ambiguous_match"
-        assert result.report["incident_matches"][0]["matched_truth_ids"] == []
+        assert result.report["incident_matches"][0]["status"] == "matched"
+        assert result.report["incident_matches"][0]["matched_truth_ids"] == [
+            "truth-fraud-component",
+            "truth-pipeline-component",
+        ]
         assert result.report["incident_matches"][0]["candidate_truth_ids"] == [
             "truth-fraud-component",
             "truth-pipeline-component",
         ]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("parent_a", "parent_b"),
+    [
+        ("scenario-a", "scenario-b"),
+        ("scenario-two-causes", None),
+        (None, None),
+    ],
+    ids=["different-parents", "one-null-parent", "both-null-parents"],
+)
+def test_candidates_without_one_shared_parent_stay_ambiguous(
+    tmp_path: Path,
+    parent_a: str | None,
+    parent_b: str | None,
+) -> None:
+    store = create_export_stores(tmp_path / "not-shared-parent-run")
+    try:
+        _add_episode(store, "ep-not-shared", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-not-shared",
+            truth_id="truth-not-shared-a",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario=parent_a,
+        )
+        _add_truth(
+            store,
+            episode_id="ep-not-shared",
+            truth_id="truth-not-shared-b",
+            cause="fraud_surge",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario=parent_b,
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-not-shared",
+                alert_id="alert-not-shared",
+                feature="amount_avg_7d",
+                at="2026-02-05T12:00:00.000000Z",
+            ),
+            episode_id="ep-not-shared",
+        )
+
+        result = _evaluate(store, incidents, ["ep-not-shared"])
+
+        match = result.report["incident_matches"][0]
+        assert match["status"] == "ambiguous_match"
+        assert match["matched_truth_ids"] == []
+        assert match["candidate_truth_ids"] == [
+            "truth-not-shared-a",
+            "truth-not-shared-b",
+        ]
+        assert result.report["incident_counts"]["ambiguous"] == 1
+        assert result.report["detection_recall"]["detected"] == 2
+    finally:
+        store.close()
+
+
+def test_blank_parent_scenario_is_rejected_instead_of_forming_a_group(
+    tmp_path: Path,
+) -> None:
+    store = create_export_stores(tmp_path / "blank-parent-run")
+    try:
+        _add_episode(store, "ep-blank-parent", "data_pipeline")
+        _add_truth(
+            store,
+            episode_id="ep-blank-parent",
+            truth_id="truth-blank-parent",
+            cause="data_pipeline",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario="  ",
+        )
+        store.commit()
+
+        with pytest.raises(EvaluationMatcherError, match="parent_scenario"):
+            _evaluate(store, (), ["ep-blank-parent"])
     finally:
         store.close()
 
