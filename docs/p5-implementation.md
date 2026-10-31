@@ -11,7 +11,7 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 
 | Task | Ai | Phụ thuộc | Nội dung |
 |---|---|---|---|
-| P5.0a Bảng quyết định UQ | Orchestrator (tài liệu) | — | Liệt kê theo nhóm sự cố trong [data.md](data.md) mục Kịch bản: ca nào tới agent, quyền đóng nào áp dụng, ca nào điều kiện `close_score >= tau_agent` có thể đổi close/routing. Kết luận chấp nhận cả "không thêm giá trị" |
+| P5.0a Bảng quyết định UQ ✅ 31/10 (mục P5.0a dưới) | Orchestrator (tài liệu) | — | Liệt kê theo nhóm sự cố trong [data.md](data.md) mục Kịch bản: ca nào tới agent, quyền đóng nào áp dụng, ca nào điều kiện `close_score >= tau_agent` có thể đổi close/routing. Kết luận chấp nhận cả "không thêm giá trị" |
 | P5.2 Matcher hoàn chỉnh | Codex | — | Như mục P5.2 dưới |
 | P3.7 Tính hợp lệ monitoring ([sub-plan P3](p3-implementation.md)) | Codex | P5.2 | Metric volume theo ngày + sửa alert nền `amount_avg_7d` (người dùng duyệt 31/10) |
 | P5.0b Bảng support development | Codex | P5.2, P3.7 | Như mục P5.0b dưới |
@@ -21,6 +21,26 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 - **Mục tiêu:** matcher đúng [evaluation.md](evaluation.md) mục 2: thời gian gồm hiệu ứng trễ của cửa sổ metric, segment, feature; trạng thái `matched` / `ambiguous_match` / `unmatched`.
 - **Nghiệm thu:** fixture phản ví dụ cho (a) incident mở muộn trong cửa sổ trễ vẫn `matched`; (b) hai truth cùng ứng viên → `ambiguous_match`, không chấm accuracy; (c) ca nhiều nguyên nhân; (d) unmatched không thành benign. Matcher khóa trên development; không đọc calibration/test để chỉnh. Hành vi trên smoke hiện có được liệt kê cũ → mới.
 - **Trạng thái:** ✅ merge 31/10 sau review r2 PASS ([r1](../review/findings/P5.2-r1.md), [r2](../review/findings/P5.2-r2.md)). Không chặn chuyển backlog: fixture hai nguyên nhân khác feature; feature monitoring lạ nhận lookback 0 không báo lỗi; status cặp `parent_scenario` (`ambiguous_match` hay `matched` nhiều truth) — người dùng chốt trước P5.0b; kẹp `scope.end_at` về `decision_at`.
+
+### P5.0a — Bảng quyết định UQ (orchestrator, 31/10/2026)
+
+Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [evaluation.md](evaluation.md) mục 6); chưa đo số ca, số đo thuộc P5.0b. Điều kiện `close_score >= tau_agent` **chỉ nằm trên nhánh `close` của agent**: routing `data_ticket`/`fraud_ops`/`human_review` không dùng nó, nên UQ không bao giờ đổi routing, chỉ đổi `close` ↔ `recheck`/`human_review`. Một ca chỉ để UQ đổi được quyết định khi đồng thời: (1) ca tới agent; (2) checklist benign `seasonal_calendar` (runbook benign duy nhất) đạt trên phạm vi agent đề xuất; (3) không điều kiện chuyển người nào kích hoạt; (4) agent được phép đóng (`agent_close_disabled = false`). Khi `seasonal_calendar` `close_enabled = on`, ca đạt checklist trên cùng phạm vi đã được rule đóng trước, nên (1)+(2) chỉ xảy ra khi runbook bị tắt sau calibration hoặc agent khoanh phạm vi khác (`segment_concentration`) với phạm vi của rule.
+
+| Nhóm ([data.md](data.md) mục Kịch bản) | Tới agent? | Quyền đóng áp dụng | UQ đổi được quyết định? |
+|---|---|---|---|
+| `seasonal` | Chỉ khi rule không đóng: runbook tắt, checklist của rule chưa đạt, hoặc không khớp rule | `seasonal_calendar` (rule) hoặc agent qua gate | **Có**, khi runbook tắt và checklist đạt: B có thể chặn một lần đóng đúng (mất +1) |
+| `legit_business_spike` | Có (không runbook benign) | Không có | Không — luôn chuyển người theo giới hạn MVP |
+| `fraud_surge` | Không nếu rule `fraud_ops` đủ bằng chứng; ngược lại có | Không, trừ khi trùng ngày calendar và checklist benign đạt | **Có, hiếm**: fraud trùng ngày lịch, metric phía fraud `unavailable`/khác segment → A có thể đóng nhầm (−5), B có thể chặn |
+| `data_pipeline` | Không nếu `unit_or_null_change` đạt; ngược lại có | Không (độ lớn ×100/NULL không khớp kỳ vọng lịch) | Không |
+| Merchant mới, ít giao dịch | Có thể | Không: `insufficient` không bao giờ đóng | Không |
+| `new_fraud` (social engineering) | Có (không rule) | Chỉ khi trùng ngày lịch và checklist đạt | **Có, hiếm**: như `fraud_surge` |
+| Fraud mới + mùa vụ (`parent_scenario`) | Có | Checklist mùa vụ có thể đạt trên phần seasonal | **Có — nhóm chính**: đóng incident ứng viên của cả hai truth là unsafe ([evaluation.md](evaluation.md) mục 2); đây là nơi điều kiện score có thể giảm đóng nhầm |
+| Concept drift "im lặng" | Có nếu có alert | Chỉ khi trùng ngày lịch | Hiếm |
+
+**Kết luận (chấp nhận "không thêm giá trị"):**
+- Ở vòng 1 hiện tại UQ **không thể** đổi quyết định nào: `agent_close_disabled = true`, `tau_agent = null` (`configs/triage.yaml`), agent một bước chưa có K = N = 3. So sánh 1 chỉ có nghĩa sau P4c.
+- Kể cả sau P4c, so sánh 1 chỉ khác 0 trên các ca thỏa (1)–(4); nhóm có rủi ro là ca có **ngày lịch kinh doanh trùng fraud** (hai nguyên nhân, fraud trên ngày lịch). Nếu calibration/test không có ca như vậy, hoặc `seasonal_calendar` bật và agent không khoanh phạm vi khác, thì A ≡ B là kết quả phải báo cáo, không phải lỗi.
+- Hệ quả cho các task sau (không đổi protocol): P5.0b phải đếm trên development số ca thỏa (1)–(4) theo nhóm truth và trạng thái `close_enabled` có thể có; P1.6 vòng 2 cần sinh được ca hai nguyên nhân fraud + mùa vụ và fraud trên ngày lịch, nếu không so sánh 1 rỗng về cấu trúc. Trên smoke hiện tại support seasonal = 0 (P3.7 hoãn tới pilot), nên P5.0b chỉ báo được giới hạn này.
 
 ### P5.0b — Bảng support trên development
 - **Mục tiêu:** đo trên episode `development` (không calibration/test): số truth duy nhất theo episode và nhóm nguyên nhân; matched/ambiguous/unmatched; cửa sổ đủ; rule coverage; số ca tới agent; số ca đủ điều kiện đóng. Báo cáo private.
