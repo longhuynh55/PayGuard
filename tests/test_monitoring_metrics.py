@@ -621,13 +621,13 @@ def p37_smoke_match_context(
         for episode_id, result in alert_results.items()
     }
     print(f"P3.7 smoke alert counts: {alert_counts}")
-    # Fix 1 removes weekday phasing and applies the development-max residual
-    # threshold uniformly; these are the resulting smoke counts.
+    # P1.4 adds episode-level ATO and recipient cash-out rows; these are the
+    # resulting smoke counts with the clean development episode left unchanged.
     assert alert_counts == {
         "ep-0001": 0,
-        "ep-0002": 3,
+        "ep-0002": 7,
         "ep-0003": 1,
-        "ep-0004": 17,
+        "ep-0004": 21,
         "ep-0005": 0,
     }
 
@@ -642,9 +642,9 @@ def p37_smoke_match_context(
     print(f"P3.7 smoke incident counts: {incident_counts}")
     assert incident_counts == {
         "ep-0001": 0,
-        "ep-0002": 2,
+        "ep-0002": 1,
         "ep-0003": 1,
-        "ep-0004": 4,
+        "ep-0004": 2,
         "ep-0005": 0,
     }
     stored_metrics = []
@@ -720,8 +720,9 @@ def p37_smoke_match_context(
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
     incident_counts = evaluation_result.report["incident_counts"]
-    # P3.7 Fix 1's single development threshold leaves seasonal matching blocked.
-    assert incident_counts["matched"] == 5
+    # P1.4 leaves one consolidated pipeline incident per affected episode;
+    # seasonal alerts still do not match the locked amount feature contract.
+    assert incident_counts["matched"] == 2
     assert incident_counts["ambiguous"] == 0
     assert incident_counts["benign_matched"] == 0
     assert incident_counts["unmatched"] == 2

@@ -8,13 +8,17 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
 
 from simulator.validate import validate_run
+from simulator.config import load_simulator_config
+from simulator.recipient_features import derive_recipient_signals
+from simulator.storage import utc_timestamp
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,16 +27,10 @@ _KNOWN_CLEAN_MINIMUM_SUPPORT_FP = (
     "incident-c89881b3dc8c2d6e9ebd1354",
 )
 _EXPECTED_SMOKE_DATA_TICKETS = {
-    # P3.7 re-derived incident IDs after changing the amount alert set:
-    # ep-0002/incident-ea21... -> incident-67c...; ep-0004/incident-553... -> incident-367...
-    # Fix1 changes only daily volume and evaluation windows, so these pipeline IDs stay stable.
     ("ep-0002", "incident-67c06d4b51c5196eb2894cd0"),
     ("ep-0004", "incident-367c348143656924203a5bc3"),
-    # P3.7 no longer creates a separate jump-containing ticket for old ep-0004/incident-7cfa...
-    # BACKLOG-5 removes ep-0002/incident-e346f09c6706875fcc708684: QR n=3->1
-    # while both days already have the x100 shift, a low-support coincidence per review finding 2.
-    # Source: review/findings/P1.3-r2-r1.md.
 }
+_EXPECTED_SMOKE_AGENT_REVIEW_EPISODES = {"ep-0002", "ep-0003", "ep-0004"}
 
 
 def _assert_smoke_data_ticket_baseline(
@@ -114,6 +112,105 @@ def valid_smoke_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
     run_dir = tmp_path_factory.mktemp("p1_8_smoke") / "smoke"
     _generate(run_dir)
     return run_dir
+
+
+def test_cli_recipient_signals_separate_cashout_from_business_fanin(
+    valid_smoke_run: Path,
+) -> None:
+    """Public generated transactions expose cash-out while fan-in is shared by the control."""
+    episode_id = "ep-0002"
+    simulator_config = load_simulator_config()
+    t0 = utc_timestamp(
+        datetime.combine(
+            simulator_config.timeline.t0_business_date.value,
+            time.min,
+            tzinfo=ZoneInfo(simulator_config.timeline.business_timezone.value),
+        )
+    )
+    as_of = utc_timestamp(
+        datetime.fromisoformat(t0.replace("Z", "+00:00"))
+        + timedelta(days=11, hours=16)
+    )
+    with sqlite3.connect(valid_smoke_run / "operational" / "observations.sqlite") as operational:
+        operational.row_factory = sqlite3.Row
+        signals = derive_recipient_signals(
+            operational,
+            episode_id=episode_id,
+            t0=t0,
+            as_of_time=as_of,
+        )
+        mule_candidates = [
+            signal for signal in signals.values()
+            if signal.fan_in_7d == 4
+            and signal.outflow_ratio_24h == 1.0
+            and signal.new_or_dormant
+        ]
+        business_candidates = [
+            signal for signal in signals.values()
+            if signal.fan_in_7d == 4
+            and signal.outflow_ratio_24h == 0.0
+            and not signal.new_or_dormant
+        ]
+        matched_pairs = [
+            (mule, business)
+            for mule in mule_candidates
+            for business in business_candidates
+            if mule.older_sender_share_7d == business.older_sender_share_7d
+        ]
+        assert matched_pairs, "operational transfers should expose matched mule and household-control signals"
+        mule_signal, business_signal = sorted(
+            matched_pairs,
+            key=lambda pair: (pair[0].recipient_customer_id, pair[1].recipient_customer_id),
+        )[0]
+
+        assert mule_signal.fan_in_7d == business_signal.fan_in_7d == 4
+        assert mule_signal.outflow_ratio_24h == 1.0
+        assert business_signal.outflow_ratio_24h == 0.0
+        assert mule_signal.new_or_dormant is True
+        assert business_signal.new_or_dormant is False
+        assert mule_signal.older_sender_share_7d == business_signal.older_sender_share_7d
+        assert len(mule_signal.first_counterparty_transfer_txn_ids) == 4
+
+        end_of_pattern = utc_timestamp(
+            datetime.fromisoformat(t0.replace("Z", "+00:00"))
+            + timedelta(days=12, hours=16)
+        )
+        end_signals = derive_recipient_signals(
+            operational,
+            episode_id=episode_id,
+            t0=t0,
+            as_of_time=end_of_pattern,
+        )
+        assert any(
+            signal.fan_in_7d == 5
+            and signal.outflow_ratio_24h == 1.0
+            and signal.new_or_dormant
+            and len(signal.first_counterparty_transfer_txn_ids) == 5
+            for signal in end_signals.values()
+        ), "the full five-sender mule pattern should be visible when its final transfer arrives"
+
+        rows = [dict(row) for row in operational.execute(
+            "SELECT txn_id, episode_id, customer_id, device_id, card_token, channel, amount "
+            "FROM transactions ORDER BY episode_id, event_at, txn_id"
+        )]
+        assert all(row["device_id"] for row in rows)
+        assert all(
+            row["card_token"] is None if row["channel"] != "card" else bool(row["card_token"])
+            for row in rows
+        )
+        base_rows = [row for row in rows if row["episode_id"] == "base"]
+        normal_base_rows = [
+            row for row in base_rows
+            if row["channel"] in {"qr", "wallet"}
+            and row["amount"] < simulator_config.fraud.near_threshold_minimum_amount.value
+        ]
+        assert any(
+            len({row["device_id"] for row in normal_base_rows if row["customer_id"] == customer_id}) > 1
+            for customer_id in {row["customer_id"] for row in normal_base_rows}
+        ), "legitimate background accounts should sometimes change devices"
+
+        diagnostic_path = valid_smoke_run / "private" / "reports" / "smoke_truth.json"
+        assert diagnostic_path.is_file() and diagnostic_path.stat().st_size > 0
 
 
 @pytest.fixture(scope="module")
@@ -229,15 +326,11 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     ] == "mvp-h90-v1"
     assert public_report["label_delay"]["training_snapshot_at_t0"]["model_version"] is None
     calibration = public_report["p2_cohort_support"]["calibration"]
-    assert calibration["positive_count"] == 23
+    assert calibration["positive_count"] == 27
     assert calibration["support_status"] == "sufficient"
     assert calibration["missing_support"] == []
-    assert calibration["calibration_minimum_met"] is False
-    assert any(
-        "isotonic_support_below_25_per_class" in warning
-        and "fallback_method=sigmoid" in warning
-        for warning in calibration["warnings"]
-    )
+    assert calibration["calibration_minimum_met"] is True
+    assert calibration["warnings"] == []
     assert "truth_positive_count" not in json.dumps(public_report)
     private_report = json.loads(
         (run_dir / "private" / "reports" / "smoke_truth.json").read_text(encoding="utf-8")
@@ -287,7 +380,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
         str(episode_config),
     )
     assert generated.returncode == 0, generated.stdout + generated.stderr
-    assert "Validation summary: 16 passed, 0 failed" in generated.stdout
+    assert "Validation summary: 17 passed, 0 failed" in generated.stdout
 
     with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
         effects = [
@@ -323,7 +416,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
 
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
-    assert "Validation summary: 16 passed, 0 failed" in validated.stdout
+    assert "Validation summary: 17 passed, 0 failed" in validated.stdout
 
 
 def test_generate_checks_episode_duration_against_selected_simulator_config(
@@ -619,12 +712,7 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         row[0] is None for row in rule_slugs
     )
     assert duplicate_rule_groups == 0
-    assert len(agent_rows) >= 3
-    assert {row[0] for row in agent_rows} == {
-        # Fix1 removes the clean ep-0001 background incident and the ep-0005
-        # seasonal incident below the shared volume residual threshold.
-        "ep-0002", "ep-0003", "ep-0004"
-    }
+    assert {row[0] for row in agent_rows} == _EXPECTED_SMOKE_AGENT_REVIEW_EPISODES
     for _, trace_ids, input_tokens, output_tokens, total_tokens, cost_usd, model_slug, action in agent_rows:
         assert len(json.loads(trace_ids)) == 1
         assert input_tokens > 0 and output_tokens > 0 and total_tokens == input_tokens + output_tokens
@@ -677,9 +765,21 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER decisions_no_update")
-        rule_decision_id = connection.execute(
+        rule_decision = connection.execute(
             "SELECT decision_id FROM decisions WHERE source='rule' LIMIT 1"
-        ).fetchone()[0]
+        ).fetchone()
+        if rule_decision is None:
+            # Reuse an agent row as a deliberately invalid rule record when no
+            # rule-issued data ticket is present in a smoke baseline.
+            rule_decision_id = connection.execute(
+                "SELECT decision_id FROM decisions WHERE source='agent' LIMIT 1"
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE decisions SET source='rule', model_slug=NULL WHERE decision_id=?",
+                (rule_decision_id,),
+            )
+        else:
+            rule_decision_id = rule_decision[0]
         connection.execute(
             "UPDATE decisions SET model_slug='fake/payguard-p4-round1' WHERE decision_id=?",
             (rule_decision_id,),

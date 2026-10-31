@@ -48,6 +48,8 @@ OPERATIONAL_DDL: tuple[str, ...] = (
         customer_id TEXT NOT NULL REFERENCES customers(customer_id),
         merchant_id TEXT NULL REFERENCES merchants(merchant_id),
         recipient_customer_id TEXT NULL REFERENCES customers(customer_id),
+        device_id TEXT NULL,
+        card_token TEXT NULL,
         created_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='created_at')}),
         event_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='event_at')}),
         available_at TEXT NOT NULL CHECK ({UTC_TEXT_CHECK.format(column='available_at')}),
@@ -60,7 +62,8 @@ OPERATIONAL_DDL: tuple[str, ...] = (
             OR (merchant_id IS NULL AND recipient_customer_id IS NOT NULL)
         ),
         CHECK (recipient_customer_id IS NULL OR recipient_customer_id <> customer_id),
-        CHECK (recipient_customer_id IS NULL OR channel = 'wallet')
+        CHECK (recipient_customer_id IS NULL OR channel = 'wallet'),
+        CHECK (card_token IS NULL OR channel = 'card')
     )
     """,
     f"""
@@ -487,12 +490,15 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     """,
     """
     CREATE TRIGGER IF NOT EXISTS transactions_identity_immutable
-    BEFORE UPDATE OF txn_id, episode_id, customer_id, merchant_id, recipient_customer_id ON transactions
+    BEFORE UPDATE OF txn_id, episode_id, customer_id, merchant_id, recipient_customer_id,
+                     device_id, card_token ON transactions
     WHEN NEW.txn_id IS NOT OLD.txn_id
       OR NEW.episode_id IS NOT OLD.episode_id
       OR NEW.customer_id IS NOT OLD.customer_id
       OR NEW.merchant_id IS NOT OLD.merchant_id
       OR NEW.recipient_customer_id IS NOT OLD.recipient_customer_id
+      OR NEW.device_id IS NOT OLD.device_id
+      OR NEW.card_token IS NOT OLD.card_token
     BEGIN
         SELECT RAISE(ABORT, 'transaction identity and episode relationships are immutable');
     END

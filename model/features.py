@@ -39,6 +39,8 @@ _TRANSACTION_COLUMNS = (
     "txn_id",
     "episode_id",
     "customer_id",
+    "device_id",
+    "card_token",
     "created_at",
     "available_at",
     "amount",
@@ -116,6 +118,8 @@ def _create_source_tables(
             txn_id VARCHAR NOT NULL,
             episode_id VARCHAR NOT NULL,
             customer_id VARCHAR NOT NULL,
+            device_id VARCHAR,
+            card_token VARCHAR,
             created_at TIMESTAMPTZ NOT NULL,
             available_at TIMESTAMPTZ NOT NULL,
             amount BIGINT
@@ -134,7 +138,7 @@ def _create_source_tables(
     )
     if transactions:
         connection.executemany(
-            "INSERT INTO source_transactions VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO source_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [_selected_columns(row, _TRANSACTION_COLUMNS) for row in transactions],
         )
     if customers:

@@ -134,6 +134,7 @@ class WorldConfig(StrictModel):
     familiar_account_payee_count: ConfigValue[PositiveInt]
     household_supplier_merchant_count: ConfigValue[PositiveInt]
     internal_mule_outbound_window_hours: ConfigValue[PositiveInt]
+    legitimate_device_change_probability: ConfigValue[Probability]
     customer_segments: ConfigValue[list[str]]
     customer_provinces: ConfigValue[list[str]]
     customer_age_bands: ConfigValue[list[str]]
@@ -315,8 +316,107 @@ class CardTestingConfig(StrictModel):
         return self
 
 
+class ATOConfig(StrictModel):
+    campaign_interval_days: ConfigValue[PositiveInt]
+    start_offset_days: ConfigValue[NonNegativeInt]
+    start_hour_local: ConfigValue[Annotated[int, Field(ge=0, le=23)]]
+    transaction_count: ConfigValue[PositiveInt]
+    transaction_spacing_days: ConfigValue[PositiveInt]
+    device_signature_probability: ConfigValue[Probability]
+    approval_probability: ConfigValue[Probability]
+    channel: ConfigValue[Literal["qr", "wallet", "card"]]
+
+    @field_validator("start_hour_local")
+    @classmethod
+    def ato_hour_uses_vietnam_local_time(cls, value: ConfigValue[int]) -> ConfigValue[int]:
+        if value.unit != "local wall-clock hour in Asia/Ho_Chi_Minh":
+            raise ValueError("fraud.ato.start_hour_local must use Vietnam local wall-clock hours")
+        return value
+
+
+class CollusionConfig(StrictModel):
+    campaign_interval_days: ConfigValue[PositiveInt]
+    start_hour_local: ConfigValue[Annotated[int, Field(ge=0, le=23)]]
+    sender_count: ConfigValue[PositiveInt]
+    transfer_spacing_minutes: ConfigValue[PositiveInt]
+    cashout_delay_minutes: ConfigValue[PositiveInt]
+
+    @field_validator("start_hour_local")
+    @classmethod
+    def collusion_hour_uses_vietnam_local_time(cls, value: ConfigValue[int]) -> ConfigValue[int]:
+        if value.unit != "local wall-clock hour in Asia/Ho_Chi_Minh":
+            raise ValueError("fraud.collusion.start_hour_local must use Vietnam local wall-clock hours")
+        return value
+
+    @model_validator(mode="after")
+    def collusion_group_has_multiple_senders(self) -> CollusionConfig:
+        if self.sender_count.value < 2:
+            raise ValueError("fraud.collusion.sender_count must be at least two")
+        return self
+
+
+class SocialEngineeringConfig(StrictModel):
+    campaign_interval_days: ConfigValue[PositiveInt]
+    start_offset_days: ConfigValue[NonNegativeInt]
+    new_account_warmup_days: ConfigValue[NonNegativeInt]
+    start_hour_local: ConfigValue[Annotated[int, Field(ge=0, le=23)]]
+    fan_in_count: ConfigValue[PositiveInt]
+    older_sender_minimum_count: ConfigValue[NonNegativeInt]
+    incoming_spacing_days: ConfigValue[PositiveInt]
+    cashout_delay_minutes: ConfigValue[PositiveInt]
+    business_control_minimum_amount: ConfigValue[PositiveInt]
+    business_control_maximum_amount: ConfigValue[PositiveInt]
+
+    @field_validator("start_hour_local")
+    @classmethod
+    def social_hour_uses_vietnam_local_time(cls, value: ConfigValue[int]) -> ConfigValue[int]:
+        if value.unit != "local wall-clock hour in Asia/Ho_Chi_Minh":
+            raise ValueError("fraud.social_engineering.start_hour_local must use Vietnam local wall-clock hours")
+        return value
+
+    @field_validator("business_control_minimum_amount", "business_control_maximum_amount")
+    @classmethod
+    def business_control_amounts_use_vnd(cls, value: ConfigValue[int]) -> ConfigValue[int]:
+        if value.unit != MVP_MONEY_UNIT:
+            raise ValueError("fraud.social_engineering control amount unit must be integer VND")
+        return value
+
+    @model_validator(mode="after")
+    def social_parameters_are_ordered(self) -> SocialEngineeringConfig:
+        if self.start_offset_days.value <= self.new_account_warmup_days.value:
+            raise ValueError(
+                "fraud.social_engineering start_offset_days must leave the configured "
+                "new-account warmup inside the episode"
+            )
+        if self.fan_in_count.value < 2:
+            raise ValueError("fraud.social_engineering.fan_in_count must be at least two")
+        if self.older_sender_minimum_count.value > self.fan_in_count.value:
+            raise ValueError("fraud.social_engineering older-sender count cannot exceed fan-in count")
+        if self.business_control_minimum_amount.value > self.business_control_maximum_amount.value:
+            raise ValueError("fraud.social_engineering business control amount range must be ordered")
+        return self
+
+
 class FraudConfig(StrictModel):
     card_testing: CardTestingConfig
+    ato: ATOConfig
+    collusion: CollusionConfig
+    social_engineering: SocialEngineeringConfig
+    near_threshold_minimum_amount: ConfigValue[PositiveInt]
+    near_threshold_maximum_amount: ConfigValue[PositiveInt]
+
+    @field_validator("near_threshold_minimum_amount", "near_threshold_maximum_amount")
+    @classmethod
+    def fraud_amount_band_uses_vnd(cls, value: ConfigValue[int]) -> ConfigValue[int]:
+        if value.unit != MVP_MONEY_UNIT:
+            raise ValueError("fraud near-threshold amount unit must be integer VND")
+        return value
+
+    @model_validator(mode="after")
+    def fraud_amount_band_is_ordered(self) -> FraudConfig:
+        if self.near_threshold_minimum_amount.value > self.near_threshold_maximum_amount.value:
+            raise ValueError("fraud near-threshold amount range must be ordered")
+        return self
 
 
 class LabelReportingConfig(StrictModel):
@@ -388,6 +488,10 @@ class SimulatorConfig(StrictModel):
             raise ValueError("fraud.card_testing attempt amounts must be within the transaction amount range")
         if card_testing.maximum_followup_amount.value > self.transactions.maximum_amount.value:
             raise ValueError("fraud.card_testing follow-up amounts must be within the transaction amount range")
+        if self.fraud.near_threshold_minimum_amount.value < self.transactions.minimum_amount.value:
+            raise ValueError("fraud near-threshold amounts must be within the transaction amount range")
+        if self.fraud.near_threshold_maximum_amount.value > self.transactions.maximum_amount.value:
+            raise ValueError("fraud near-threshold amounts must be within the transaction amount range")
         if card_testing.campaign_interval_days.value > (
             self.timeline.t0_business_date.value - self.timeline.start_business_date.value
         ).days:
@@ -411,6 +515,38 @@ class SimulatorConfig(StrictModel):
         )
         if max(fraud_end_seconds, control_end_seconds) >= 24 * 60 * 60:
             raise ValueError("fraud.card_testing lifecycle must finish before the next business date")
+        social = self.fraud.social_engineering
+        if social.business_control_maximum_amount.value > self.transactions.maximum_amount.value:
+            raise ValueError("fraud.social_engineering control amounts must be within the transaction amount range")
+        if (
+            self.fraud.near_threshold_maximum_amount.value
+            * social.fan_in_count.value
+            > (2**63 - 1)
+        ):
+            raise ValueError("fraud social-engineering transfer totals exceed SQLite integer range")
+        if (
+            (social.fan_in_count.value - 1) * social.incoming_spacing_days.value >= 7
+            or social.start_offset_days.value
+            + (social.fan_in_count.value - 1) * social.incoming_spacing_days.value
+            >= self.episode.duration_days.value
+        ):
+            raise ValueError("fraud.social_engineering transfers must fit the observed 7-day and episode windows")
+        if social.cashout_delay_minutes.value * 60 <= lifecycle_delay_seconds:
+            raise ValueError("fraud.social_engineering cash-out must follow incoming settlement")
+        if social.cashout_delay_minutes.value >= self.world.internal_mule_outbound_window_hours.value * 60:
+            raise ValueError("fraud social-engineering cash-out must fit the mule outbound window")
+        ato = self.fraud.ato
+        if (
+            ato.start_offset_days.value
+            + (ato.transaction_count.value - 1) * ato.transaction_spacing_days.value
+            >= self.episode.duration_days.value
+        ):
+            raise ValueError("fraud.ato transaction schedule must fit the episode duration")
+        if self.fraud.collusion.campaign_interval_days.value > (
+            self.timeline.drift_start_business_date.value
+            - self.timeline.start_business_date.value
+        ).days:
+            raise ValueError("fraud.collusion campaign interval must allow a pre-drift campaign")
         return self
 
     def scale_for(self, profile: ProfileName) -> ScaleProfile:

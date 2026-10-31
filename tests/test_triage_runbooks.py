@@ -915,9 +915,9 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         first_jump_decisions.append(first_jump_decision)
 
     assert len(first_jump_decisions) == len(pipeline_ids) == 2
-    # P3.7 re-derived the amount alert windows, producing five amount incidents
-    # across the two pipeline episodes; each still follows the BACKLOG-5 gate.
-    assert len(pipeline_decisions) == 5
+    # P1.4 episode data consolidates the jump windows into one incident per
+    # pipeline episode; each still follows the BACKLOG-5 gate.
+    assert len(pipeline_decisions) == 2
     for incident in latest_by_id.values():
         if incident["episode_id"] not in non_pipeline_ids:
             continue

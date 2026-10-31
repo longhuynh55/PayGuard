@@ -165,13 +165,31 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             "household_business",
             "internal_mule",
         }
-        assert set(account_roles) == {
-            row[0] for row in pair.operational.execute("SELECT customer_id FROM customers")
+        base_customer_ids = {
+            row[0]
+            for row in pair.operational.execute(
+                "SELECT customer_id FROM customers WHERE episode_id = 'base'"
+            )
         }
+        assert set(account_roles) <= base_customer_ids
+        assert pair.operational.execute(
+            "SELECT 1 FROM customers WHERE episode_id <> 'base' LIMIT 1"
+        ).fetchone()
         account_transfers = [
             dict(row)
             for row in pair.operational.execute(
                 "SELECT * FROM transactions WHERE recipient_customer_id IS NOT NULL"
+            )
+        ]
+        simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+        near_min = simulator_config.fraud.near_threshold_minimum_amount.value
+        near_max = simulator_config.fraud.near_threshold_maximum_amount.value
+        account_transfers = [
+            row for row in account_transfers
+            if row["customer_id"] in account_roles
+            and row["recipient_customer_id"] in account_roles
+            and not (
+                type(row["amount"]) is int and near_min <= row["amount"] <= near_max
             )
         ]
         household_accounts = {

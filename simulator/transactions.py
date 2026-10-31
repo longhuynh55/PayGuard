@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import random
 import sqlite3
 from dataclasses import dataclass
@@ -80,6 +81,39 @@ def _local_dates(start: date, end_exclusive: date):
         current += timedelta(days=1)
 
 
+def card_token_for_customer(seed: int, customer_id: str) -> str:
+    """Return a stable opaque token for one customer's synthetic card."""
+    digest = hashlib.sha256(f"p1-card-v1\0{seed}\0{customer_id}".encode()).hexdigest()[:20]
+    return f"card-{digest}"
+
+
+def device_id_for_transaction(
+    *,
+    identity_seed: int,
+    draw_seed: int,
+    episode_id: str,
+    customer_id: str,
+    txn_id: str,
+    change_probability: float,
+    force_new: bool | None = None,
+) -> str:
+    """Return a stable primary device or an independently sampled new device."""
+    primary_digest = hashlib.sha256(
+        f"p1-device-primary-v1\0{identity_seed}\0{customer_id}".encode()
+    ).hexdigest()[:20]
+    changed = force_new
+    if changed is None:
+        changed = keyed_rng(
+            draw_seed, "p1.devices.legitimate_change", episode_id, txn_id
+        ).random() < change_probability
+    if not changed:
+        return f"device-{primary_digest}"
+    changed_digest = hashlib.sha256(
+        f"p1-device-change-v1\0{draw_seed}\0{episode_id}\0{txn_id}".encode()
+    ).hexdigest()[:20]
+    return f"device-{changed_digest}"
+
+
 def _insert_transaction_with_lifecycle(
     connection: sqlite3.Connection,
     config: SimulatorConfig,
@@ -93,8 +127,17 @@ def _insert_transaction_with_lifecycle(
     amount: int,
     channel: str,
     seed: int,
+    identity_seed: int,
     event_boundary: datetime,
 ) -> int:
+    device_id = device_id_for_transaction(
+        identity_seed=identity_seed,
+        draw_seed=seed,
+        episode_id=episode_id,
+        customer_id=customer_id,
+        txn_id=txn_id,
+        change_probability=config.world.legitimate_device_change_probability.value,
+    )
     insert_operational_record(
         connection,
         "transactions",
@@ -104,6 +147,10 @@ def _insert_transaction_with_lifecycle(
             "customer_id": customer_id,
             "merchant_id": merchant_id,
             "recipient_customer_id": recipient_customer_id,
+            "device_id": device_id,
+            "card_token": card_token_for_customer(identity_seed, customer_id)
+            if channel == "card"
+            else None,
             "created_at": created_at,
             "event_at": created_at,
             "available_at": created_at,
@@ -317,6 +364,7 @@ def generate_transactions(
                     amount=amount,
                     channel=channel,
                     seed=run_seed,
+                    identity_seed=run_seed,
                     event_boundary=event_boundary,
                 )
                 transaction_count += 1
@@ -367,6 +415,7 @@ def generate_transactions(
                     amount=amount,
                     channel=config.transactions.account_transfer_channel.value,
                     seed=run_seed,
+                    identity_seed=run_seed,
                     event_boundary=event_boundary,
                 )
                 transaction_count += 1
@@ -406,12 +455,7 @@ def generate_episode_transactions(
         raise ValueError("episode transaction generation requires an empty episode transaction stream")
 
     expected_scale = config.scale_for(profile)
-    customer_ids = tuple(
-        row[0]
-        for row in connection.execute(
-            "SELECT customer_id FROM customers WHERE episode_id = 'base' ORDER BY customer_id"
-        )
-    )
+    customer_ids = tuple(world_summary.customer_ids)
     merchant_ids = tuple(
         row[0]
         for row in connection.execute(
@@ -501,6 +545,7 @@ def generate_episode_transactions(
                     amount=amount,
                     channel=channel,
                     seed=seed,
+                    identity_seed=config.seed.value,
                     event_boundary=end_utc,
                 )
                 transaction_count += 1
@@ -557,6 +602,7 @@ def generate_episode_transactions(
                     amount=amount,
                     channel=config.transactions.account_transfer_channel.value,
                     seed=seed,
+                    identity_seed=config.seed.value,
                     event_boundary=end_utc,
                 )
                 transaction_count += 1

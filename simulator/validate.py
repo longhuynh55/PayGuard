@@ -792,6 +792,12 @@ def _collect_contract_violations(
             )
         if row["channel"] not in {"qr", "wallet", "card"}:
             violations.append(f"transaction {txn_id} has an unsupported channel")
+        for column in ("device_id", "card_token"):
+            value = row.get(column)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                violations.append(f"transaction {txn_id} has an invalid {column}")
+        if row.get("card_token") is not None and row["channel"] != "card":
+            violations.append(f"transaction {txn_id} has a card_token outside the card channel")
         if merchant_id is not None and merchant_episode not in {"base", episode_id}:
             violations.append(f"transaction {txn_id} references a merchant from another episode")
         if recipient_customer_id is not None:
@@ -1605,6 +1611,207 @@ def _record_validation(private: sqlite3.Connection, metadata: dict[str, Any] | N
     private.commit()
 
 
+def _validate_p14_mechanism_chains(
+    operational: sqlite3.Connection, private: sqlite3.Connection
+) -> str:
+    """Check P1.4 private group references against actual transaction chains."""
+    metadata_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?", (RUN_METADATA_KEY,)
+    ).fetchone()
+    if metadata_row is None:
+        _fail("P1.8 run metadata is required to validate P1.4 mechanisms")
+    run_metadata = json.loads(metadata_row[0])
+    simulator_config = run_metadata.get("resolved_config", {}).get("simulator", {})
+    timeline = simulator_config.get("timeline", {})
+    drift_value = timeline.get("drift_start_business_date", {}).get("value")
+    fraud_config = simulator_config.get("fraud", {})
+    near_min = fraud_config.get("near_threshold_minimum_amount", {}).get("value")
+    near_max = fraud_config.get("near_threshold_maximum_amount", {}).get("value")
+    social_config = fraud_config.get("social_engineering", {})
+    control_min = social_config.get("business_control_minimum_amount", {}).get("value")
+    control_max = social_config.get("business_control_maximum_amount", {}).get("value")
+    new_account_warmup_days = social_config.get("new_account_warmup_days", {}).get("value")
+    mule_window = simulator_config.get("world", {}).get(
+        "internal_mule_outbound_window_hours", {}
+    ).get("value")
+    if (
+        not isinstance(drift_value, str)
+        or type(mule_window) is not int
+        or type(near_min) is not int
+        or type(near_max) is not int
+        or type(control_min) is not int
+        or type(control_max) is not int
+        or type(new_account_warmup_days) is not int
+    ):
+        _fail("resolved simulator configuration is missing P1.4 timing or amount contracts")
+    drift_start = datetime.combine(
+        datetime.fromisoformat(drift_value).date(), time.min,
+        tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"),
+    ).astimezone(UTC)
+    transactions = {
+        row["txn_id"]: dict(row) for row in operational.execute("SELECT * FROM transactions")
+    }
+    pre_injection_amounts, _, _ = _pipeline_effect_amounts(private)
+    events_by_txn: dict[str, list[dict[str, Any]]] = {}
+    for row in operational.execute("SELECT * FROM transaction_events"):
+        events_by_txn.setdefault(row["txn_id"], []).append(dict(row))
+    checked_groups = 0
+    episode_ids = [row[0] for row in operational.execute("SELECT episode_id FROM episodes")]
+    for episode_id in episode_ids:
+        key = "p1.4.mechanisms.v1" if episode_id == "base" else f"p1.4.mechanisms.v1:{episode_id}"
+        metadata_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        if metadata_row is None:
+            _fail(f"P1.4 mechanism metadata is missing for {episode_id}")
+        metadata = json.loads(metadata_row[0])
+        groups = metadata.get("groups") if isinstance(metadata, dict) else None
+        if metadata.get("episode_id") != episode_id or not isinstance(groups, list):
+            _fail(f"P1.4 mechanism metadata is malformed for {episode_id}")
+        for group in groups:
+            if not isinstance(group, dict) or group.get("role") not in {"fraud", "benign_control"}:
+                _fail(f"P1.4 mechanism group has no private role for {episode_id}")
+            mechanism = group.get("mechanism")
+            if mechanism not in {"ato", "collusion", "social_engineering", "legit_business_spike"}:
+                _fail(f"P1.4 mechanism group has an unsupported type for {episode_id}")
+            expected_role = "benign_control" if mechanism == "legit_business_spike" else "fraud"
+            if group["role"] != expected_role:
+                _fail(f"P1.4 {mechanism} group has an inconsistent private role")
+            if mechanism == "collusion" and episode_id != "base":
+                _fail("P1.4 collusion must remain in shared pre-drift history")
+            txn_ids = [
+                txn_id
+                for field in ("transaction_ids", "incoming_transaction_ids", "outgoing_transaction_ids")
+                for txn_id in group.get(field, [])
+            ]
+            if not txn_ids:
+                _fail(f"P1.4 {mechanism} group contains no transactions")
+            group_rows: dict[str, dict[str, Any]] = {}
+            for txn_id in txn_ids:
+                transaction = transactions.get(txn_id)
+                if transaction is None or transaction["episode_id"] != episode_id:
+                    _fail(f"P1.4 {mechanism} group references a missing or cross-episode transaction")
+                group_rows[txn_id] = transaction
+                if mechanism == "collusion" and datetime.fromisoformat(
+                    transaction["event_at"].replace("Z", "+00:00")
+                ).astimezone(UTC) >= drift_start:
+                    _fail("P1.4 collusion transaction is on or after the drift point")
+                amount = pre_injection_amounts.get(txn_id, transaction["amount"])
+                if mechanism == "legit_business_spike":
+                    amount_in_range = type(amount) is int and control_min <= amount <= control_max
+                else:
+                    amount_in_range = type(amount) is int and near_min <= amount <= near_max
+                if not amount_in_range:
+                    _fail(f"P1.4 {mechanism} transaction amount is outside its configured band")
+            if mechanism == "ato":
+                expected_amounts = group.get("amounts")
+                transaction_ids = group.get("transaction_ids")
+                if (
+                    not isinstance(expected_amounts, list)
+                    or not isinstance(transaction_ids, list)
+                    or len(expected_amounts) != len(transaction_ids)
+                    or any(
+                        pre_injection_amounts.get(txn_id, group_rows[txn_id]["amount"]) != amount
+                        for txn_id, amount in zip(transaction_ids, expected_amounts, strict=True)
+                    )
+                ):
+                    _fail("P1.4 ATO transactions do not match private amount metadata")
+            if mechanism in {"collusion", "social_engineering"}:
+                incoming_ids = group.get("incoming_transaction_ids", [])
+                outgoing_ids = group.get("outgoing_transaction_ids", [])
+                amounts = group.get("amounts", [])
+                mule_id = group.get("mule_customer_id")
+                if not (
+                    isinstance(incoming_ids, list) and isinstance(outgoing_ids, list)
+                    and isinstance(amounts, list)
+                    and len(incoming_ids) == len(outgoing_ids) == len(amounts) > 0
+                    and isinstance(mule_id, str)
+                ):
+                    _fail(f"P1.4 {mechanism} cash-out chain is malformed")
+                expected_senders = group.get(
+                    "member_customer_ids" if mechanism == "collusion" else "victim_customer_ids"
+                )
+                actual_senders = [group_rows[item]["customer_id"] for item in incoming_ids]
+                if (
+                    not isinstance(expected_senders, list)
+                    or len(set(actual_senders)) != len(actual_senders)
+                    or set(actual_senders) != set(expected_senders)
+                ):
+                    _fail(f"P1.4 {mechanism} sender membership does not match its transaction chain")
+                for incoming_id, outgoing_id, amount in zip(incoming_ids, outgoing_ids, amounts, strict=True):
+                    incoming = group_rows[incoming_id]
+                    outgoing = group_rows[outgoing_id]
+                    if (
+                        incoming["recipient_customer_id"] != mule_id
+                        or outgoing["customer_id"] != mule_id
+                        or outgoing["recipient_customer_id"] != group.get("cashout_customer_id")
+                        or pre_injection_amounts.get(incoming_id, incoming["amount"]) != amount
+                        or pre_injection_amounts.get(outgoing_id, outgoing["amount"]) != amount
+                        or incoming["created_at"] >= outgoing["created_at"]
+                    ):
+                        _fail(f"P1.4 {mechanism} cash-out does not preserve incoming funds")
+                    settled_at = [
+                        event["event_at"] for event in events_by_txn.get(incoming_id, [])
+                        if event["event_type"] == "settled"
+                    ]
+                    if not settled_at or min(settled_at) >= outgoing["created_at"]:
+                        _fail(f"P1.4 {mechanism} cash-out precedes incoming settlement")
+                    delay = datetime.fromisoformat(outgoing["created_at"].replace("Z", "+00:00")) - datetime.fromisoformat(incoming["created_at"].replace("Z", "+00:00"))
+                    if delay > timedelta(hours=mule_window):
+                        _fail(f"P1.4 {mechanism} cash-out exceeds the mule capability window")
+                if mechanism == "social_engineering":
+                    if group.get("mule_role") != "internal_mule":
+                        _fail("P1.4 social-engineering recipient must have the private internal-mule role")
+                    mule = operational.execute(
+                        "SELECT event_at FROM customers WHERE customer_id = ?", (mule_id,)
+                    ).fetchone()
+                    first_receipt = datetime.fromisoformat(
+                        min(group_rows[item]["created_at"] for item in incoming_ids).replace(
+                            "Z", "+00:00"
+                        )
+                    ).astimezone(UTC)
+                    mule_available_at = (
+                        datetime.fromisoformat(mule["event_at"].replace("Z", "+00:00"))
+                        .astimezone(UTC)
+                        if mule is not None else None
+                    )
+                    if (
+                        mule_available_at is None
+                        or first_receipt - mule_available_at
+                        < timedelta(days=new_account_warmup_days)
+                    ):
+                        _fail(
+                            "P1.4 social-engineering mule lacks the configured as-of history "
+                            "before receipt"
+                        )
+            if mechanism == "legit_business_spike":
+                recipient_id = group.get("recipient_customer_id")
+                control_rows = [group_rows[item] for item in group.get("transaction_ids", [])]
+                expected_senders = group.get("sender_customer_ids")
+                expected_amounts = group.get("amounts")
+                actual_senders = {item["customer_id"] for item in control_rows}
+                if (
+                    not isinstance(recipient_id, str)
+                    or not isinstance(expected_senders, list)
+                    or len(actual_senders) < 2
+                    or actual_senders != set(expected_senders)
+                    or group.get("fan_in_count") != len(actual_senders)
+                    or not isinstance(expected_amounts, list)
+                    or len(expected_amounts) != len(control_rows)
+                    or any(
+                        pre_injection_amounts.get(txn_id, row["amount"]) != amount
+                        for txn_id, row, amount in zip(
+                            group.get("transaction_ids", []), control_rows, expected_amounts,
+                            strict=True,
+                        )
+                    )
+                    or any(item["recipient_customer_id"] != recipient_id for item in control_rows)
+                ):
+                    _fail("P1.4 business control lacks its high-fan-in transfers")
+            checked_groups += 1
+    return f"{checked_groups} P1.4 mechanism groups match private membership, episode, amounts, and timing"
+
+
 def validate_run(run_dir: str | Path) -> dict[str, Any]:
     """Validate one generated run and record the result in its private metadata."""
     root = Path(run_dir).expanduser().resolve()
@@ -1651,6 +1858,7 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))
             _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(operational, private, _load_run_metadata(private)))
+            _evaluate(checks, "p1_4_fraud_mechanism_chains", lambda: _validate_p14_mechanism_chains(operational, private))
             _evaluate(checks, "private_label_truth_matches_observed_labels", lambda: _validate_private_label_truth(operational, private))
             _evaluate(checks, "pending_is_not_negative", lambda: _validate_pending(private, _load_run_metadata(private), operational))
             _evaluate(checks, "run_metadata_and_canonical_fingerprint", lambda: _validate_metadata(operational, private, _load_run_metadata(private)))

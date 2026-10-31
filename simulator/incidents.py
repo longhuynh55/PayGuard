@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from simulator.config import SimulatorConfig
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record, utc_timestamp
+from simulator.transactions import card_token_for_customer, device_id_for_transaction
 
 
 PIPELINE_START_OFFSET_DAYS = 1
@@ -277,6 +278,7 @@ def inject_seasonal(
     additional_transaction_count: int,
     expected_relative_change: float,
     seed: int | None = None,
+    customer_ids: tuple[str, ...] | None = None,
 ) -> IncidentSummary:
     """Insert valid one-day business traffic and publish its expected metric."""
     _require_episode(operational, private, episode_id)
@@ -303,14 +305,26 @@ def inject_seasonal(
     )
     event_at = _business_midnight(business_date, config)
     channels = [config.transactions.channel.value]
-    customers = operational.execute(
-        """
-        SELECT customer_id FROM customers
-        WHERE episode_id IN ('base', ?) AND available_at <= ?
-        ORDER BY customer_id
-        """,
-        (episode_id, utc_timestamp(event_at)),
-    ).fetchall()
+    if customer_ids is None:
+        customers = operational.execute(
+            """
+            SELECT customer_id FROM customers
+            WHERE episode_id IN ('base', ?) AND available_at <= ?
+            ORDER BY customer_id
+            """,
+            (episode_id, utc_timestamp(event_at)),
+        ).fetchall()
+    else:
+        allowed_customer_ids = tuple(sorted(set(customer_ids)))
+        if not allowed_customer_ids:
+            raise ValueError("seasonal event requires at least one eligible base customer")
+        placeholders = ", ".join("?" for _ in allowed_customer_ids)
+        customers = operational.execute(
+            "SELECT customer_id FROM customers "
+            f"WHERE episode_id IN ('base', ?) AND available_at <= ? "
+            f"AND customer_id IN ({placeholders}) ORDER BY customer_id",
+            (episode_id, utc_timestamp(event_at), *allowed_customer_ids),
+        ).fetchall()
     merchants = operational.execute(
         """
         SELECT merchant_id FROM merchants
@@ -351,6 +365,18 @@ def inject_seasonal(
                     "episode_id": episode_id,
                     "customer_id": customer_id,
                     "merchant_id": merchant_id,
+                    "recipient_customer_id": None,
+                    "device_id": device_id_for_transaction(
+                        identity_seed=config.seed.value,
+                        draw_seed=run_seed,
+                        episode_id=episode_id,
+                        customer_id=customer_id,
+                        txn_id=txn_id,
+                        change_probability=config.world.legitimate_device_change_probability.value,
+                    ),
+                    "card_token": card_token_for_customer(config.seed.value, customer_id)
+                    if channels[0] == "card"
+                    else None,
                     "created_at": created_at,
                     "event_at": created_at,
                     "available_at": created_at,

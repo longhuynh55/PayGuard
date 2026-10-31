@@ -243,6 +243,184 @@ def _truth_counts_for_window(
     }
 
 
+def _auc(scores: list[float], labels: list[int]) -> float | None:
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if not positives or not negatives:
+        return None
+    ordered = sorted(zip(scores, labels, strict=True), key=lambda item: item[0])
+    positive_rank_sum = 0.0
+    index = 0
+    while index < len(ordered):
+        end = index + 1
+        while end < len(ordered) and ordered[end][0] == ordered[index][0]:
+            end += 1
+        average_rank = ((index + 1) + end) / 2
+        positive_rank_sum += average_rank * sum(label for _, label in ordered[index:end])
+        index = end
+    return round(
+        (positive_rank_sum - positives * (positives + 1) / 2) / (positives * negatives),
+        6,
+    )
+
+
+def _p14_feature_diagnostics(
+    operational: sqlite3.Connection,
+    private: sqlite3.Connection,
+    *,
+    episode_id: str,
+    config: SimulatorConfig,
+) -> dict[str, Any]:
+    """Measure point-in-time operational signals against private P1.5 truth."""
+    truth_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?",
+        (label_truth_metadata_key(episode_id),),
+    ).fetchone()
+    if truth_row is None:
+        raise ValueError(f"private P1.5 truth is missing for {episode_id!r}")
+    outcomes = json.loads(truth_row[0]).get("transactions", [])
+    labels_by_id = {
+        item["txn_id"]: int(item["true_label"] == "fraud") for item in outcomes
+    }
+    t0_text = utc_timestamp(_t0_timestamp(config, config.timeline.business_timezone.value))
+    all_rows = [
+        dict(row)
+        for row in operational.execute("SELECT * FROM transactions ORDER BY event_at, txn_id")
+        if (row["episode_id"] == "base" and episode_id == "base")
+        or (row["episode_id"] == "base" and row["event_at"] < t0_text)
+        or row["episode_id"] == episode_id
+    ]
+    customers = {
+        row["customer_id"]: dict(row)
+        for row in operational.execute("SELECT * FROM customers")
+        if row["episode_id"] in {"base", episode_id}
+    }
+    feature_scores: dict[str, list[float]] = {
+        "new_device_to_sender": [],
+        "first_transfer_to_counterparty": [],
+        "recipient_fan_in_7d": [],
+        "older_sender_share_7d": [],
+        "account_outflow_ratio_24h": [],
+        "new_or_dormant_recipient": [],
+        "amount_near_10m_vnd": [],
+    }
+    target_labels: list[int] = []
+    near_min = config.fraud.near_threshold_minimum_amount.value
+    near_max = config.fraud.near_threshold_maximum_amount.value
+    for target in all_rows:
+        if target["txn_id"] not in labels_by_id:
+            continue
+        current_at = _parse_timestamp(target["created_at"])
+        history = [
+            row for row in all_rows
+            if row["created_at"] <= target["created_at"]
+            and row["available_at"] <= target["created_at"]
+        ]
+        prior = [row for row in history if row["txn_id"] != target["txn_id"]]
+        device_seen = any(
+            row["customer_id"] == target["customer_id"]
+            and row["device_id"] == target["device_id"]
+            for row in prior
+        )
+        recipient_id = target["recipient_customer_id"]
+        is_transfer = recipient_id is not None
+        pair_seen = any(
+            row["customer_id"] == target["customer_id"]
+            and row["recipient_customer_id"] == recipient_id
+            for row in prior
+        ) if is_transfer else False
+        cutoff_7d = current_at - timedelta(days=7)
+        incoming_7d = [
+            row for row in history
+            if row["recipient_customer_id"] == recipient_id
+            and recipient_id is not None
+            and cutoff_7d < _parse_timestamp(row["created_at"]) <= current_at
+        ]
+        fan_in = len({row["customer_id"] for row in incoming_7d})
+        sender_ids = {row["customer_id"] for row in incoming_7d}
+        older_senders = sum(
+            customers.get(sender_id, {}).get("age_band") == "55+"
+            for sender_id in sender_ids
+        )
+        cutoff_24h = current_at - timedelta(hours=24)
+        recent_account = [
+            row for row in history
+            if cutoff_24h < _parse_timestamp(row["created_at"]) <= current_at
+        ]
+        outgoing = sum(
+            row["amount"] for row in recent_account
+            if row["customer_id"] == target["customer_id"]
+            and row["recipient_customer_id"] is not None
+            and type(row["amount"]) is int
+        )
+        incoming = sum(
+            row["amount"] for row in recent_account
+            if row["recipient_customer_id"] == target["customer_id"]
+            and type(row["amount"]) is int
+        )
+        prior_account_activity = [
+            _parse_timestamp(row["created_at"])
+            for row in prior
+            if row["customer_id"] == recipient_id or row["recipient_customer_id"] == recipient_id
+        ] if is_transfer else []
+        recipient = customers.get(recipient_id) if is_transfer else None
+        recipient_created = _parse_timestamp(recipient["event_at"]) if recipient else None
+        dormant_cutoff = current_at - timedelta(days=30)
+        new_or_dormant = bool(
+            is_transfer
+            and (
+                recipient_created is None
+                or recipient_created > dormant_cutoff
+                or not prior_account_activity
+                or max(prior_account_activity) <= dormant_cutoff
+            )
+        )
+        amount = target["amount"]
+        target_labels.append(labels_by_id[target["txn_id"]])
+        feature_scores["new_device_to_sender"].append(float(target["device_id"] is not None and not device_seen))
+        feature_scores["first_transfer_to_counterparty"].append(float(is_transfer and not pair_seen))
+        feature_scores["recipient_fan_in_7d"].append(float(fan_in))
+        feature_scores["older_sender_share_7d"].append(
+            float(older_senders / fan_in if fan_in else 0.0)
+        )
+        feature_scores["account_outflow_ratio_24h"].append(float(outgoing / incoming if incoming else 0.0))
+        feature_scores["new_or_dormant_recipient"].append(float(new_or_dormant))
+        feature_scores["amount_near_10m_vnd"].append(
+            float(type(amount) is int and near_min <= amount <= near_max)
+        )
+    aucs = {
+        feature: _auc(scores, target_labels)
+        for feature, scores in feature_scores.items()
+    }
+    strong = {
+        name: auc for name, auc in aucs.items()
+        if auc is not None and (auc >= 0.8 or auc <= 0.2)
+    }
+    explanations: dict[str, str] = {
+        "new_device_to_sender": "ATO uses a new device signature probabilistically; the background also contains independently sampled legitimate device changes.",
+        "first_transfer_to_counterparty": "The signal is derived from the sender-recipient history available by the transaction time.",
+        "recipient_fan_in_7d": "The signal counts distinct senders in the observed seven-day receiving window.",
+        "older_sender_share_7d": "The signal uses the operational age bands of distinct senders in the observed seven-day receiving window.",
+        "account_outflow_ratio_24h": "The signal compares observed outgoing and incoming transfer amounts in the trailing 24-hour window.",
+        "new_or_dormant_recipient": "The signal uses customer availability and prior operational activity, not a private role field.",
+        "amount_near_10m_vnd": (
+            "Non-card-testing fraud amounts are sampled from the configured "
+            f"{near_min:,}–{near_max:,} VND band."
+        ),
+    }
+    return {
+        "episode_id": episode_id,
+        "transaction_count": len(target_labels),
+        "fraud_count": sum(target_labels),
+        "auc_by_feature": aucs,
+        "strong_feature_explanations": {
+            name: {"auc": auc, "explanation": explanations[name]}
+            for name, auc in strong.items()
+        },
+        "scope": "private diagnostic; features were derived from operational transaction history at each transaction timestamp",
+    }
+
+
 def build_smoke_reports(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
@@ -503,6 +681,12 @@ def build_smoke_reports(
             "SELECT cause, COUNT(*) AS count FROM incident_truth GROUP BY cause ORDER BY cause"
         )
     }
+    p14_diagnostics = {
+        episode_id: _p14_feature_diagnostics(
+            operational, private, episode_id=episode_id, config=simulator_config
+        )
+        for episode_id in ("base", *(row["episode_id"] for row in episode_rows))
+    }
     private_report = {
         "report_version": 1,
         "profile": "smoke",
@@ -514,6 +698,7 @@ def build_smoke_reports(
         },
         "label_delay_oracle": private_oracle,
         "incident_truth_counts_by_cause": incident_counts,
+        "p1_4_feature_diagnostics": p14_diagnostics,
     }
     return public_report, private_report
 

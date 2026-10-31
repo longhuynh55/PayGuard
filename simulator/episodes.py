@@ -11,7 +11,11 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from simulator.config import EpisodeAssignment, EpisodeConfig, ProfileName, SimulatorConfig
-from simulator.fraud import FraudSummary, generate_card_testing
+from simulator.fraud import (
+    FraudSummary,
+    generate_card_testing,
+    generate_other_fraud_mechanisms,
+)
 from simulator.incidents import IncidentSummary, inject_data_pipeline, inject_seasonal
 from simulator.labels import LabelSummary, generate_label_events
 from simulator.randomness import derive_seed
@@ -94,6 +98,7 @@ def _inject_template(
     assignment: EpisodeAssignment,
     episode_id: str,
     seed: int,
+    world_summary: WorldSummary,
 ) -> IncidentSummary | None:
     if assignment.template == "clean":
         return None
@@ -126,6 +131,7 @@ def _inject_template(
             episode_config.templates.seasonal.expected_relative_change.value
         ),
         seed=seed,
+        customer_ids=world_summary.customer_ids,
     )
 
 
@@ -195,6 +201,15 @@ def generate_episodes(
             simulator_config,
             seed=simulator_config.seed.value,
             episode_id="base",
+            customer_ids=base_world.customer_ids,
+        )
+        generate_other_fraud_mechanisms(
+            operational,
+            private,
+            simulator_config,
+            base_world,
+            seed=simulator_config.seed.value,
+            episode_id="base",
         )
         base_labels = generate_label_events(
             operational,
@@ -240,6 +255,17 @@ def generate_episodes(
                 seed=episode_seed,
                 episode_id=episode_id,
                 duration_days=duration_days,
+                customer_ids=base_world.customer_ids,
+            )
+            generate_other_fraud_mechanisms(
+                operational,
+                private,
+                simulator_config,
+                base_world,
+                seed=episode_seed,
+                episode_id=episode_id,
+                duration_days=duration_days,
+                include_episode_mechanisms=assignment.template != "clean",
             )
             incident_summary = _inject_template(
                 operational,
@@ -249,6 +275,7 @@ def generate_episodes(
                 assignment,
                 episode_id,
                 episode_seed,
+                base_world,
             )
             label_summary = generate_label_events(
                 operational,
