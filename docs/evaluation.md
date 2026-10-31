@@ -18,6 +18,7 @@
   - *Hiệu ứng trễ* = số ngày cửa sổ metric + số ngày lookback của chính feature (ví dụ `amount_avg_7d`: 7 + 7; `txn_count_24h`: 7 + 1), lấy từ định nghĩa public của metric/feature, không từ metadata truth.
   - *`ambiguous_match`* chỉ chặn chấm đúng nguyên nhân, reward benign và utility. Metric rủi ro và routing (unsafe truth/episode rate, timely routing recall, detection recall) liên kết quyết định/incident với **mọi** truth ứng viên đã khả dụng tại `decision_at` (mục 3): đóng một incident ứng viên của cả benign B1 và fraud F1 thì F1 là unsafe (phản ví dụ `mixed` trong `review/verify_plan_claims.py`). Khó gán nguyên nhân không làm giảm detection recall.
   - Thành phần cùng `parent_scenario` (ca hai nguyên nhân) được ghép với cả hai truth thành phần.
+  - **Người dùng chốt 31/10/2026 (review P5.2 r2):** khi mọi truth ứng viên của một incident cùng một `parent_scenario` khác NULL, status là `matched` với nhiều `matched_truth_ids` (không phải `ambiguous_match`); chấm nguyên nhân theo từng truth thành phần. Ứng viên khác `parent_scenario` hoặc có NULL vẫn là `ambiguous_match`.
 - *Mở rộng:* phân xử thủ công ca ambiguous (người phân xử không xem câu trả lời agent).
 
 ## 3. Chấm theo thời điểm quyết định
