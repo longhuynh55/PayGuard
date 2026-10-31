@@ -103,7 +103,7 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
   | Detection recall | 2/2 (1.0) | 2/2 (1.0) |
   | `data_ticket` IDs | `ep-0002/incident-67c06d4b51c5196eb2894cd0`; `ep-0004/incident-367c348143656924203a5bc3` | `ep-0002/incident-67c06d4b51c5196eb2894cd0`; `ep-0004/incident-367c348143656924203a5bc3` |
 
-  Các ticket pipeline và invariant clean/seasonal giữ nguyên. Fix 1 giảm alert seasonal ở ngày sự kiện từ hai xuống không; `ep-0003` còn một volume alert nền tại T0, unmatched. Chi tiết phân phối/ngưỡng và lý do blocked nằm tại [monitoring.md](monitoring.md), mục 1.
+  Các ticket pipeline và invariant clean/seasonal giữ nguyên. Fix 1 giảm alert seasonal ở ngày sự kiện từ hai xuống không; `ep-0003` và `ep-0004` mỗi episode còn một volume alert nền tại T0 01/02 (đợt card-testing, residual 4,5 và 5,0), cả hai unmatched (`incident-6c9b3f…`, `incident-0cc327…`) — tính vào workload khi đếm P5.0b. Chi tiết phân phối/ngưỡng và lý do hoãn nằm tại [monitoring.md](monitoring.md), mục 1.
 
   **Quyết định người dùng 31/10:** seasonal-volume-match acceptance và benign support counting được defer tới pilot 60 / P1.6 vòng 2. Smoke hiện tại không phân biệt được residual seasonal 3,0 (`ep-0003`) và 3,5 (`ep-0005`) với clean max residual 4,25 (`ep-0001`); giữ ngưỡng 4,25.
 
