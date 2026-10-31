@@ -59,9 +59,12 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
 - **Nghiệm thu:** functional test tái hiện đúng các phản ví dụ của audit (A2 chuỗi code A → commit → lock → chấm test bị từ chối; A3 `--episode-role` bị lờ, `model evaluate` in test; B1 commit docs không chặn resume; B2 lock `benchmark` từ root smoke bị từ chối); docs `data.md` §9, `evaluation.md` §9 sửa cùng thay đổi; không gọi API thật trong test.
 - **Trạng thái 31/10:** chưa commit/merge. Review dự phòng Codex [r1](../review/findings/HARDEN-1-r1.md) và [r2](../review/findings/HARDEN-1-r2.md) đều `CHANGES_REQUIRED`; bốn finding r1 đã sửa. Full suite độc lập trên cây cuối: **418 passed, 1 xfailed** ([log](../review/findings/HARDEN-1-r2-tests.txt)); còn R2-1 chặn binding model artifacts với lock và R2-2 cần khôi phục một đầu vào regression đã bị thay. Đã hết hai vòng review; dừng chờ người dùng quyết định trước khi giao sửa hoặc review tiếp.
 
+- **Trạng thái:** ✅ merge 31/10 ([r1](../review/findings/HARDEN-1-r1.md), [r2](../review/findings/HARDEN-1-r2.md), vòng sửa 3 người dùng duyệt, [r3](../review/findings/HARDEN-1-r3.md) PASS; 422 passed + 1 xfailed). `model evaluate` tạm chặn calibration/test tới HARDEN-2.
+
 ### HARDEN-2 — Ràng hash artifact model vào identity (trước pilot)
 - **Bối cảnh:** [HARDEN-1 r2](../review/findings/HARDEN-1-r2.md) R2-1: `model evaluate` nạp `conformal.joblib`/metadata từ thư mục tùy ý; đổi threshold giữ nguyên version thì coverage test đổi mà lock vẫn PASS. Người dùng chọn 31/10: HARDEN-1 vòng 3 tạm chặn `model evaluate` trên calibration/test; task này mở lại đường đó.
 - **Việc:** đưa content hash của artifact model thực dùng (conformal, metadata quyết định tập score/metric, provenance model) vào frozen identity/manifest; xác minh trước khi đọc truth hay ghi side effect; bỏ chặn tạm.
+- **Kèm [HARDEN-1 r3](../review/findings/HARDEN-1-r3.md) NB-1/NB-2:** ngoài harness, đối chiếu role đã chọn với `episode_manifest.role` private trước khi đọc truth (relabel `episodes.role` sau khi gỡ trigger hiện chấm được truth test); xử lý có chủ đích nhánh chết `model/__main__.py:144,152-158` khi mở lại held-out.
 - **Nghiệm thu:** ca đổi threshold giữ nguyên version → từ chối, không chạm truth/report/ledger; artifact đúng → chạy được sau lock.
 
 ### P5.0c — Report shell khóa trước calibration
