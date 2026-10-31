@@ -16,6 +16,8 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 | P3.7 Tính hợp lệ monitoring ([sub-plan P3](p3-implementation.md)) | Codex | P5.2 | Metric volume theo ngày + sửa alert nền `amount_avg_7d` (người dùng duyệt 31/10) |
 | P5.0b Bảng support development | Codex | P5.2, P3.7 | Như mục P5.0b dưới |
 | P5.1 Harness + sổ chi phí | Codex | P4.1 vòng 2 merge | Như mục P5.1 dưới |
+| P5.0c Report shell (người dùng duyệt 31/10, đề xuất brainstorm 2) | Codex | P5.0b | Như mục P5.0c dưới |
+| P5.0d Khả thi chi phí pilot (người dùng duyệt 31/10, đề xuất brainstorm 3) | Codex | P5.0b | Như mục P5.0d dưới |
 
 ### P5.2 — Matcher hoàn chỉnh trước calibration
 - **Mục tiêu:** matcher đúng [evaluation.md](evaluation.md) mục 2: thời gian gồm hiệu ứng trễ của cửa sổ metric, segment, feature; trạng thái `matched` / `ambiguous_match` / `unmatched`.
@@ -46,6 +48,14 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
 - **Mục tiêu:** đo trên episode `development` (không calibration/test): số truth duy nhất theo episode và nhóm nguyên nhân; matched/ambiguous/unmatched; cửa sổ đủ; rule coverage; số ca tới agent; số ca đủ điều kiện đóng. Báo cáo private.
 - **Nghiệm thu:** bảng tái lập bằng một lệnh; ghi rõ là pilot/feasibility, không tăng episode hay đổi 12/24/24.
 - **Phụ thuộc:** tình trạng seasonal-volume-match / benign support theo quyết định người dùng 31/10 được ghi tại [bàn giao P3.7](p3-implementation.md).
+
+### P5.0c — Report shell khóa trước calibration
+- **Mục tiêu:** cố định bảng/biểu đồ README trước khi chạm calibration, theo [evaluation.md](evaluation.md) mục 4–8: T1 kết quả chính theo policy (4 baseline + nhánh K = N = 1): unsafe truth rate `x/n` [CI], unsafe episode rate, detection recall, timely routing (tách tự động / `human_review`), benign automation, workload (case/recheck/ticket/incident con), USD; T2 chênh lệch ghép cặp hybrid-UQ − rule+human, bootstrap theo episode cùng chỉ số resample (mục 7); T3 so sánh 1 — từng ca A ≠ B theo nhóm truth; T4 so sánh 2 — K = 1 vs K = 3 cạnh USD; T5 nhánh agent theo nguồn, known/unknown, benign không runbook; T6 matched/ambiguous/unmatched theo policy + cờ cận dưới quan sát; F1 risk–coverage theo tau (chỉ calibration), F2 chi phí–chất lượng.
+- **Nghiệm thu:** (1) một lệnh sinh T1–T6 + F1–F2 từ harness P5.1 với fake provider trên development; mẫu số 0 → `NA`, mẫu toàn 0 ghi rõ bootstrap suy biến; (2) functional test: bootstrap ghép cặp dùng cùng chỉ số resample cho mọi policy và resample nguyên episode; (3) code report nằm trong phạm vi hash của lock `prompt-rule` (đổi report sau lock bị phát hiện); (4) không đọc calibration/test. Nhánh chưa có (K = 3, UQ) hiện `NA` có lý do, không bịa số.
+
+### P5.0d — Khả thi chi phí pilot 60
+- **Mục tiêu:** (1) dùng số incident tới agent mỗi episode development từ P5.0b, theo nhóm truth, gồm cả episode clean (alert nền); (2) **một lượt thật nhỏ** (người dùng duyệt 31/10): agent một bước hiện tại qua OpenRouter trên 1–2 incident development, ghi token/lượt, recheck; chi phí qua sổ chi phí bền P5.1, tính vào trần 10 USD; K = N = 3 thật hoãn tới P4c; (3) bảng dự báo chi phí pilot 60 cho từng nhánh (rule + agent, K = 1, K = 3 ngoại suy) với khoảng lạc quan/bi quan, so với trần 10 USD.
+- **Nghiệm thu:** tái lập bằng một lệnh (phần dự báo; lượt thật chạy đúng một lần, kết quả lưu private); chỉ development; ghi rõ là feasibility; không đổi 12/24/24 hay số episode. Dự báo vượt trần → báo người dùng, không tự đổi phạm vi.
 
 ### P5.1 — Harness tối thiểu và sổ chi phí bền
 - **Mục tiêu:** một lệnh chạy dữ liệu → model → monitoring → alert → triage → báo cáo (MASTER mục 1). Base đóng băng sau scores/metrics/alerts, trước mọi incident/decision; mỗi policy chạy trên bản copy operational riêng; incident tính lại theo lịch sử decision riêng.

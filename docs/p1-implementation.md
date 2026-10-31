@@ -219,8 +219,8 @@ uv run pytest
 **Thứ tự P1 vòng 2 — người dùng duyệt 29/10/2026.** Bốn đợt nối tiếp; mỗi đợt review Opus và merge trước khi mở đợt sau:
 1. P1.3 vòng 2 (kênh, vai trò tài khoản, refund/reversal, sửa `_poisson_count`).
 2. P1.4 vòng 2 (đủ cơ chế fraud, social engineering, cash-out, `legit_business_spike`).
-3. P1.6 vòng 2 (các template còn lại trong [data.md](data.md) mục Kịch bản sự cố, ca hai nguyên nhân).
-4. P1.7 + P1.8 vòng 2 (pilot 60 episode 12/24/24, báo cáo support đầy đủ, ca P4.6 thứ ba).
+3. P1.6 vòng 2 (các template còn lại trong [data.md](data.md) mục Kịch bản sự cố, ca hai nguyên nhân). Phải sinh được hai nguyên nhân fraud + mùa vụ và fraud một nguyên nhân trùng ngày `business_calendar` theo cơ cấu pilot chốt 31/10 ([data.md](data.md) mục 4).
+4. P1.7 + P1.8 vòng 2 (pilot 60 episode 12/24/24, báo cáo support đầy đủ, ca P4.6 thứ ba). Manifest stratify theo cơ cấu injected [data.md](data.md) mục 4 (chốt 31/10).
 
 **Backlog P1.3 vòng 2 (không chặn, [findings r2](../review/findings/P1.3-r2-r2.md)):** test trigger refund chèn adjustment hợp lệ trước nên che các ca null/vượt gốc/không sau gốc (mutation vẫn pass) → thử từng ca trên giao dịch chưa có adjustment; tập data_ticket tường minh thiếu kiểm `source='rule'`, `cause='data_pipeline'` và tổng số dòng; thiếu test âm cho các nhánh validator pre-injection (`validate.py:843/756/762/547/686`); `data.md` mục effect reference chưa link mô tả `pre_injection_amount_by_txn_id`.
 
