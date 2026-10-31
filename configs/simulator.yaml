@@ -141,6 +141,13 @@ world:
     provenance:
       kind: assumption
       reference: P1.4 background control for legitimate device changes; no population rate is claimed.
+  legitimate_new_accounts_per_base_history:
+    value: 2
+    unit: new legitimate accounts in the base history
+    rationale: Add a small synthetic cohort of ordinary customer accounts with merchant payment history early after history start so account creation is not unique to mule behavior and does not censor the monitoring reference or episode samples.
+    provenance:
+      kind: assumption
+      reference: P1.4 round 2 review fix; a minimal synthetic control cohort, not an estimate of account-opening rates.
   customer_segments:
     value: [retail]
     unit: segment codes

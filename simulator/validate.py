@@ -20,6 +20,7 @@ from simulator.config import (
 )
 from simulator.episodes import derive_episode_seed
 from simulator.labels import LABEL_POLICY_VERSION, snapshot_labels
+from simulator.randomness import keyed_rng
 from simulator.reproducibility import (
     RUN_FINGERPRINT_METADATA_KEY,
     canonical_episode_fingerprint,
@@ -1534,6 +1535,7 @@ def _validate_private_label_truth(
     private: sqlite3.Connection,
 ) -> str:
     all_outcomes: dict[str, dict[str, Any]] = {}
+    metadata_by_episode: dict[str, dict[str, Any]] = {}
     rows = private.execute(
         "SELECT key, value_json FROM run_metadata WHERE key LIKE 'p1.5.label_truth.v1%'"
     ).fetchall()
@@ -1541,6 +1543,12 @@ def _validate_private_label_truth(
         _fail("private P1.5 label truth metadata is missing")
     for metadata_row in rows:
         metadata = json.loads(metadata_row["value_json"])
+        episode_id = metadata.get("episode_id")
+        if not isinstance(episode_id, str) or not episode_id:
+            _fail("private label truth must identify its episode")
+        if episode_id in metadata_by_episode:
+            _fail(f"private label truth duplicates episode {episode_id!r}")
+        metadata_by_episode[episode_id] = metadata
         for outcome in metadata.get("transactions", []):
             txn_id = outcome.get("txn_id")
             if txn_id in all_outcomes:
@@ -1560,16 +1568,58 @@ def _validate_private_label_truth(
     }
     for txn_id, outcome in all_outcomes.items():
         transaction = transactions[txn_id]
+        metadata = metadata_by_episode.get(transaction["episode_id"])
+        if metadata is None:
+            _fail(f"private label policy is missing for transaction {txn_id}")
         if outcome.get("true_label") not in {"fraud", "legit"}:
             _fail(f"private label truth has invalid target for {txn_id}")
         if outcome.get("event_at") != transaction["event_at"]:
             _fail(f"private label truth event_at differs for {txn_id}")
+        random_key = outcome.get("random_key")
+        seed = metadata.get("seed")
+        probability_reported = metadata.get("probability_reported")
+        minimum_delay = metadata.get("minimum_delay_days")
+        maximum_delay = metadata.get("maximum_delay_days")
+        if (
+            not isinstance(random_key, str)
+            or not random_key
+            or type(seed) is not int
+            or type(probability_reported) not in {int, float}
+            or type(minimum_delay) is not int
+            or type(maximum_delay) is not int
+        ):
+            _fail(f"private label truth has invalid stable draw inputs for {txn_id}")
+        expected_reported = (
+            keyed_rng(seed, "p1.labels.reporting", random_key).random()
+            < probability_reported
+        )
+        if outcome.get("reported") is not expected_reported:
+            _fail(f"private label report draw does not reproduce for {txn_id}")
+        expected_delay = (
+            keyed_rng(seed, "p1.labels.delay_days", random_key).randint(
+                minimum_delay, maximum_delay
+            )
+            if expected_reported
+            else None
+        )
+        if outcome.get("report_delay_days") != expected_delay:
+            _fail(f"private label delay draw does not reproduce for {txn_id}")
         label_event = labels.get(txn_id)
-        if bool(outcome.get("reported")) != (label_event is not None):
+        if expected_reported != (label_event is not None):
             _fail(f"operational reported-label presence differs from private outcome for {txn_id}")
-        if label_event is not None and label_event["label"] != outcome["true_label"]:
-            _fail(f"operational observed label differs from private outcome for {txn_id}")
-    return f"private label truth covers {len(transactions)} transactions; reported labels agree"
+        if label_event is not None:
+            if label_event["label"] != outcome["true_label"]:
+                _fail(f"operational observed label differs from private outcome for {txn_id}")
+            expected_reported_at = utc_timestamp(
+                datetime.fromisoformat(transaction["event_at"].replace("Z", "+00:00"))
+                + timedelta(days=expected_delay)
+            )
+            if label_event["reported_at"] != expected_reported_at:
+                _fail(f"operational reported_at differs from the stable label draw for {txn_id}")
+    return (
+        f"private label truth covers {len(transactions)} transactions; report/delay draws "
+        "reproduce from private stable keys and observed labels agree"
+    )
 
 
 def _evaluate(checks: list[dict[str, Any]], name: str, check: Callable[[], str]) -> None:
@@ -1657,6 +1707,10 @@ def _validate_p14_mechanism_chains(
         events_by_txn.setdefault(row["txn_id"], []).append(dict(row))
     checked_groups = 0
     episode_ids = [row[0] for row in operational.execute("SELECT episode_id FROM episodes")]
+    templates = {
+        row["episode_id"]: row["template"]
+        for row in private.execute("SELECT episode_id, template FROM episode_manifest")
+    }
     for episode_id in episode_ids:
         key = "p1.4.mechanisms.v1" if episode_id == "base" else f"p1.4.mechanisms.v1:{episode_id}"
         metadata_row = private.execute(
@@ -1668,6 +1722,8 @@ def _validate_p14_mechanism_chains(
         groups = metadata.get("groups") if isinstance(metadata, dict) else None
         if metadata.get("episode_id") != episode_id or not isinstance(groups, list):
             _fail(f"P1.4 mechanism metadata is malformed for {episode_id}")
+        if templates.get(episode_id) == "clean" and groups:
+            _fail(f"clean episode {episode_id} contains P1.4 mechanism groups")
         for group in groups:
             if not isinstance(group, dict) or group.get("role") not in {"fraud", "benign_control"}:
                 _fail(f"P1.4 mechanism group has no private role for {episode_id}")
@@ -1716,6 +1772,41 @@ def _validate_p14_mechanism_chains(
                     )
                 ):
                     _fail("P1.4 ATO transactions do not match private amount metadata")
+                if group.get("device_signature") is True:
+                    ato_rows = [group_rows[item] for item in transaction_ids]
+                    device_ids = {row["device_id"] for row in ato_rows}
+                    customer_ids = {row["customer_id"] for row in ato_rows}
+                    first_created_at = min(row["created_at"] for row in ato_rows)
+                    if len(device_ids) != 1 or None in device_ids or len(customer_ids) != 1:
+                        _fail("P1.4 signed ATO group must use one new device for one customer")
+                    customer_id = next(iter(customer_ids))
+                    device_id = next(iter(device_ids))
+                    prior_device = operational.execute(
+                        """
+                        SELECT 1 FROM transactions
+                        WHERE customer_id = ? AND device_id = ?
+                          AND created_at < ? AND available_at <= ?
+                          AND (
+                            episode_id = ?
+                            OR (episode_id = 'base' AND ? <> 'base' AND event_at < ?)
+                          )
+                        LIMIT 1
+                        """,
+                        (
+                            customer_id,
+                            device_id,
+                            first_created_at,
+                            first_created_at,
+                            episode_id,
+                            episode_id,
+                            T0_UTC_TEXT,
+                        ),
+                    ).fetchone()
+                    if prior_device is not None:
+                        _fail(
+                            "P1.4 signed ATO device was already available for the customer "
+                            "before the campaign"
+                        )
             if mechanism in {"collusion", "social_engineering"}:
                 incoming_ids = group.get("incoming_transaction_ids", [])
                 outgoing_ids = group.get("outgoing_transaction_ids", [])
@@ -1812,6 +1903,163 @@ def _validate_p14_mechanism_chains(
     return f"{checked_groups} P1.4 mechanism groups match private membership, episode, amounts, and timing"
 
 
+def _validate_operational_identifier_shapes(
+    operational: sqlite3.Connection, private: sqlite3.Connection
+) -> str:
+    """Ensure IDs have one observable shape across truth classes and streams."""
+    transaction_pattern = re.compile(r"txn-[0-9a-f]{64}\Z")
+    customer_pattern = re.compile(r"customer-[0-9]{6}\Z")
+    transaction_ids = [
+        row[0] for row in operational.execute("SELECT txn_id FROM transactions")
+    ]
+    customer_ids = [
+        row[0] for row in operational.execute("SELECT customer_id FROM customers")
+    ]
+    if not transaction_ids or not customer_ids:
+        _fail("generated transaction and customer IDs must be present")
+    if any(not isinstance(item, str) or not transaction_pattern.fullmatch(item) for item in transaction_ids):
+        _fail("operational transaction IDs must all use the uniform txn- plus SHA-256 shape")
+    if any(not isinstance(item, str) or not customer_pattern.fullmatch(item) for item in customer_ids):
+        _fail("operational customer IDs must all use the uniform six-digit customer shape")
+
+    fraud_shapes: set[str] = set()
+    legit_shapes: set[str] = set()
+    for episode_id, in operational.execute("SELECT episode_id FROM episodes"):
+        key = (
+            "p1.5.label_truth.v1"
+            if episode_id == "base"
+            else f"p1.5.label_truth.v1:{episode_id}"
+        )
+        truth_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        if truth_row is None:
+            _fail(f"private label truth is missing for identifier-shape audit: {episode_id}")
+        outcomes = json.loads(truth_row[0]).get("transactions", [])
+        for outcome in outcomes:
+            shape = "sha256" if transaction_pattern.fullmatch(outcome["txn_id"]) else "other"
+            if outcome["true_label"] == "fraud":
+                fraud_shapes.add(shape)
+            elif outcome["true_label"] == "legit":
+                legit_shapes.add(shape)
+    if fraud_shapes and legit_shapes and fraud_shapes != legit_shapes:
+        _fail("transaction ID format class differs between private fraud and legitimate truth")
+    return (
+        f"{len(transaction_ids)} transactions share one SHA-256 ID shape; "
+        f"{len(customer_ids)} customers share one six-digit ID shape; "
+        "private fraud and legitimate labels see identical transaction format classes"
+    )
+
+
+def _validate_legitimate_new_account_control(
+    operational: sqlite3.Connection, private: sqlite3.Connection
+) -> str:
+    metadata_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?",
+        ("p1.4.legitimate_new_accounts.v1",),
+    ).fetchone()
+    if metadata_row is None:
+        _fail("private legitimate-new-account control metadata is missing")
+    cohort = json.loads(metadata_row[0])
+    if not isinstance(cohort, dict) or cohort.get("episode_id") != "base":
+        _fail("legitimate-new-account control must be recorded in base-history metadata")
+    customer_ids = cohort.get("customer_ids")
+    if (
+        not isinstance(customer_ids, list)
+        or any(not isinstance(item, str) for item in customer_ids)
+        or len(customer_ids) != len(set(customer_ids))
+        or cohort.get("count") != len(customer_ids)
+    ):
+        _fail("private legitimate-new-account control membership is malformed")
+    run_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?", (RUN_METADATA_KEY,)
+    ).fetchone()
+    if run_row is None:
+        _fail("P1.8 run metadata is required for legitimate-new-account validation")
+    run_metadata = json.loads(run_row[0])
+    expected_count = (
+        run_metadata.get("resolved_config", {})
+        .get("simulator", {})
+        .get("world", {})
+        .get("legitimate_new_accounts_per_base_history", {})
+        .get("value")
+    )
+    if type(expected_count) is not int or len(customer_ids) != expected_count:
+        _fail("legitimate-new-account cohort size differs from resolved simulator config")
+    if not customer_ids:
+        return "configuration requests no legitimate new-account controls"
+
+    placeholders = ", ".join("?" for _ in customer_ids)
+    customers = {
+        row["customer_id"]: dict(row)
+        for row in operational.execute(
+            "SELECT customer_id, episode_id, event_at FROM customers "
+            f"WHERE customer_id IN ({placeholders})",
+            tuple(customer_ids),
+        )
+    }
+    if set(customers) != set(customer_ids) or any(
+        row["episode_id"] != "base" for row in customers.values()
+    ):
+        _fail("legitimate new-account controls must be registered in base history")
+    history_start = operational.execute(
+        "SELECT MIN(event_at) FROM customers WHERE episode_id = 'base'"
+    ).fetchone()[0]
+    if any(row["event_at"] <= history_start for row in customers.values()):
+        _fail("legitimate new-account controls must be created after base history starts")
+
+    mule_ids: set[str] = set()
+    for row in private.execute(
+        "SELECT value_json FROM run_metadata WHERE key LIKE 'p1.4.mechanisms.v1%'"
+    ):
+        value = json.loads(row[0])
+        for group in value.get("groups", []):
+            mule_id = group.get("mule_customer_id")
+            if isinstance(mule_id, str):
+                mule_ids.add(mule_id)
+    if set(customer_ids) & mule_ids:
+        _fail("legitimate new-account controls overlap private P1.4 mule participants")
+
+    transactions = [
+        dict(row)
+        for row in operational.execute(
+            "SELECT txn_id, episode_id, customer_id, merchant_id, recipient_customer_id "
+            f"FROM transactions WHERE customer_id IN ({placeholders})",
+            tuple(customer_ids),
+        )
+    ]
+    by_customer: dict[str, list[dict[str, Any]]] = {item: [] for item in customer_ids}
+    for transaction in transactions:
+        by_customer[transaction["customer_id"]].append(transaction)
+        if (
+            transaction["episode_id"] != "base"
+            or transaction["merchant_id"] is None
+            or transaction["recipient_customer_id"] is not None
+        ):
+            _fail("legitimate new-account controls must have ordinary base merchant payments")
+    if any(not values for values in by_customer.values()):
+        _fail("each legitimate new-account control must have merchant payment history")
+
+    label_truth_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = 'p1.5.label_truth.v1'"
+    ).fetchone()
+    if label_truth_row is None:
+        _fail("base private label truth is required for new-account controls")
+    outcomes = {
+        item.get("txn_id"): item
+        for item in json.loads(label_truth_row[0]).get("transactions", [])
+    }
+    if any(
+        outcomes.get(transaction["txn_id"], {}).get("true_label") != "legit"
+        for transaction in transactions
+    ):
+        _fail("legitimate new-account merchant payments must have private legit truth")
+    return (
+        f"{len(customer_ids)} legitimate new accounts occur after base-history start, "
+        "have ordinary merchant history, and are separate from mule truth"
+    )
+
+
 def validate_run(run_dir: str | Path) -> dict[str, Any]:
     """Validate one generated run and record the result in its private metadata."""
     root = Path(run_dir).expanduser().resolve()
@@ -1858,6 +2106,8 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))
             _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(operational, private, _load_run_metadata(private)))
+            _evaluate(checks, "operational_identifier_shape_contract", lambda: _validate_operational_identifier_shapes(operational, private))
+            _evaluate(checks, "legitimate_new_account_control", lambda: _validate_legitimate_new_account_control(operational, private))
             _evaluate(checks, "p1_4_fraud_mechanism_chains", lambda: _validate_p14_mechanism_chains(operational, private))
             _evaluate(checks, "private_label_truth_matches_observed_labels", lambda: _validate_private_label_truth(operational, private))
             _evaluate(checks, "pending_is_not_negative", lambda: _validate_pending(private, _load_run_metadata(private), operational))

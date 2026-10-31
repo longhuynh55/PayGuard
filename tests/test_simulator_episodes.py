@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timedelta
@@ -25,6 +26,7 @@ from simulator.reproducibility import (
 )
 from simulator.schema import PRIVATE_TABLES
 from simulator.storage import create_export_stores, list_operational_schema
+from simulator.transactions import LEGITIMATE_NEW_ACCOUNTS_METADATA_KEY
 from simulator.world import ACCOUNT_PROFILE_METADATA_KEY
 
 
@@ -136,6 +138,12 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
                 (ACCOUNT_PROFILE_METADATA_KEY,),
             ).fetchone()[0]
         )
+        legitimate_account_metadata = json.loads(
+            pair.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key = ?",
+                (LEGITIMATE_NEW_ACCOUNTS_METADATA_KEY,),
+            ).fetchone()[0]
+        )
 
         assert len(summary.episodes) == 5
         assert Counter(row["role"] for row in manifest.values()) == {
@@ -181,17 +189,68 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
                 "SELECT * FROM transactions WHERE recipient_customer_id IS NOT NULL"
             )
         ]
-        simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
-        near_min = simulator_config.fraud.near_threshold_minimum_amount.value
-        near_max = simulator_config.fraud.near_threshold_maximum_amount.value
+        p14_transaction_ids: set[str] = set()
+        p14_mule_ids: set[str] = set()
+        for metadata_row in pair.private.execute(
+            "SELECT value_json FROM run_metadata WHERE key LIKE 'p1.4.mechanisms.v1%'"
+        ):
+            groups = json.loads(metadata_row[0])["groups"]
+            for group in groups:
+                p14_transaction_ids.update(
+                    txn_id
+                    for field in (
+                        "transaction_ids",
+                        "incoming_transaction_ids",
+                        "outgoing_transaction_ids",
+                    )
+                    for txn_id in group.get(field, [])
+                )
+                if isinstance(group.get("mule_customer_id"), str):
+                    p14_mule_ids.add(group["mule_customer_id"])
         account_transfers = [
             row for row in account_transfers
             if row["customer_id"] in account_roles
             and row["recipient_customer_id"] in account_roles
-            and not (
-                type(row["amount"]) is int and near_min <= row["amount"] <= near_max
-            )
+            and row["txn_id"] not in p14_transaction_ids
         ]
+        generated_transaction_ids = [
+            row[0] for row in pair.operational.execute("SELECT txn_id FROM transactions")
+        ]
+        generated_customer_ids = [
+            row[0] for row in pair.operational.execute("SELECT customer_id FROM customers")
+        ]
+        assert all(re.fullmatch(r"txn-[0-9a-f]{64}", item) for item in generated_transaction_ids)
+        assert all(re.fullmatch(r"customer-[0-9]{6}", item) for item in generated_customer_ids)
+        simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+        legitimate_new_ids = set(legitimate_account_metadata["customer_ids"])
+        assert legitimate_account_metadata["episode_id"] == "base"
+        assert legitimate_account_metadata["count"] == (
+            simulator_config.world.legitimate_new_accounts_per_base_history.value
+        )
+        assert len(legitimate_new_ids) == legitimate_account_metadata["count"]
+        assert not legitimate_new_ids & p14_mule_ids
+        history_start = pair.operational.execute(
+            "SELECT MIN(event_at) FROM customers WHERE episode_id = 'base'"
+        ).fetchone()[0]
+        assert all(
+            pair.operational.execute(
+                "SELECT 1 FROM customers WHERE customer_id = ? AND episode_id = 'base' "
+                "AND event_at > ?",
+                (customer_id, history_start),
+            ).fetchone()
+            and pair.operational.execute(
+                "SELECT 1 FROM transactions WHERE customer_id = ? AND episode_id = 'base' "
+                "AND merchant_id IS NOT NULL AND recipient_customer_id IS NULL LIMIT 1",
+                (customer_id,),
+            ).fetchone()
+            for customer_id in legitimate_new_ids
+        )
+        assert not pair.operational.execute(
+            "SELECT 1 FROM transactions WHERE episode_id <> 'base' AND customer_id IN ("
+            + ",".join("?" for _ in legitimate_new_ids)
+            + ") LIMIT 1",
+            tuple(sorted(legitimate_new_ids)),
+        ).fetchone()
         household_accounts = {
             customer_id
             for customer_id, role in account_roles.items()
@@ -214,7 +273,8 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             for row in pair.operational.execute(
                 "SELECT customer_id, merchant_id FROM transactions WHERE merchant_id IS NOT NULL"
             )
-            if account_roles[row["customer_id"]] == "household_business"
+            if row["customer_id"] in account_roles
+            and account_roles[row["customer_id"]] == "household_business"
             and row["merchant_id"] in supplier_merchants[row["customer_id"]]
         ]
         assert household_supplier_payments

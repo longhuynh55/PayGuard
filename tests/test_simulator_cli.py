@@ -211,6 +211,18 @@ def test_cli_recipient_signals_separate_cashout_from_business_fanin(
 
         diagnostic_path = valid_smoke_run / "private" / "reports" / "smoke_truth.json"
         assert diagnostic_path.is_file() and diagnostic_path.stat().st_size > 0
+        diagnostics = json.loads(diagnostic_path.read_text(encoding="utf-8"))[
+            "p1_4_feature_diagnostics"
+        ]
+        assert diagnostics
+        for diagnostic in diagnostics.values():
+            assert diagnostic["id_format_artifacts"]["transaction_format_class_auc"] == 0.5
+            assert diagnostic["id_format_artifacts"]["customer_format_class_auc"] == 0.5
+            assert diagnostic["auc_by_feature"]["recipient_account_age_days"] is not None
+            contrast = diagnostic["by_mechanism"][
+                "social_engineering_vs_legit_business_spike"
+            ]
+            assert "recipient_account_age_days" in contrast["auc_by_feature"]
 
 
 @pytest.fixture(scope="module")
@@ -343,6 +355,45 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
     assert "Validation summary:" in validated.stdout
+    assert "report/delay draws reproduce from private stable keys" in validated.stdout
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "trigger", "leaked_id"),
+    [
+        ("transactions", "txn_id", "transactions_identity_immutable", "txn-fraud-only"),
+        ("customers", "customer_id", "customers_identity_immutable", "customer-mule"),
+    ],
+)
+def test_validator_rejects_nonuniform_operational_identifier_shapes(
+    tmp_path: Path,
+    valid_smoke_run: Path,
+    table: str,
+    column: str,
+    trigger: str,
+    leaked_id: str,
+) -> None:
+    run_dir = tmp_path / f"{table}-identifier-leak"
+    shutil.copytree(valid_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(f"DROP TRIGGER {trigger}")
+        original_id = connection.execute(
+            f'SELECT "{column}" FROM "{table}" ORDER BY "{column}" LIMIT 1'
+        ).fetchone()[0]
+        connection.execute(
+            f'UPDATE "{table}" SET "{column}" = ? WHERE "{column}" = ?',
+            (leaked_id, original_id),
+        )
+
+    result = validate_run(run_dir)
+    shape_check = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "operational_identifier_shape_contract"
+    )
+    assert shape_check["passed"] is False
 
 
 @pytest.mark.parametrize("pipeline_mode", ["null", "multiply_100"])
@@ -380,7 +431,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
         str(episode_config),
     )
     assert generated.returncode == 0, generated.stdout + generated.stderr
-    assert "Validation summary: 17 passed, 0 failed" in generated.stdout
+    assert "Validation summary: 19 passed, 0 failed" in generated.stdout
 
     with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
         effects = [
@@ -416,7 +467,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
 
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
-    assert "Validation summary: 17 passed, 0 failed" in validated.stdout
+    assert "Validation summary: 19 passed, 0 failed" in validated.stdout
 
 
 def test_generate_checks_episode_duration_against_selected_simulator_config(
@@ -768,18 +819,8 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         rule_decision = connection.execute(
             "SELECT decision_id FROM decisions WHERE source='rule' LIMIT 1"
         ).fetchone()
-        if rule_decision is None:
-            # Reuse an agent row as a deliberately invalid rule record when no
-            # rule-issued data ticket is present in a smoke baseline.
-            rule_decision_id = connection.execute(
-                "SELECT decision_id FROM decisions WHERE source='agent' LIMIT 1"
-            ).fetchone()[0]
-            connection.execute(
-                "UPDATE decisions SET source='rule', model_slug=NULL WHERE decision_id=?",
-                (rule_decision_id,),
-            )
-        else:
-            rule_decision_id = rule_decision[0]
+        assert rule_decision is not None, "smoke baseline must include a rule-issued decision"
+        rule_decision_id = rule_decision[0]
         connection.execute(
             "UPDATE decisions SET model_slug='fake/payguard-p4-round1' WHERE decision_id=?",
             (rule_decision_id,),

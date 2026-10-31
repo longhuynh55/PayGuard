@@ -7,9 +7,12 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
+from typing import MutableMapping
 from zoneinfo import ZoneInfo
 
 from simulator.config import SimulatorConfig
+from simulator.identifiers import customer_id as generate_customer_id
+from simulator.identifiers import transaction_id
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record
 from simulator.transactions import card_token_for_customer, device_id_for_transaction
@@ -50,19 +53,22 @@ def _fraud_transaction_id(
     episode_id: str,
     *keys: object,
     occupied: set[str],
+    transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> str:
     """Return a namespaced, opaque ID independent of background transaction counts."""
     scope = "base" if episode_id == "base" else episode_id
-    payload = json.dumps(
+    legacy_payload = json.dumps(
         ["payguard-fraud-txn-v1", seed, namespace, episode_id, *keys],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    digest = hashlib.sha256(payload).hexdigest()[:28]
-    txn_id = f"txn-{scope}-x{digest}"
+    legacy_random_key = f"txn-{scope}-x{hashlib.sha256(legacy_payload).hexdigest()[:28]}"
+    txn_id = transaction_id(seed, namespace, episode_id, *keys)
     if txn_id in occupied:
         raise ValueError("fraud transaction ID collision in a namespaced stream")
     occupied.add(txn_id)
+    if transaction_random_keys is not None:
+        transaction_random_keys[txn_id] = legacy_random_key
     return txn_id
 
 
@@ -171,6 +177,7 @@ def generate_card_testing(
     episode_id: str = "base",
     duration_days: int = 30,
     customer_ids: tuple[str, ...] | None = None,
+    transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> FraudSummary:
     """Append probabilistic card testing and similar benign traffic to one stream.
 
@@ -358,6 +365,7 @@ def generate_card_testing(
                         "small",
                         attempt_index,
                         occupied=txn_ids,
+                        transaction_random_keys=transaction_random_keys,
                     )
                     if role == "fraud":
                         outcome_rng = keyed_rng(
@@ -387,7 +395,9 @@ def generate_card_testing(
                             draw_seed=run_seed,
                             episode_id=episode_id,
                             customer_id=customer_id,
-                            txn_id=txn_id,
+                            transaction_key=(
+                                f"card-testing/{episode_id}/{pattern_index}/{role}/small/{attempt_index}"
+                            ),
                             change_probability=0.0,
                             force_new=False,
                         ),
@@ -451,6 +461,7 @@ def generate_card_testing(
                         "fraud",
                         "followup",
                         occupied=txn_ids,
+                        transaction_random_keys=transaction_random_keys,
                     )
                     followup_outcome_rng = keyed_rng(
                         run_seed,
@@ -479,7 +490,9 @@ def generate_card_testing(
                             draw_seed=run_seed,
                             episode_id=episode_id,
                             customer_id=customer_id,
-                            txn_id=followup_txn_id,
+                            transaction_key=(
+                                f"card-testing/{episode_id}/{pattern_index}/fraud/followup"
+                            ),
                             change_probability=0.0,
                             force_new=False,
                         ),
@@ -566,6 +579,7 @@ def generate_other_fraud_mechanisms(
     episode_id: str,
     duration_days: int = 30,
     include_episode_mechanisms: bool = True,
+    transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> dict[str, int]:
     """Generate ATO, pre-drift collusion, social-engineering, and benign controls.
 
@@ -632,6 +646,9 @@ def generate_other_fraud_mechanisms(
         raise ValueError("generate_world must create base merchants before fraud generation")
 
     occupied_txn_ids = {row[0] for row in operational.execute("SELECT txn_id FROM transactions")}
+    occupied_customer_ids = {
+        row[0] for row in operational.execute("SELECT customer_id FROM customers")
+    }
     event_ids = {row[0] for row in operational.execute("SELECT event_id FROM transaction_events")}
     amount_min = config.fraud.near_threshold_minimum_amount.value
     amount_max = config.fraud.near_threshold_maximum_amount.value
@@ -656,11 +673,14 @@ def generate_other_fraud_mechanisms(
         return datetime.combine(day, time(hour, 0), tzinfo=business_tz) + timedelta(minutes=minute_offset)
 
     def new_customer_id(namespace: str, day: date, index: int) -> str:
-        source = json.dumps(
-            ["payguard-p14-customer-v1", seed, namespace, episode_id, day.isoformat(), index],
-            separators=(",", ":"),
-        ).encode()
-        return f"customer-{hashlib.sha256(source).hexdigest()[:20]}"
+        return generate_customer_id(
+            seed,
+            f"p1.fraud.{namespace}.customer_id",
+            episode_id,
+            day.isoformat(),
+            index,
+            occupied=occupied_customer_ids,
+        )
 
     def write_transaction(
         *,
@@ -683,6 +703,7 @@ def generate_other_fraud_mechanisms(
             group_index,
             transaction_index,
             occupied=occupied_txn_ids,
+            transaction_random_keys=transaction_random_keys,
         )
         event_count = _insert_transaction(
             operational,
@@ -763,7 +784,7 @@ def generate_other_fraud_mechanisms(
                     draw_seed=seed,
                     episode_id=episode_id,
                     customer_id=target,
-                    txn_id=f"ato-pattern-{campaign_date.isoformat()}",
+                    transaction_key=f"ato-pattern-{campaign_date.isoformat()}",
                     change_probability=0.0,
                     force_new=has_signature,
                 )
@@ -832,7 +853,7 @@ def generate_other_fraud_mechanisms(
                     incoming_at = starts + timedelta(minutes=index * collusion.transfer_spacing_minutes.value)
                     device_id = device_id_for_transaction(
                         identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=sender_id, txn_id=f"collusion-in-{campaign_date}-{index}",
+                        customer_id=sender_id, transaction_key=f"collusion-in-{campaign_date}-{index}",
                         change_probability=0.0, force_new=False,
                     )
                     txn_id, event_count = write_transaction(
@@ -850,7 +871,7 @@ def generate_other_fraud_mechanisms(
                     )
                     device_id = device_id_for_transaction(
                         identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=mule_id, txn_id=f"collusion-out-{campaign_date}-{index}",
+                        customer_id=mule_id, transaction_key=f"collusion-out-{campaign_date}-{index}",
                         change_probability=0.0, force_new=False,
                     )
                     txn_id, event_count = write_transaction(
@@ -959,7 +980,7 @@ def generate_other_fraud_mechanisms(
                     incoming_at = starts + timedelta(days=index * social.incoming_spacing_days.value)
                     sender_device = device_id_for_transaction(
                         identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=sender_id, txn_id=f"social-in-{campaign_date}-{index}",
+                        customer_id=sender_id, transaction_key=f"social-in-{campaign_date}-{index}",
                         change_probability=0.0, force_new=False,
                     )
                     txn_id, event_count = write_transaction(
@@ -982,7 +1003,7 @@ def generate_other_fraud_mechanisms(
                     control_at = incoming_at + timedelta(hours=2)
                     control_device = device_id_for_transaction(
                         identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=sender_id, txn_id=f"business-in-{campaign_date}-{index}",
+                        customer_id=sender_id, transaction_key=f"business-in-{campaign_date}-{index}",
                         change_probability=0.0, force_new=False,
                     )
                     control_id, event_count = write_transaction(
@@ -1001,7 +1022,7 @@ def generate_other_fraud_mechanisms(
                     )
                     mule_device = device_id_for_transaction(
                         identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=mule_id, txn_id=f"social-out-{campaign_date}-{index}",
+                        customer_id=mule_id, transaction_key=f"social-out-{campaign_date}-{index}",
                         change_probability=0.0, force_new=False,
                     )
                     txn_id, event_count = write_transaction(

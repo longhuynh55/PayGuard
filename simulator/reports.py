@@ -295,6 +295,34 @@ def _p14_feature_diagnostics(
         for row in operational.execute("SELECT * FROM customers")
         if row["episode_id"] in {"base", episode_id}
     }
+    mechanism_key = (
+        "p1.4.mechanisms.v1"
+        if episode_id == "base"
+        else f"p1.4.mechanisms.v1:{episode_id}"
+    )
+    mechanism_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?", (mechanism_key,)
+    ).fetchone()
+    mechanism_groups = json.loads(mechanism_row[0]).get("groups", []) if mechanism_row else []
+    social_transaction_ids: set[str] = set()
+    control_transaction_ids: set[str] = set()
+    mechanism_transaction_counts: Counter[str] = Counter()
+    for group in mechanism_groups:
+        mechanism = group.get("mechanism", "unknown")
+        transaction_ids = {
+            txn_id
+            for field in (
+                "transaction_ids",
+                "incoming_transaction_ids",
+                "outgoing_transaction_ids",
+            )
+            for txn_id in group.get(field, [])
+        }
+        mechanism_transaction_counts[mechanism] += len(transaction_ids)
+        if mechanism == "social_engineering":
+            social_transaction_ids.update(transaction_ids)
+        elif mechanism == "legit_business_spike":
+            control_transaction_ids.update(transaction_ids)
     feature_scores: dict[str, list[float]] = {
         "new_device_to_sender": [],
         "first_transfer_to_counterparty": [],
@@ -302,9 +330,14 @@ def _p14_feature_diagnostics(
         "older_sender_share_7d": [],
         "account_outflow_ratio_24h": [],
         "new_or_dormant_recipient": [],
+        "sender_account_age_days": [],
+        "recipient_account_age_days": [],
+        "transaction_id_hash_format": [],
+        "customer_id_six_digit_format": [],
         "amount_near_10m_vnd": [],
     }
     target_labels: list[int] = []
+    features_by_id: dict[str, dict[str, float]] = {}
     near_min = config.fraud.near_threshold_minimum_amount.value
     near_max = config.fraud.near_threshold_maximum_amount.value
     for target in all_rows:
@@ -365,6 +398,18 @@ def _p14_feature_diagnostics(
         ] if is_transfer else []
         recipient = customers.get(recipient_id) if is_transfer else None
         recipient_created = _parse_timestamp(recipient["event_at"]) if recipient else None
+        sender = customers.get(target["customer_id"])
+        sender_created = _parse_timestamp(sender["event_at"]) if sender else None
+        sender_age_days = (
+            (current_at - sender_created).total_seconds() / 86_400
+            if sender_created is not None
+            else -1.0
+        )
+        recipient_age_days = (
+            (current_at - recipient_created).total_seconds() / 86_400
+            if recipient_created is not None
+            else -1.0
+        )
         dormant_cutoff = current_at - timedelta(days=30)
         new_or_dormant = bool(
             is_transfer
@@ -377,17 +422,28 @@ def _p14_feature_diagnostics(
         )
         amount = target["amount"]
         target_labels.append(labels_by_id[target["txn_id"]])
-        feature_scores["new_device_to_sender"].append(float(target["device_id"] is not None and not device_seen))
-        feature_scores["first_transfer_to_counterparty"].append(float(is_transfer and not pair_seen))
-        feature_scores["recipient_fan_in_7d"].append(float(fan_in))
-        feature_scores["older_sender_share_7d"].append(
-            float(older_senders / fan_in if fan_in else 0.0)
-        )
-        feature_scores["account_outflow_ratio_24h"].append(float(outgoing / incoming if incoming else 0.0))
-        feature_scores["new_or_dormant_recipient"].append(float(new_or_dormant))
-        feature_scores["amount_near_10m_vnd"].append(
-            float(type(amount) is int and near_min <= amount <= near_max)
-        )
+        values = {
+            "new_device_to_sender": float(target["device_id"] is not None and not device_seen),
+            "first_transfer_to_counterparty": float(is_transfer and not pair_seen),
+            "recipient_fan_in_7d": float(fan_in),
+            "older_sender_share_7d": float(older_senders / fan_in if fan_in else 0.0),
+            "account_outflow_ratio_24h": float(outgoing / incoming if incoming else 0.0),
+            "new_or_dormant_recipient": float(new_or_dormant),
+            "sender_account_age_days": sender_age_days,
+            "recipient_account_age_days": recipient_age_days,
+            "transaction_id_hash_format": float(
+                re.fullmatch(r"txn-[0-9a-f]{64}", target["txn_id"]) is not None
+            ),
+            "customer_id_six_digit_format": float(
+                re.fullmatch(r"customer-[0-9]{6}", target["customer_id"]) is not None
+            ),
+            "amount_near_10m_vnd": float(
+                type(amount) is int and near_min <= amount <= near_max
+            ),
+        }
+        features_by_id[target["txn_id"]] = values
+        for name, value in values.items():
+            feature_scores[name].append(value)
     aucs = {
         feature: _auc(scores, target_labels)
         for feature, scores in feature_scores.items()
@@ -403,10 +459,41 @@ def _p14_feature_diagnostics(
         "older_sender_share_7d": "The signal uses the operational age bands of distinct senders in the observed seven-day receiving window.",
         "account_outflow_ratio_24h": "The signal compares observed outgoing and incoming transfer amounts in the trailing 24-hour window.",
         "new_or_dormant_recipient": "The signal uses customer availability and prior operational activity, not a private role field.",
+        "sender_account_age_days": "Sender age is computed from the operational customer availability time at the transaction timestamp.",
+        "recipient_account_age_days": "Recipient age is computed from the operational customer availability time at the transaction timestamp; social-engineering cash-in intentionally uses newly available mule accounts.",
+        "transaction_id_hash_format": "Every generated transaction uses the same opaque SHA-256 ID shape, so format alone cannot separate truth labels.",
+        "customer_id_six_digit_format": "Every generated customer uses the same six-digit ID shape; the digits are deterministically allocated without encoding account role.",
         "amount_near_10m_vnd": (
             "Non-card-testing fraud amounts are sampled from the configured "
             f"{near_min:,}–{near_max:,} VND band."
         ),
+    }
+    social_ids = [txn_id for txn_id in social_transaction_ids if txn_id in features_by_id]
+    control_ids = [txn_id for txn_id in control_transaction_ids if txn_id in features_by_id]
+    contrast_ids = social_ids + control_ids
+    contrast_labels = [1] * len(social_ids) + [0] * len(control_ids)
+    contrast_aucs = {
+        feature: _auc(
+            [features_by_id[txn_id][feature] for txn_id in contrast_ids],
+            contrast_labels,
+        )
+        for feature in feature_scores
+    }
+    contrast_strong = {
+        name: auc for name, auc in contrast_aucs.items()
+        if auc is not None and (auc >= 0.8 or auc <= 0.2)
+    }
+    transaction_format_classes_by_truth = {
+        label: sorted(
+            {
+                "sha256"
+                if re.fullmatch(r"txn-[0-9a-f]{64}", txn_id)
+                else "other"
+                for txn_id, outcome in labels_by_id.items()
+                if outcome == target
+            }
+        )
+        for label, target in (("fraud", 1), ("legit", 0))
     }
     return {
         "episode_id": episode_id,
@@ -416,6 +503,30 @@ def _p14_feature_diagnostics(
         "strong_feature_explanations": {
             name: {"auc": auc, "explanation": explanations[name]}
             for name, auc in strong.items()
+        },
+        "mechanism_transaction_counts": dict(sorted(mechanism_transaction_counts.items())),
+        "by_mechanism": {
+            "social_engineering_vs_legit_business_spike": {
+                "fraud_transaction_count": len(social_ids),
+                "control_transaction_count": len(control_ids),
+                "auc_by_feature": contrast_aucs,
+                "strong_feature_explanations": {
+                    name: {"auc": auc, "explanation": explanations[name]}
+                    for name, auc in contrast_strong.items()
+                },
+            }
+        },
+        "id_format_artifacts": {
+            "transaction_format_classes_by_truth": transaction_format_classes_by_truth,
+            "transaction_format_class_auc": aucs["transaction_id_hash_format"],
+            "customer_format_class_auc": aucs["customer_id_six_digit_format"],
+        },
+        "account_age_artifacts": {
+            "sender_account_age_days_auc": aucs["sender_account_age_days"],
+            "recipient_account_age_days_auc": aucs["recipient_account_age_days"],
+            "social_engineering_vs_control_recipient_account_age_days_auc": contrast_aucs[
+                "recipient_account_age_days"
+            ],
         },
         "scope": "private diagnostic; features were derived from operational transaction history at each transaction timestamp",
     }

@@ -7,10 +7,11 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Iterator, Literal
+from typing import Iterator, Literal, MutableMapping
 from zoneinfo import ZoneInfo
 
 from simulator.config import SimulatorConfig
+from simulator.identifiers import transaction_id
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record, utc_timestamp
 from simulator.transactions import card_token_for_customer, device_id_for_transaction
@@ -279,6 +280,7 @@ def inject_seasonal(
     expected_relative_change: float,
     seed: int | None = None,
     customer_ids: tuple[str, ...] | None = None,
+    transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> IncidentSummary:
     """Insert valid one-day business traffic and publish its expected metric."""
     _require_episode(operational, private, episode_id)
@@ -343,7 +345,7 @@ def inject_seasonal(
     settlement_delay = timedelta(minutes=config.transactions.settlement_delay_minutes.value)
 
     with _paired_savepoints(operational, private):
-        for _ in range(additional_transaction_count):
+        for transaction_index in range(additional_transaction_count):
             hour = traffic_rng.choices(range(24), weights=hourly_weights, k=1)[0]
             local_time = datetime.combine(
                 business_date,
@@ -356,7 +358,17 @@ def inject_seasonal(
                 config.transactions.minimum_amount.value,
                 config.transactions.maximum_amount.value,
             )
-            txn_id = f"txn-{identity_rng.getrandbits(128):032x}"
+            legacy_random_key = f"txn-{identity_rng.getrandbits(128):032x}"
+            txn_id = transaction_id(
+                run_seed,
+                "p1.incidents.seasonal.transaction",
+                episode_id,
+                incident_truth_id,
+                business_date.isoformat(),
+                transaction_index,
+            )
+            if transaction_random_keys is not None:
+                transaction_random_keys[txn_id] = legacy_random_key
             insert_operational_record(
                 operational,
                 "transactions",
@@ -371,7 +383,7 @@ def inject_seasonal(
                         draw_seed=run_seed,
                         episode_id=episode_id,
                         customer_id=customer_id,
-                        txn_id=txn_id,
+                        transaction_key=legacy_random_key,
                         change_probability=config.world.legitimate_device_change_probability.value,
                     ),
                     "card_token": card_token_for_customer(config.seed.value, customer_id)

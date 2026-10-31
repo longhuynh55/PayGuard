@@ -135,6 +135,7 @@ class WorldConfig(StrictModel):
     household_supplier_merchant_count: ConfigValue[PositiveInt]
     internal_mule_outbound_window_hours: ConfigValue[PositiveInt]
     legitimate_device_change_probability: ConfigValue[Probability]
+    legitimate_new_accounts_per_base_history: ConfigValue[NonNegativeInt]
     customer_segments: ConfigValue[list[str]]
     customer_provinces: ConfigValue[list[str]]
     customer_age_bands: ConfigValue[list[str]]

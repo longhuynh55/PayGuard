@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from statistics import fmean
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
 from simulator.asof import read_as_of
@@ -119,6 +119,7 @@ def generate_label_events(
     *,
     seed: int | None = None,
     episode_id: str = "base",
+    transaction_random_keys: Mapping[str, str] | None = None,
 ) -> LabelSummary:
     """Append reported labels for transactions in one base or episode stream.
 
@@ -167,6 +168,17 @@ def generate_label_events(
     ]
     if not transactions:
         raise ValueError("P1.3/P1.4 transactions must exist before label generation")
+    if transaction_random_keys is not None:
+        missing_draw_keys = sorted(
+            row["txn_id"]
+            for row in transactions
+            if row["txn_id"] not in transaction_random_keys
+        )
+        if missing_draw_keys:
+            raise ValueError(
+                "label generation is missing explicit stable draw keys for transactions: "
+                f"{missing_draw_keys[:3]}"
+            )
     card_fraud_ids = _load_card_testing_ids(private, episode_id)
     fraud_ids = _load_p14_fraud_ids(private, episode_id)
     txn_ids = {row["txn_id"] for row in transactions}
@@ -198,7 +210,14 @@ def generate_label_events(
         for transaction in transactions:
             txn_id = transaction["txn_id"]
             true_label = "fraud" if txn_id in fraud_ids else "legit"
-            report_rng = keyed_rng(run_seed, "p1.labels.reporting", txn_id)
+            random_key = (
+                transaction_random_keys[txn_id]
+                if transaction_random_keys is not None
+                else txn_id
+            )
+            if not isinstance(random_key, str) or not random_key:
+                raise ValueError(f"label RNG draw key is invalid for transaction {txn_id}")
+            report_rng = keyed_rng(run_seed, "p1.labels.reporting", random_key)
             will_report = report_rng.random() < report_probability
             delay_days: int | None = None
             source: str | None = None
@@ -206,7 +225,7 @@ def generate_label_events(
             available_at: str | None = None
 
             if will_report:
-                delay_rng = keyed_rng(run_seed, "p1.labels.delay_days", txn_id)
+                delay_rng = keyed_rng(run_seed, "p1.labels.delay_days", random_key)
                 delay_days = delay_rng.randint(minimum_delay, maximum_delay)
                 reported_at = utc_timestamp(
                     _parse_timestamp(transaction["event_at"])
@@ -237,6 +256,7 @@ def generate_label_events(
                 {
                     "txn_id": txn_id,
                     "episode_id": transaction["episode_id"],
+                    "random_key": random_key,
                     "event_at": utc_timestamp(transaction["event_at"]),
                     "true_label": true_label,
                     "reported": will_report,
