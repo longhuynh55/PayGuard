@@ -154,6 +154,11 @@ def _public_metric_windows() -> tuple[dict[str, int], dict[str, int]]:
             raise EvaluationMatcherError(
                 f"public monitoring config metric_windows.{metric_id}.value must be a positive integer"
             )
+        if str(metric_id) == volume_metric_id and days != 1:
+            raise EvaluationMatcherError(
+                f"monitoring metric_windows {metric_id!r} must be 1 day: daily volume is "
+                f"computed for one business date, got {days}"
+            )
         unit = raw_window.get("unit") if isinstance(raw_window, Mapping) else None
         rationale = raw_window.get("rationale") if isinstance(raw_window, Mapping) else None
         reference = provenance.get("reference") if isinstance(provenance, Mapping) else None
@@ -579,6 +584,14 @@ def _shares_parent_scenario(parents: Mapping[str, str | None]) -> bool:
     User decision 31/10/2026 (docs/evaluation.md, section 2): such candidates form
     one matched incident with every component truth in ``matched_truth_ids``.
     """
+    for truth_id, parent_scenario in parents.items():
+        if parent_scenario is not None and (
+            not isinstance(parent_scenario, str) or not parent_scenario.strip()
+        ):
+            raise EvaluationMatcherError(
+                "parent_scenario must be NULL or non-empty text for truth "
+                f"{truth_id!r}"
+            )
     values = set(parents.values())
     return len(values) == 1 and None not in values
 

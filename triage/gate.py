@@ -338,6 +338,21 @@ def _mandatory_runbook_reasons(
     return []
 
 
+def _checklist_tool_failure(
+    checklist_results: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    return any(item.get("status") == "error" for item in checklist_results.values())
+
+
+def _checklist_requires_human_review(
+    checklist_results: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    return any(
+        item.get("requires_human_review") is True
+        for item in checklist_results.values()
+    )
+
+
 def _as_reasons(value: Any) -> tuple[list[str], bool]:
     if value is None:
         return [], False
@@ -486,9 +501,7 @@ def evaluate_gate(
     normalized_checklists, checklist_errors = _normalize_checklists(
         proposal.get("checklist_results")
     )
-    checklist_tool_error = any(
-        item["status"] == "error" for item in normalized_checklists.values()
-    )
+    checklist_tool_error = _checklist_tool_failure(normalized_checklists)
 
     if not isinstance(tool_error, bool):
         tool_error = True
@@ -505,7 +518,11 @@ def evaluate_gate(
         )
 
     explicit_review_reasons, bad_review_reasons = _as_reasons(mandatory_review_reasons)
-    mandatory_review = mandatory_human_review is True or bool(explicit_review_reasons)
+    mandatory_review = (
+        mandatory_human_review is True
+        or bool(explicit_review_reasons)
+        or _checklist_requires_human_review(normalized_checklists)
+    )
     if not isinstance(mandatory_human_review, bool):
         mandatory_review = True
         proposal_errors.append("Mandatory human review flag is invalid.")

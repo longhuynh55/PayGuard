@@ -5,9 +5,10 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from evaluation import evaluate_detection_recall
-from evaluation.matcher import EvaluationMatcherError
+from evaluation.matcher import EvaluationMatcherError, match_incidents
 from monitoring.incidents import InMemoryDecisionSource, compute_incidents
 from simulator.storage import create_export_stores, insert_private_record
 from simulator.validate import RUN_METADATA_KEY
@@ -513,6 +514,121 @@ def test_same_parent_scenario_candidates_match_together_and_count_for_recall(
         }
     finally:
         store.close()
+
+
+def test_benign_plus_fraud_same_parent_is_not_benign_matched(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "mixed-parent-run")
+    try:
+        _add_episode(store, "ep-mixed-parent", "seasonal")
+        _add_truth(
+            store,
+            episode_id="ep-mixed-parent",
+            truth_id="truth-mixed-benign",
+            cause="seasonal",
+            requires_intervention=False,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario="mixed-parent",
+        )
+        _add_truth(
+            store,
+            episode_id="ep-mixed-parent",
+            truth_id="truth-mixed-fraud",
+            cause="fraud_surge",
+            requires_intervention=True,
+            features=["amount"],
+            segments=["retail"],
+            parent_scenario="mixed-parent",
+        )
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-mixed-parent",
+                alert_id="alert-mixed-parent",
+                feature="amount_avg_7d",
+                at="2026-02-05T12:00:00.000000Z",
+            ),
+            episode_id="ep-mixed-parent",
+        )
+
+        result = _evaluate(store, incidents, ["ep-mixed-parent"])
+
+        assert result.report["incident_matches"][0]["status"] == "matched"
+        assert result.report["incident_matches"][0]["matched_truth_ids"] == [
+            "truth-mixed-benign",
+            "truth-mixed-fraud",
+        ]
+        assert result.report["incident_counts"]["benign_matched"] == 0
+        assert result.report["benign_incident_ids"] == []
+    finally:
+        store.close()
+
+
+def test_matcher_rejects_non_daily_volume_window_with_monitoring_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = ROOT / "configs" / "monitoring.yaml"
+    original_read_text = Path.read_text
+
+    def read_with_non_daily_volume_window(path: Path, *args, **kwargs) -> str:
+        raw_text = original_read_text(path, *args, **kwargs)
+        if path.resolve() != config_path.resolve():
+            return raw_text
+        config = yaml.safe_load(raw_text)
+        config["metric_windows"]["volume.txn_count"]["value"] = 2
+        return yaml.safe_dump(config, sort_keys=False)
+
+    monkeypatch.setattr(Path, "read_text", read_with_non_daily_volume_window)
+    with pytest.raises(
+        EvaluationMatcherError,
+        match=(
+            r"monitoring metric_windows 'volume\.txn_count' must be 1 day: daily volume is "
+            r"computed for one business date, got 2"
+        ),
+    ):
+        match_incidents(
+            (),
+            (),
+            episode_ids=("ep-volume-window",),
+            episode_end_at={"ep-volume-window": AS_OF},
+            as_of_time=AS_OF,
+            metric_window_days=7,
+        )
+
+
+def test_matcher_rejects_blank_parent_when_checking_shared_parent_group() -> None:
+    incidents = _incident_rows(
+        _alert(
+            episode_id="ep-blank-parent-direct",
+            alert_id="alert-blank-parent-direct",
+            feature="amount_avg_7d",
+            at="2026-02-05T12:00:00.000000Z",
+        ),
+        episode_id="ep-blank-parent-direct",
+    )
+    shared_truth_fields = {
+        "episode_id": "ep-blank-parent-direct",
+        "parent_scenario": "  ",
+        "affected_features_json": ["amount"],
+        "affected_segments_json": ["retail"],
+        "effect_start_at": "2026-02-05T00:00:00.000000Z",
+        "effect_available_at": "2026-02-05T00:00:00.000000Z",
+        "effect_end_at": "2026-02-06T00:00:00.000000Z",
+    }
+    truths = [
+        {"incident_truth_id": f"truth-{suffix}", **shared_truth_fields}
+        for suffix in ("blank-a", "blank-b")
+    ]
+
+    with pytest.raises(EvaluationMatcherError, match="parent_scenario must be NULL or non-empty text"):
+        match_incidents(
+            incidents,
+            truths,
+            episode_ids=("ep-blank-parent-direct",),
+            episode_end_at={"ep-blank-parent-direct": "2026-03-03T00:00:00.000000Z"},
+            as_of_time=AS_OF,
+            metric_window_days=7,
+        )
 
 
 def test_same_feature_multi_cause_truth_components_both_count_for_recall(

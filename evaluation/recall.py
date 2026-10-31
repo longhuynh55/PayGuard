@@ -92,7 +92,11 @@ def _build_report(
         {
             str(match["incident_id"])
             for match in matched_incidents
-            if benign_truth_ids.intersection(match["matched_truth_ids"])
+            if match["matched_truth_ids"]
+            and all(
+                str(truth_id) in benign_truth_ids
+                for truth_id in match["matched_truth_ids"]
+            )
         }
     )
     matched_incident_ids = {

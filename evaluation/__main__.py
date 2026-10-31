@@ -9,6 +9,7 @@ import sys
 from typing import Sequence
 
 from evaluation.decisions import evaluate_operational_decisions
+from evaluation.support import run_development_support
 from payguard.identity import (
     assert_role_access,
     find_harness_root,
@@ -39,11 +40,37 @@ def _parser() -> argparse.ArgumentParser:
         help="evaluate only this role; repeat to select multiple roles",
     )
     decisions_parser.add_argument("--out", help="optional per-run report path")
+    support_parser = subparsers.add_parser(
+        "support",
+        help="measure P5.0b support using development episodes only",
+    )
+    support_parser.add_argument(
+        "--run",
+        required=True,
+        help="P5.1 policy run directory inside a benchmark root",
+    )
+    support_parser.add_argument(
+        "--out",
+        help="optional report path under the benchmark's private reports directory",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "support":
+        try:
+            result = run_development_support(run_dir=args.run, report_path=args.out)
+        except Exception as exc:
+            print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+        print("P5.0b development support report completed")
+        print(f"episode_role={result.report['episode_role']}")
+        print(f"episode_count={len(result.report['episode_ids'])}")
+        print(f"incident_count={result.report['incident_counts']['evaluated']}")
+        print(f"agent_incidents={result.report['agent_support']['incidents_reaching_agent']}")
+        print(f"report={result.report_path}")
+        return 0
     if args.command != "decisions":
         raise ValueError(f"unsupported evaluation command: {args.command}")
     run_dir = Path(args.run).expanduser().resolve()
