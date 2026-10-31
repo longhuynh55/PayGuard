@@ -69,6 +69,11 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 
 - **Backlog P3.6 (không chặn, [findings r1](../review/findings/P3.6-r1.md)):** `load_episode_config` gọi `load_simulator_config()` với đường dẫn tương đối (phụ thuộc thư mục chạy; `generate --config X` đối chiếu file mặc định) → chuyển kiểm tra khớp `duration_days` sang `simulator generate`/`validate`; `model score`/`model evaluate` (P2) vẫn nạp `configs/episodes.yaml` chỉ để lấy `duration_days` → chuyển sang khóa công khai. **Đã sửa ở BACKLOG-2:** loader episode thuần; generate/validate so khớp bằng các config đã nạp; model score/evaluate chỉ lấy duration từ config simulator công khai.
 
+### P3.7 — Tính hợp lệ của monitoring (người dùng duyệt 31/10/2026, chen trước P5.0b)
+- **Bối cảnh:** review P5.2 r1 ([findings](../review/findings/P5.2-r1.md)): (1) không có metric tổng lượng giao dịch theo ngày, nên sự cố seasonal (truth `txn_count`) không bao giờ ghép được và `seasonal_calendar` — runbook benign duy nhất — không có ca để chấm; (2) PSI `amount_avg_7d` vượt 0,25 ở 24/24 ngày cửa sổ đủ của mọi episode kể cả clean, alert chỉ bật/tắt do cổng `small_window_sample`, nên detection recall smoke 2/2 không chứng minh monitoring phát hiện lỗi pipeline.
+- **Việc:** (a) chẩn đoán vì sao PSI `amount_avg_7d` luôn cao (reference lệch giai đoạn, Tết, cách bin, phân phối A2A/kênh…) và sửa; kiểm trên episode clean thuộc development. (b) thêm metric tổng lượng giao dịch theo ngày so với kỳ vọng `business_calendar`, ánh xạ với truth `txn_count`. Ngưỡng chỉnh trên clean development theo [monitoring.md](monitoring.md) mục 1, không đọc calibration/test.
+- **Nghiệm thu:** episode clean development không có alert nền hàng loạt; sự cố seasonal smoke sinh alert volume ghép được với truth; pipeline vẫn được phát hiện trên feature bị tác động; bảng cũ → mới cho alert/incident/recall smoke.
+
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.
 - [x] Incident con hoạt động đúng; không mở lại incident đã quyết định.

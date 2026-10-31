@@ -13,7 +13,8 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 |---|---|---|---|
 | P5.0a Bảng quyết định UQ | Orchestrator (tài liệu) | — | Liệt kê theo nhóm sự cố trong [data.md](data.md) mục Kịch bản: ca nào tới agent, quyền đóng nào áp dụng, ca nào điều kiện `close_score >= tau_agent` có thể đổi close/routing. Kết luận chấp nhận cả "không thêm giá trị" |
 | P5.2 Matcher hoàn chỉnh | Codex | — | Như mục P5.2 dưới |
-| P5.0b Bảng support development | Codex | P5.2 | Như mục P5.0b dưới |
+| P3.7 Tính hợp lệ monitoring ([sub-plan P3](p3-implementation.md)) | Codex | P5.2 | Metric volume theo ngày + sửa alert nền `amount_avg_7d` (người dùng duyệt 31/10) |
+| P5.0b Bảng support development | Codex | P5.2, P3.7 | Như mục P5.0b dưới |
 | P5.1 Harness + sổ chi phí | Codex | P4.1 vòng 2 merge | Như mục P5.1 dưới |
 
 ### P5.2 — Matcher hoàn chỉnh trước calibration
