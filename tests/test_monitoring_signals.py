@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from monitoring.metrics import DAILY_METRIC_COLUMNS
@@ -11,7 +13,7 @@ def _metric_row(
     metric_id: str = "psi.amount_avg_7d",
     episode_id: str = "ep-a",
     as_of_time: str = "2026-02-10T16:59:59.999999Z",
-    value: float | None = 0.3,
+    value: float | None = 0.6,
     n_window: int = 30,
     n_reference: int = 100,
     flags: list[str] | None = None,
@@ -82,7 +84,7 @@ def test_censored_and_small_sample_metrics_are_suppressed_with_reasons() -> None
 
 def test_rows_after_requested_snapshot_are_ignored() -> None:
     rows = [
-        _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.3),
+        _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.6),
         _metric_row(as_of_time="2026-02-11T16:59:59.999999Z", value=0.9),
     ]
     result = compute_alerts(
@@ -135,3 +137,89 @@ def test_mixed_episode_rows_are_rejected() -> None:
             episode_id="ep-a",
             as_of_time="2026-02-10T16:59:59.999999Z",
         )
+
+
+def test_volume_alert_uses_calendar_expectation_and_keeps_txn_count_feature() -> None:
+    reference = json.dumps(
+        {
+            "baseline_window": "2025-11-01/2026-01-31",
+            "business_calendar_expected_relative_change": 0.6,
+            "method": "weekday_matched_1d_count",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row = _metric_row(
+        metric_id="volume.txn_count",
+        value=0.6,
+        feature="txn_count",
+        reference_window=reference,
+    )
+
+    result = compute_alerts(
+        [row],
+        episode_id="ep-a",
+        as_of_time=row["as_of_time"],
+    )
+
+    assert len(result.alerts) == 1
+    assert result.alerts[0]["metric"] == "volume.txn_count"
+    assert result.alerts[0]["feature"] == "txn_count"
+    assert result.alerts[0]["value"] == 0.6
+    assert result.alerts[0]["threshold"] == 0.5
+    assert result.report["volume_rows_evaluated"] == 1
+
+
+def test_unannounced_daily_volume_uses_its_clean_development_threshold() -> None:
+    reference = json.dumps(
+        {
+            "baseline_window": "2025-11-01/2026-01-31",
+            "business_calendar_expected_relative_change": 0.0,
+            "method": "weekday_matched_1d_count",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    rows = [
+        _metric_row(
+            metric_id="volume.txn_count",
+            value=5.9,
+            feature="txn_count",
+            reference_window=reference,
+        ),
+        _metric_row(
+            metric_id="volume.txn_count",
+            as_of_time="2026-02-11T16:59:59.999999Z",
+            value=6.1,
+            feature="txn_count",
+            reference_window=reference,
+        ),
+    ]
+
+    result = compute_alerts(
+        rows,
+        episode_id="ep-a",
+        as_of_time="2026-02-11T16:59:59.999999Z",
+    )
+
+    assert len(result.alerts) == 1
+    assert result.alerts[0]["value"] == 6.1
+    assert result.alerts[0]["threshold"] == 6.0
+
+
+def test_volume_alert_suppresses_missing_calendar_expectation() -> None:
+    row = _metric_row(
+        metric_id="volume.txn_count",
+        value=0.8,
+        feature="txn_count",
+        reference_window="not-a-volume-reference",
+    )
+
+    result = compute_alerts(
+        [row],
+        episode_id="ep-a",
+        as_of_time=row["as_of_time"],
+    )
+
+    assert result.alerts == ()
+    assert result.report["suppressed"][0]["reasons"] == ["reference_not_available"]

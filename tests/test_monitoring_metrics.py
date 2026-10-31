@@ -196,6 +196,17 @@ def test_psi_is_zero_for_same_distribution_and_positive_for_clear_shift() -> Non
     ) > 0.5
 
 
+def test_psi_treats_missing_feature_values_as_a_separate_bucket() -> None:
+    reference = [float(value) for value in range(1, 101)] + [None] * 2
+    same_distribution = [float(value) for value in range(1, 101)] + [None] * 2
+    null_shift = [float(value) for value in range(1, 21)] + [None] * 20
+
+    assert population_stability_index(
+        same_distribution, reference, bins=2, epsilon=1.0
+    ) == pytest.approx(0.0)
+    assert population_stability_index(null_shift, reference, bins=2, epsilon=1.0) > 0.5
+
+
 def test_daily_metrics_are_deterministic_and_use_vietnam_business_date(
     operational_store: StorePair,
 ) -> None:
@@ -228,6 +239,72 @@ def test_daily_metrics_are_deterministic_and_use_vietnam_business_date(
     assert metric["window_end"] == "2026-02-10"
     assert metric["as_of_time"] == "2026-02-10T16:59:59.999999Z"
     assert "small_window_sample" in metric["flags"]
+
+
+def test_daily_volume_metric_is_as_of_and_carries_public_calendar_expectation(
+    operational_store: StorePair,
+) -> None:
+    event_date = date(2026, 2, 10)
+    event_start = datetime.combine(event_date, time.min, tzinfo=BUSINESS_TZ)
+    insert_operational_record(
+        operational_store.operational,
+        "business_calendar",
+        {
+            "calendar_event_id": "calendar-volume-expected",
+            "episode_id": "ep-a",
+            "event_at": _local_timestamp(event_start),
+            "available_at": _local_timestamp(event_start),
+            "business_date": event_date.isoformat(),
+            "event_name": "promotion-day",
+            "lag_days": 0,
+            "expected_effect_json": {
+                "txn_count": {"aggregation": "sum", "relative_change": 0.5}
+            },
+            "scope_json": {"channel": ["qr"]},
+        },
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-before-cutoff-a",
+        episode_id="ep-a",
+        created_at=datetime(2026, 2, 10, 12, 0, tzinfo=BUSINESS_TZ),
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-before-cutoff-b",
+        episode_id="ep-a",
+        created_at=datetime(2026, 2, 10, 13, 0, tzinfo=BUSINESS_TZ),
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-after-cutoff",
+        episode_id="ep-a",
+        created_at=datetime(2026, 2, 10, 14, 0, tzinfo=BUSINESS_TZ),
+        available_at=datetime(2026, 2, 11, 0, 0, tzinfo=BUSINESS_TZ),
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-other-episode",
+        episode_id="ep-b",
+        created_at=datetime(2026, 2, 10, 15, 0, tzinfo=BUSINESS_TZ),
+    )
+
+    rows = compute_daily_metrics(operational_store.operational, episode_ids=("ep-a",))
+    metric = _daily_row(
+        rows,
+        metric_id="volume.txn_count",
+        episode_id="ep-a",
+        business_date="2026-02-10",
+    )
+    reference = json.loads(metric["reference_window"])
+
+    assert metric["feature"] == "txn_count"
+    assert metric["segment"] == "all"
+    assert metric["n_window"] == 2
+    assert metric["n_reference"] > 0
+    assert reference["method"] == "weekday_matched_1d_count"
+    assert reference["business_calendar_expected_relative_change"] > 0
+    assert "small_window_sample" not in metric["flags"]
 
 
 def test_daily_metric_does_not_change_for_rows_available_after_as_of(
@@ -448,10 +525,11 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
             }
         )
     assert result.stderr.startswith("metric_count=")
-    assert len(rows) == len(generated.episodes) * 30 * 3
+    assert len(rows) == len(generated.episodes) * 30 * 4
     assert {row["metric_id"] for row in rows} == {
         "psi.txn_count_24h",
         "psi.amount_avg_7d",
+        "volume.txn_count",
         "model.review_rate",
     }
     assert any(int(row["n_reference"]) > 0 for row in rows if row["metric_id"].startswith("psi."))
@@ -481,7 +559,14 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         episode_id: len(result.alerts)
         for episode_id, result in alert_results.items()
     }
-    print(f"P3.2 smoke alert counts: {alert_counts}")
+    print(f"P3.7 smoke alert counts: {alert_counts}")
+    assert alert_counts == {
+        "ep-0001": 0,
+        "ep-0002": 3,
+        "ep-0003": 2,
+        "ep-0004": 17,
+        "ep-0005": 1,
+    }
 
     incident_results = {
         episode_id: compute_incidents(result.alerts, episode_id=episode_id)
@@ -491,12 +576,12 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         episode_id: result.report["incident_count"]
         for episode_id, result in incident_results.items()
     }
-    print(f"P3.3 smoke incident counts: {incident_counts}")
+    print(f"P3.7 smoke incident counts: {incident_counts}")
     assert incident_counts == {
-        "ep-0001": 2,
+        "ep-0001": 0,
         "ep-0002": 2,
         "ep-0003": 2,
-        "ep-0004": 2,
+        "ep-0004": 4,
         "ep-0005": 1,
     }
     stored_metrics = []
@@ -571,8 +656,17 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert detection_recall["detected"] == 2
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
-    assert evaluation_result.report["incident_counts"]["benign_matched"] == 0
-    assert evaluation_result.report["incident_counts"]["unmatched"] == 5
+    assert evaluation_result.report["incident_counts"]["benign_matched"] == 2
+    assert evaluation_result.report["incident_counts"]["unmatched"] == 2
+    seasonal_episode_ids = {
+        episode.episode_id for episode in generated.episodes if episode.template == "seasonal"
+    }
+    matched_volume_episode_ids = {
+        match["episode_id"]
+        for match in evaluation_result.report["incident_matches"]
+        if match["feature"] == "txn_count" and match["matched_truth_ids"]
+    }
+    assert seasonal_episode_ids <= matched_volume_episode_ids
     assert evaluation_result.report_path.is_file()
     for episode_id in ("ep-0003", "ep-0005"):
         if alert_counts.get(episode_id) == 5:
@@ -580,11 +674,8 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
 
     clean_episode = next(item for item in generated.episodes if item.template == "clean")
     clean_result = alert_results[clean_episode.episode_id]
-    # With two PSI metrics over 30 daily snapshots, at most five alerts is a
-    # deliberately small smoke false-alarm budget; it does not change the
-    # monitoring.md threshold if the clean episode exceeds it.
-    assert len(clean_result.alerts) <= 5, (
-        f"clean smoke generated {len(clean_result.alerts)} alerts; counts={alert_counts}"
+    assert len(clean_result.alerts) == 0, (
+        f"clean development smoke generated background alerts: {alert_counts}"
     )
 
     pipeline_episode = next(
@@ -602,6 +693,14 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         f"data_pipeline smoke has no post-effect amount_avg_7d alert; "
         f"count={len(pipeline_result.alerts)} report={pipeline_result.report}"
     )
+    seasonal_volume_alerts = [
+        alert
+        for episode in generated.episodes
+        if episode.template == "seasonal"
+        for alert in alert_results[episode.episode_id].alerts
+        if alert["metric"] == "volume.txn_count" and alert["feature"] == "txn_count"
+    ]
+    assert seasonal_volume_alerts, "seasonal smoke has no daily volume alert"
 
     signals_output = tmp_path / "alerts.csv"
     report_output = tmp_path / "signals_report.json"

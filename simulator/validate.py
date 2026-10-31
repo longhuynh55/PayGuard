@@ -116,10 +116,12 @@ _MONITORING_QUALITY_FLAGS = frozenset(
         "small_reference_sample",
         "no_window_samples",
         "no_reference_samples",
+        "calendar_expectation_unavailable",
     }
 )
 _MONITORING_COUNT_FLAG = re.compile(
     r"^(?:window_censored_samples|reference_censored_samples|"
+    r"window_missing_samples|reference_missing_samples|"
     r"target_unavailable_at_decision|reference_targets_unavailable_at_decision)=[1-9][0-9]*$"
 )
 

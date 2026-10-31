@@ -1,4 +1,4 @@
-"""Round-one PSI signals and deterministic operational alerts."""
+"""Round-one feature/volume signals and deterministic operational alerts."""
 
 from __future__ import annotations
 
@@ -45,6 +45,11 @@ class MonitoringSignalsError(ValueError):
 class _SignalConfig:
     threshold: float
     threshold_provenance: str
+    volume_threshold: float
+    volume_threshold_provenance: str
+    volume_without_calendar_threshold: float
+    volume_without_calendar_provenance: str
+    volume_metric_id: str
     minimum_sample_count: int
 
 
@@ -106,6 +111,81 @@ def _load_signal_config(path: str | Path) -> _SignalConfig:
     if not isinstance(provenance_reference, str) or not provenance_reference.strip():
         raise MonitoringSignalsError("PSI signal threshold must declare its provenance source")
 
+    volume_threshold_config = signals.get("volume_relative_change_threshold")
+    if not isinstance(volume_threshold_config, dict):
+        raise MonitoringSignalsError(
+            "monitoring signals.volume_relative_change_threshold must be an object"
+        )
+    volume_threshold = volume_threshold_config.get("value")
+    volume_provenance = volume_threshold_config.get("provenance")
+    if isinstance(volume_threshold, bool) or not isinstance(volume_threshold, (int, float)):
+        raise MonitoringSignalsError("volume relative-change threshold must be numeric")
+    if not math.isfinite(float(volume_threshold)) or float(volume_threshold) < 0:
+        raise MonitoringSignalsError(
+            "volume relative-change threshold must be finite and non-negative"
+        )
+    if volume_threshold_config.get("unit") != "absolute relative change":
+        raise MonitoringSignalsError(
+            "volume relative-change threshold unit must be 'absolute relative change'"
+        )
+    if not isinstance(volume_threshold_config.get("rationale"), str) or not volume_threshold_config[
+        "rationale"
+    ].strip():
+        raise MonitoringSignalsError("volume relative-change threshold must state its rationale")
+    if not isinstance(volume_provenance, dict) or volume_provenance.get("kind") != "source":
+        raise MonitoringSignalsError(
+            "volume relative-change threshold must declare source provenance"
+        )
+    volume_provenance_reference = volume_provenance.get("reference")
+    if not isinstance(volume_provenance_reference, str) or not volume_provenance_reference.strip():
+        raise MonitoringSignalsError(
+            "volume relative-change threshold must declare its provenance source"
+        )
+
+    volume_without_calendar_config = signals.get("volume_without_calendar_threshold")
+    if not isinstance(volume_without_calendar_config, dict):
+        raise MonitoringSignalsError(
+            "monitoring signals.volume_without_calendar_threshold must be an object"
+        )
+    volume_without_calendar_threshold = volume_without_calendar_config.get("value")
+    volume_without_calendar_provenance = volume_without_calendar_config.get("provenance")
+    if (
+        isinstance(volume_without_calendar_threshold, bool)
+        or not isinstance(volume_without_calendar_threshold, (int, float))
+        or not math.isfinite(float(volume_without_calendar_threshold))
+        or float(volume_without_calendar_threshold) < 0
+    ):
+        raise MonitoringSignalsError(
+            "volume without-calendar threshold must be finite and non-negative"
+        )
+    if volume_without_calendar_config.get("unit") != "absolute relative change":
+        raise MonitoringSignalsError(
+            "volume without-calendar threshold unit must be 'absolute relative change'"
+        )
+    if not isinstance(volume_without_calendar_config.get("rationale"), str) or not volume_without_calendar_config[
+        "rationale"
+    ].strip():
+        raise MonitoringSignalsError(
+            "volume without-calendar threshold must state its rationale"
+        )
+    if (
+        not isinstance(volume_without_calendar_provenance, dict)
+        or volume_without_calendar_provenance.get("kind") != "source"
+    ):
+        raise MonitoringSignalsError(
+            "volume without-calendar threshold must declare source provenance"
+        )
+    volume_without_calendar_reference = volume_without_calendar_provenance.get("reference")
+    if not isinstance(volume_without_calendar_reference, str) or not volume_without_calendar_reference.strip():
+        raise MonitoringSignalsError(
+            "volume without-calendar threshold must declare its provenance source"
+        )
+
+    daily_volume = raw.get("daily_volume")
+    volume_metric_id = daily_volume.get("metric_id") if isinstance(daily_volume, dict) else None
+    if not isinstance(volume_metric_id, str) or not volume_metric_id.strip():
+        raise MonitoringSignalsError("monitoring daily_volume must declare its metric_id")
+
     minimum_sample = raw.get("minimum_sample_count")
     if not isinstance(minimum_sample, dict):
         raise MonitoringSignalsError("monitoring minimum_sample_count must be an object")
@@ -120,6 +200,11 @@ def _load_signal_config(path: str | Path) -> _SignalConfig:
     return _SignalConfig(
         threshold=float(threshold),
         threshold_provenance=provenance_reference,
+        volume_threshold=float(volume_threshold),
+        volume_threshold_provenance=volume_provenance_reference,
+        volume_without_calendar_threshold=float(volume_without_calendar_threshold),
+        volume_without_calendar_provenance=volume_without_calendar_reference,
+        volume_metric_id=volume_metric_id,
         minimum_sample_count=minimum_sample_count,
     )
 
@@ -170,7 +255,9 @@ def _alert_id(row: dict[str, Any]) -> str:
     return "alert-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
 
-def _quality_reasons(row: dict[str, Any], *, minimum_sample_count: int) -> list[str]:
+def _quality_reasons(
+    row: dict[str, Any], *, minimum_sample_count: int, apply_minimum_sample: bool = True
+) -> list[str]:
     reasons: list[str] = []
     flags = row["flags"]
 
@@ -188,11 +275,21 @@ def _quality_reasons(row: dict[str, Any], *, minimum_sample_count: int) -> list[
         reasons.append("no_window_samples")
     if "no_reference_samples" in flags:
         reasons.append("no_reference_samples")
-    if row["n_window"] < minimum_sample_count and "small_window_sample" not in flags:
+    if "calendar_expectation_unavailable" in flags:
+        reasons.append("calendar_expectation_unavailable")
+    if (
+        apply_minimum_sample
+        and row["n_window"] < minimum_sample_count
+        and "small_window_sample" not in flags
+    ):
         reasons.append("small_window_sample")
     elif "small_window_sample" in flags:
         reasons.append("small_window_sample")
-    if row["n_reference"] < minimum_sample_count and "small_reference_sample" not in flags:
+    if (
+        apply_minimum_sample
+        and row["n_reference"] < minimum_sample_count
+        and "small_reference_sample" not in flags
+    ):
         reasons.append("small_reference_sample")
     elif "small_reference_sample" in flags:
         reasons.append("small_reference_sample")
@@ -265,6 +362,8 @@ def compute_alerts(
     ignored: list[dict[str, Any]] = []
     below_threshold_count = 0
     evaluated_count = 0
+    volume_rows_evaluated = 0
+    volume_below_threshold_count = 0
 
     for row in current_rows:
         metric = row["metric_id"]
@@ -277,20 +376,49 @@ def compute_alerts(
             "value": row["value"],
             "flags": row["flags"],
         }
-        if not metric.startswith("psi.") or row["feature"] == "decision_region":
+        is_psi_metric = metric.startswith("psi.") and row["feature"] != "decision_region"
+        is_volume_metric = metric == config.volume_metric_id
+        quality_reasons = _quality_reasons(
+            row,
+            minimum_sample_count=config.minimum_sample_count,
+            apply_minimum_sample=is_psi_metric,
+        )
+        if not is_psi_metric and not is_volume_metric:
             reason = (
                 "reference_not_available"
                 if row["reference_window"] == _REFERENCE_NOT_APPLICABLE
-                else "not_a_round_one_psi_metric"
+                else "not_a_round_one_metric"
             )
             ignored.append({**base_report_row, "reason": reason})
             continue
 
-        quality_reasons = _quality_reasons(
-            row, minimum_sample_count=config.minimum_sample_count
-        )
-        if row["reference_window"] == _REFERENCE_NOT_APPLICABLE or not row["reference_window"]:
-            quality_reasons.append("reference_not_available")
+        if is_psi_metric:
+            if row["reference_window"] == _REFERENCE_NOT_APPLICABLE or not row["reference_window"]:
+                quality_reasons.append("reference_not_available")
+        else:
+            if row["feature"] != "txn_count" or row["segment"] != "all":
+                raise MonitoringSignalsError(
+                    "daily volume metrics must use feature='txn_count' and segment='all'"
+                )
+            try:
+                volume_reference = json.loads(row["reference_window"])
+            except (TypeError, json.JSONDecodeError):
+                volume_reference = None
+            if (
+                not isinstance(volume_reference, dict)
+                or volume_reference.get("method") != "weekday_matched_1d_count"
+                or isinstance(
+                    volume_reference.get("business_calendar_expected_relative_change"), bool
+                )
+                or not isinstance(
+                    volume_reference.get("business_calendar_expected_relative_change"),
+                    (int, float),
+                )
+                or not math.isfinite(
+                    float(volume_reference["business_calendar_expected_relative_change"])
+                )
+            ):
+                quality_reasons.append("reference_not_available")
         if quality_reasons:
             suppressed.append(
                 {**base_report_row, "reasons": list(dict.fromkeys(quality_reasons))}
@@ -298,9 +426,30 @@ def compute_alerts(
             continue
 
         value = float(row["value"])
-        evaluated_count += 1
-        if value <= config.threshold:
-            below_threshold_count += 1
+        if is_psi_metric:
+            evaluated_count += 1
+            threshold = config.threshold
+            triggered = value > threshold
+            if not triggered:
+                below_threshold_count += 1
+        else:
+            volume_rows_evaluated += 1
+            expected_change = float(
+                volume_reference["business_calendar_expected_relative_change"]
+            )
+            threshold = (
+                config.volume_threshold
+                if expected_change != 0.0
+                else config.volume_without_calendar_threshold
+            )
+            # Alert on a material observed shift or a material departure from
+            # the public calendar expectation. The value remains the observed
+            # lift so downstream triage can compare it with the expectation.
+            triggered = abs(value) > threshold or abs(value - expected_change) > threshold
+            if not triggered:
+                volume_below_threshold_count += 1
+                below_threshold_count += 1
+        if not triggered:
             continue
 
         alert = {
@@ -312,7 +461,7 @@ def compute_alerts(
             "segment": row["segment"],
             "value": value,
             "reference": row["reference_window"],
-            "threshold": config.threshold,
+            "threshold": threshold,
             "event_at": row["as_of_time"],
             "available_at": row["as_of_time"],
         }
@@ -333,11 +482,25 @@ def compute_alerts(
             "unit": "PSI",
             "provenance": config.threshold_provenance,
         },
+        "volume_threshold": {
+            "value": config.volume_threshold,
+            "comparison": "absolute observed or calendar-relative change > when calendar lift is nonzero",
+            "unit": "absolute relative change",
+            "provenance": config.volume_threshold_provenance,
+        },
+        "volume_without_calendar_threshold": {
+            "value": config.volume_without_calendar_threshold,
+            "comparison": "absolute observed or calendar-relative change >",
+            "unit": "absolute relative change",
+            "provenance": config.volume_without_calendar_provenance,
+        },
         "minimum_sample_count": config.minimum_sample_count,
         "daily_metric_rows_received": len(daily_metrics),
         "daily_metric_rows_considered": len(current_rows),
         "future_metric_rows_ignored": future_count,
         "psi_rows_evaluated": evaluated_count,
+        "volume_rows_evaluated": volume_rows_evaluated,
+        "volume_below_threshold_count": volume_below_threshold_count,
         "below_or_equal_threshold_count": below_threshold_count,
         "alert_count": len(alerts),
         "suppressed_count": len(suppressed),

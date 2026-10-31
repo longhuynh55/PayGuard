@@ -73,6 +73,19 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Bối cảnh:** review P5.2 r1 ([findings](../review/findings/P5.2-r1.md)): (1) không có metric tổng lượng giao dịch theo ngày, nên sự cố seasonal (truth `txn_count`) không bao giờ ghép được và `seasonal_calendar` — runbook benign duy nhất — không có ca để chấm; (2) PSI `amount_avg_7d` vượt 0,25 ở 24/24 ngày cửa sổ đủ của mọi episode kể cả clean, alert chỉ bật/tắt do cổng `small_window_sample`, nên detection recall smoke 2/2 không chứng minh monitoring phát hiện lỗi pipeline.
 - **Việc:** (a) chẩn đoán vì sao PSI `amount_avg_7d` luôn cao (reference lệch giai đoạn, Tết, cách bin, phân phối A2A/kênh…) và sửa; kiểm trên episode clean thuộc development. (b) thêm metric tổng lượng giao dịch theo ngày so với kỳ vọng `business_calendar`, ánh xạ với truth `txn_count`. Ngưỡng chỉnh trên clean development theo [monitoring.md](monitoring.md) mục 1, không đọc calibration/test.
 - **Nghiệm thu:** episode clean development không có alert nền hàng loạt; sự cố seasonal smoke sinh alert volume ghép được với truth; pipeline vẫn được phát hiện trên feature bị tác động; bảng cũ → mới cho alert/incident/recall smoke.
+- **Bàn giao P3.7 round 1:** PSI spike đến từ 10 quantile bins trên cửa sổ chỉ 17–36 feature observations, so với 359 reference observations, cộng pseudocount `1e-6` làm bin rỗng áp đảo; không phải Tết hay channel mix. PSI nay giữ `amount_avg_7d` NULL thành bin missing riêng, dùng hai bin quantile, count pseudocount `1`, ngưỡng `0.25`; max PSI sạch `ep-0001` là `0.4110` trên toàn bộ 30 snapshot và `0.3069` trên 24 ngày đủ cửa sổ. Một ngày đủ cửa sổ vượt ngưỡng trước cổng sample nhưng bị chặn vì sample nhỏ, nên episode clean phát 0 alert. Volume metric `volume.txn_count` so số đếm của ngày với trung bình base cùng thứ, mang kỳ vọng `business_calendar` trong `reference_window`, và để `feature=txn_count` cho matcher dùng tên truth trực tiếp. Ngưỡng volume không lịch là `6.0`; ngưỡng volume có expectation là `0.50`. Cách tính và provenance đầy đủ ở [monitoring.md](monitoring.md), mục 1.
+- **Smoke cũ → mới:** số cũ là HEAD trước P3.7 trên cùng profile smoke; số mới là metrics/signals/incidents sau P3.7, đối soát bởi evaluator hiện có.
+
+  | Chỉ số | Cũ | Mới |
+  |---|---:|---:|
+  | Alerts | 24 | 23 |
+  | Incidents | 9 | 9 |
+  | Incidents matched | 4 | 5 |
+  | Incidents unmatched | 5 | 4 |
+  | Seasonal benign incidents matched | 0/2 | 0/2 |
+  | Detection recall cho sự cố cần can thiệp | 2/2 (1.0) | 2/2 (1.0) |
+
+  Clean development smoke `ep-0001` giảm từ 3 alert xuống 0; cả hai data-pipeline smoke vẫn có alert `amount_avg_7d`, và hai seasonal smoke có volume alert `txn_count` vào 05/02. Cả hai alert seasonal đều `unmatched`: daily snapshot khả dụng cuối ngày (`2026-02-05T16:59:59.999999Z`) đến sau `effect_end_at` của truth mùa vụ. Bốn unmatched incident hiện đều là volume alerts; còn hai non-calendar alerts ngày 01/02 là drift nền ngoài cửa sổ truth. Matcher trong HEAD chỉ xét overlap thời gian trực tiếp; P5.2 r1 đã duyệt quy tắc cửa sổ metric + lookback, nhưng task này cấm sửa `evaluation/matcher.py`. Vì vậy nghiệm thu “volume alert ghép được truth” chưa đạt; cần merge/cấp phép phần temporal matcher của P5.2 trước khi đóng P3.7. Không sửa mapping table: `txn_count` trùng trực tiếp feature truth.
 
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.

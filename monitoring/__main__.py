@@ -32,7 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     metrics_parser.add_argument("--output", help="write CSV here; default is CSV on stdout")
 
     signals_parser = subparsers.add_parser(
-        "signals", help="compute round-one PSI alerts for one episode snapshot"
+        "signals", help="compute round-one metric alerts for one episode snapshot"
     )
     signals_parser.add_argument("--operational-db", required=True)
     signals_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
