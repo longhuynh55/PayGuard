@@ -20,7 +20,12 @@ from payguard.identity import (
     find_harness_root,
     policy_name_for_run,
 )
-from triage.gate import GateConfig
+from triage.gate import (
+    GateConfig,
+    _checklist_requires_human_review,
+    _checklist_tool_failure,
+    _mandatory_runbook_reasons,
+)
 from triage.runbooks import load_triage_config
 
 
@@ -117,31 +122,16 @@ def _has_forced_human_condition(
 ) -> bool:
     if decision.get("evidence_status") == "conflicting":
         return True
-    for result in checklists.values():
-        if result.get("requires_human_review") is True or result.get("status") == "conflicting":
-            return True
-
-    applicable_runbooks = {
-        name
-        for name in ("seasonal_calendar", "unit_or_null_change")
-        if name in checklists
-        and checklists[name].get("status") != "not_applicable"
-        and checklists[name].get("scope_match") is True
-    }
-    runbook = decision.get("runbook")
-    if runbook in {"seasonal_calendar", "unit_or_null_change"}:
-        applicable_runbooks.add(str(runbook))
-    fraud_signal = checklists.get("fraud_signal")
-    if (
-        applicable_runbooks
-        and fraud_signal is not None
-        and fraud_signal.get("status") == "pass"
-        and fraud_signal.get("scope_match") is True
+    if any(
+        result.get("status") == "conflicting"
+        for result in checklists.values()
+    ) or _checklist_tool_failure(checklists) or _checklist_requires_human_review(
+        checklists
     ):
         return True
-
-    reason = decision.get("reason")
-    return isinstance(reason, str) and "requires human review" in reason.casefold()
+    return bool(
+        _mandatory_runbook_reasons(decision.get("runbook"), checklists)
+    )
 
 
 def _seasonal_check_passes(checklists: Mapping[str, Mapping[str, Any]]) -> bool:
@@ -152,6 +142,92 @@ def _seasonal_check_passes(checklists: Mapping[str, Mapping[str, Any]]) -> bool:
         and result.get("scope_match") is True
         and result.get("window_complete") is True
     )
+
+
+def _seasonal_close_candidate(
+    decision: Mapping[str, Any], checklists: Mapping[str, Mapping[str, Any]]
+) -> bool:
+    return bool(
+        _seasonal_check_passes(checklists)
+        and not _has_forced_human_condition(decision, checklists)
+        and decision.get("evidence_status") == "sufficient"
+        and decision.get("cause") == "seasonal"
+        and decision.get("runbook") == "seasonal_calendar"
+    )
+
+
+def _decision_scope(decision: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = decision.get("scope_json")
+    if raw is None:
+        return None
+    try:
+        return _json_object(
+            raw,
+            field="scope_json",
+            episode_id=str(decision.get("episode_id")),
+        )
+    except DevelopmentSupportError:
+        return None
+
+
+def _uq_conditions_on_projection(
+    *,
+    eligible_agent_decisions: Mapping[str, Sequence[Mapping[str, Any]]],
+    rule_decisions_by_incident: Mapping[str, Sequence[Mapping[str, Any]]],
+    eligible_incident_ids: set[str],
+    agent_incident_ids: set[str],
+    seasonal_evaluated_incident_ids: set[str],
+) -> tuple[int | None, str | None]:
+    """Estimate the on state only where recorded rule/agent scopes support it."""
+    if agent_incident_ids - seasonal_evaluated_incident_ids:
+        return None, (
+            "Cannot measure seasonal_calendar=on: at least one incident reaching the "
+            "agent has no saved seasonal_calendar checklist."
+        )
+    if not eligible_incident_ids:
+        return 0, None
+
+    projected_incidents: set[str] = set()
+    for incident_id, agent_rows in eligible_agent_decisions.items():
+        if incident_id not in eligible_incident_ids:
+            continue
+        rule_rows = rule_decisions_by_incident.get(incident_id, ())
+        seasonal_rule_rows: list[tuple[Mapping[str, Any], dict[str, dict[str, Any]]]] = []
+        for rule in rule_rows:
+            checklists = _checklist_results(rule)
+            if "seasonal_calendar" in checklists:
+                seasonal_rule_rows.append((rule, checklists))
+        if not seasonal_rule_rows:
+            return None, (
+                "Cannot estimate seasonal_calendar=on: an agent-eligible incident has no "
+                "rule-side seasonal_calendar checklist to determine whether the rule closes "
+                "the same scope first."
+            )
+
+        close_candidates = [
+            rule
+            for rule, checklists in seasonal_rule_rows
+            if _seasonal_close_candidate(rule, checklists)
+        ]
+        if not close_candidates:
+            projected_incidents.add(incident_id)
+            continue
+
+        agent_scopes = [_decision_scope(row) for row in agent_rows]
+        rule_scopes = [_decision_scope(row) for row in close_candidates]
+        if any(scope is None for scope in (*agent_scopes, *rule_scopes)):
+            return None, (
+                "Cannot estimate seasonal_calendar=on: a passing rule or agent decision "
+                "does not contain a comparable scope_json."
+            )
+        same_scope = any(
+            agent_scope == rule_scope
+            for agent_scope in agent_scopes
+            for rule_scope in rule_scopes
+        )
+        if not same_scope:
+            projected_incidents.add(incident_id)
+    return len(projected_incidents), None
 
 
 def _window_completeness(
@@ -339,6 +415,8 @@ def _runbook_coverage(
 def _agent_and_close_support(
     decisions: Sequence[Mapping[str, Any]],
     episode_ids: Sequence[str],
+    matches: Sequence[Mapping[str, Any]],
+    truth_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     try:
         policy = GateConfig.from_mapping(load_triage_config())
@@ -347,6 +425,10 @@ def _agent_and_close_support(
 
     agent_decisions = [row for row in decisions if row.get("source") == "agent"]
     agent_incidents = {str(row["incident_id"]) for row in agent_decisions}
+    agent_episode_by_incident = {
+        str(row["incident_id"]): str(row["episode_id"])
+        for row in agent_decisions
+    }
     agent_incidents_by_episode: dict[str, set[str]] = defaultdict(set)
     agent_rows_by_episode: Counter[str] = Counter()
     for row in agent_decisions:
@@ -358,6 +440,66 @@ def _agent_and_close_support(
     agent_path_incidents: set[str] = set()
     authorized_agent_close_incidents: set[str] = set()
     uq_conditions_1_to_3: set[str] = set()
+    seasonal_evaluated_agent_incidents: set[str] = set()
+    eligible_agent_decisions: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    rule_decisions_by_incident: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    grouped_agent_incidents: dict[tuple[str, str, str, bool], set[str]] = defaultdict(set)
+    ambiguous_agent_incidents: dict[str, set[str]] = defaultdict(set)
+    unmatched_agent_incidents: dict[str, set[str]] = defaultdict(set)
+
+    truth_by_id = {str(row["incident_truth_id"]): row for row in truth_rows}
+    matches_by_incident = {str(row["incident_id"]): row for row in matches}
+    for match in matches:
+        if match.get("status") != "matched":
+            continue
+        episode_id = str(match["episode_id"])
+        for truth_id_value in match.get("matched_truth_ids", ()):
+            truth_id = str(truth_id_value)
+            truth = truth_by_id.get(truth_id)
+            if truth is None:
+                raise DevelopmentSupportError(
+                    f"matched truth {truth_id!r} is missing from development truth rows"
+                )
+            grouped_agent_incidents[
+                (
+                    episode_id,
+                    str(truth["cause"]),
+                    str(truth["template"]),
+                    truth.get("parent_scenario") is not None,
+                )
+            ]
+    for incident_id in agent_incidents:
+        match = matches_by_incident.get(incident_id)
+        episode_id = (
+            str(match["episode_id"])
+            if match is not None
+            else agent_episode_by_incident[incident_id]
+        )
+        if match is None or match.get("status") == "unmatched":
+            unmatched_agent_incidents[episode_id].add(incident_id)
+        elif match.get("status") == "ambiguous_match":
+            ambiguous_agent_incidents[episode_id].add(incident_id)
+        elif match.get("status") == "matched":
+            for truth_id_value in match.get("matched_truth_ids", ()):
+                truth_id = str(truth_id_value)
+                truth = truth_by_id.get(truth_id)
+                if truth is None:
+                    raise DevelopmentSupportError(
+                        f"matched truth {truth_id!r} is missing from development truth rows"
+                    )
+                grouped_agent_incidents[
+                    (
+                        episode_id,
+                        str(truth["cause"]),
+                        str(truth["template"]),
+                        truth.get("parent_scenario") is not None,
+                    )
+                ].add(incident_id)
+        else:
+            raise DevelopmentSupportError(
+                f"unsupported incident match status {match.get('status')!r}"
+            )
+
     for decision in decisions:
         source = decision.get("source")
         if source not in {"rule", "agent"}:
@@ -365,17 +507,15 @@ def _agent_and_close_support(
         checklists = _checklist_results(decision)
         forced_human = _has_forced_human_condition(decision, checklists)
         seasonal_pass = _seasonal_check_passes(checklists)
-        evidence_sufficient = decision.get("evidence_status") == "sufficient"
         incident_id = str(decision["incident_id"])
+        if source == "agent" and "seasonal_calendar" in checklists:
+            seasonal_evaluated_agent_incidents.add(incident_id)
+        if source == "rule":
+            rule_decisions_by_incident[incident_id].append(decision)
         if source == "agent" and seasonal_pass and not forced_human:
             uq_conditions_1_to_3.add(incident_id)
-        is_close_candidate = (
-            seasonal_pass
-            and not forced_human
-            and evidence_sufficient
-            and decision.get("cause") == "seasonal"
-            and decision.get("runbook") == "seasonal_calendar"
-        )
+            eligible_agent_decisions[incident_id].append(decision)
+        is_close_candidate = _seasonal_close_candidate(decision, checklists)
         if is_close_candidate and source == "rule":
             rule_path_incidents.add(incident_id)
         elif is_close_candidate and source == "agent":
@@ -392,6 +532,83 @@ def _agent_and_close_support(
 
     rule_close_enabled = bool(policy.close_enabled.get("seasonal_calendar", False))
     agent_close_allowed = not policy.agent_close_disabled and policy.tau_agent is not None
+    if rule_close_enabled:
+        uq_off_count: int | None = None
+        uq_off_reason = (
+            "Cannot estimate seasonal_calendar=off from a run where the rule is enabled: "
+            "same-scope passing cases may not have reached the agent."
+        )
+    elif agent_incidents - seasonal_evaluated_agent_incidents:
+        uq_off_count = None
+        uq_off_reason = (
+            "Cannot measure seasonal_calendar=off: at least one incident reaching the "
+            "agent has no saved seasonal_calendar checklist."
+        )
+    else:
+        uq_off_count = len(uq_conditions_1_to_3)
+        uq_off_reason = None
+    uq_on_count, uq_on_reason = _uq_conditions_on_projection(
+        eligible_agent_decisions=eligible_agent_decisions,
+        rule_decisions_by_incident=rule_decisions_by_incident,
+        eligible_incident_ids=uq_conditions_1_to_3,
+        agent_incident_ids=agent_incidents,
+        seasonal_evaluated_incident_ids=seasonal_evaluated_agent_incidents,
+    )
+
+    def conditions_1_to_4(count: int | None) -> int | None:
+        if not agent_close_allowed:
+            return 0
+        return count
+
+    def truth_group_row(
+        *,
+        episode_id: str,
+        group_type: str,
+        group_incidents: set[str],
+        cause: str | None = None,
+        template: str | None = None,
+        has_parent_scenario: bool | None = None,
+    ) -> dict[str, Any]:
+        qualifying = group_incidents & uq_conditions_1_to_3
+        return {
+            "episode_id": episode_id,
+            "group_type": group_type,
+            "cause": cause,
+            "template": template,
+            "has_parent_scenario": has_parent_scenario,
+            "incidents_reaching_agent": len(group_incidents),
+            "conditions_1_to_3_incidents": len(qualifying),
+            "conditions_1_to_4_incidents": (
+                len(qualifying) if agent_close_allowed else 0
+            ),
+        }
+
+    by_truth_group = [
+        truth_group_row(
+            group_type="truth",
+            group_incidents=grouped_agent_incidents[group_key],
+            episode_id=group_key[0],
+            cause=group_key[1],
+            template=group_key[2],
+            has_parent_scenario=group_key[3],
+        )
+        for group_key in sorted(grouped_agent_incidents)
+    ]
+    for episode_id in sorted(episode_ids):
+        by_truth_group.append(
+            truth_group_row(
+                episode_id=episode_id,
+                group_type="ambiguous",
+                group_incidents=ambiguous_agent_incidents[episode_id],
+            )
+        )
+        by_truth_group.append(
+            truth_group_row(
+                episode_id=episode_id,
+                group_type="unmatched_background",
+                group_incidents=unmatched_agent_incidents[episode_id],
+            )
+        )
     return {
         "incidents_reaching_agent": len(agent_incidents),
         "agent_decision_rows": len(agent_decisions),
@@ -423,7 +640,30 @@ def _agent_and_close_support(
                 len(uq_conditions_1_to_3) if agent_close_allowed else 0
             ),
             "agent_close_disabled": policy.agent_close_disabled,
+            "by_close_enabled": {
+                "off": {
+                    "conditions_1_to_3_incidents": uq_off_count,
+                    "conditions_1_to_3_reason": uq_off_reason,
+                    "conditions_1_to_4_incidents": conditions_1_to_4(uq_off_count),
+                    "conditions_1_to_4_reason": (
+                        None
+                        if not agent_close_allowed or uq_off_count is not None
+                        else uq_off_reason
+                    ),
+                },
+                "on": {
+                    "conditions_1_to_3_incidents": uq_on_count,
+                    "conditions_1_to_3_reason": uq_on_reason,
+                    "conditions_1_to_4_incidents": conditions_1_to_4(uq_on_count),
+                    "conditions_1_to_4_reason": (
+                        None
+                        if not agent_close_allowed or uq_on_count is not None
+                        else uq_on_reason
+                    ),
+                },
+            },
         },
+        "by_truth_group": by_truth_group,
     }
 
 
@@ -432,21 +672,13 @@ def build_development_support_report(
     operational_db_path: str | Path,
     private_db_path: str | Path,
     episode_ids: Sequence[str],
-    as_of_by_episode: Mapping[str, str],
+    as_of_by_episode: Mapping[str, str] | None = None,
     policy_name: str,
 ) -> dict[str, Any]:
     """Build the P5.0b report from development operational rows and private truth."""
     selected_ids = tuple(sorted(set(episode_ids)))
     if not selected_ids or any(not item or item == "base" for item in selected_ids):
         raise DevelopmentSupportError("episode_ids must contain development episode IDs")
-    if set(as_of_by_episode) != set(selected_ids):
-        raise DevelopmentSupportError("as_of_by_episode must cover exactly the selected episodes")
-    canonical_as_of = {
-        episode_id: normalize_as_of_time(as_of_by_episode[episode_id])
-        for episode_id in selected_ids
-    }
-    overall_as_of = max(canonical_as_of.values())
-
     private_path = Path(private_db_path).expanduser().resolve()
     private_connection = _read_only_connection(private_path)
     try:
@@ -466,6 +698,15 @@ def build_development_support_report(
         raise DevelopmentSupportError("P5.0b refuses any non-development episode")
 
     context = load_private_evaluation_data(private_path, episode_ids=selected_ids)
+    if as_of_by_episode is None:
+        as_of_by_episode = context.episode_end_at
+    if set(as_of_by_episode) != set(selected_ids):
+        raise DevelopmentSupportError("as_of_by_episode must cover exactly the selected episodes")
+    canonical_as_of = {
+        episode_id: normalize_as_of_time(as_of_by_episode[episode_id])
+        for episode_id in selected_ids
+    }
+    overall_as_of = max(canonical_as_of.values())
     operational_path = Path(operational_db_path).expanduser().resolve()
     operational_connection = _read_only_connection(operational_path)
     try:
@@ -612,7 +853,9 @@ def build_development_support_report(
             "coverage": rule_covered_count / total_truths if total_truths else None,
             "matched_runbooks": runbook_coverage,
         },
-        "agent_support": _agent_and_close_support(decisions, selected_ids),
+        "agent_support": _agent_and_close_support(
+            decisions, selected_ids, matches, truth_rows
+        ),
         "background_workload": {
             "unmatched_incidents": len(unmatched_ids),
             "unmatched_incident_ids": unmatched_ids,
@@ -631,6 +874,11 @@ def build_development_support_report(
         "interpretation": {
             "scope": "pilot/feasibility; development episodes only",
             "episode_split_changed": False,
+            "seasonal_calendar_checklist_available": False,
+            "seasonal_calendar_checklist_availability_reason": (
+                "The round-1 runtime only implements the unit_or_null_change checklist; "
+                "seasonal_calendar checklist generation is not available."
+            ),
             "note": (
                 "Seasonal benign support is deferred under the P3.7 decision; zero support in "
                 "smoke does not estimate its pilot-60 prevalence."
@@ -658,18 +906,82 @@ def run_development_support(
         raise DevelopmentSupportError("P5.0b --run must identify a policy under harness policies/")
 
     operational_path = policy_run / "operational" / "observations.sqlite"
+    private_path = harness_root / "base" / "private" / "evaluator.sqlite"
+    default_report_path = (
+        harness_root
+        / "base"
+        / "private"
+        / "reports"
+        / "p5_0b"
+        / policy_name
+        / "development_support.json"
+    )
+    output_path = (
+        Path(report_path).expanduser().resolve()
+        if report_path
+        else default_report_path.resolve()
+    )
+    private_reports = (harness_root / "base" / "private" / "reports").resolve()
     try:
+        output_path.relative_to(private_reports)
+    except ValueError as exc:
+        raise DevelopmentSupportError(
+            "P5.0b reports must stay under the shared private reports directory"
+        ) from exc
+
+    try:
+        private_connection = _read_only_connection(private_path)
+        try:
+            private_role_rows = private_connection.execute(
+                "SELECT episode_id, role FROM episode_manifest ORDER BY episode_id"
+            ).fetchall()
+        finally:
+            private_connection.close()
+
         operational_connection = _read_only_connection(operational_path)
         try:
-            role_rows = operational_connection.execute(
-                "SELECT episode_id FROM episodes WHERE role = 'development' "
-                "AND episode_id <> 'base' ORDER BY episode_id"
+            operational_role_rows = operational_connection.execute(
+                "SELECT episode_id, role FROM episodes WHERE episode_id <> 'base' "
+                "ORDER BY episode_id"
             ).fetchall()
         finally:
             operational_connection.close()
     except sqlite3.Error as exc:
-        raise DevelopmentSupportError(f"could not read development episode IDs: {exc}") from exc
-    episode_ids = tuple(str(row["episode_id"]) for row in role_rows)
+        raise DevelopmentSupportError(f"could not read episode role metadata: {exc}") from exc
+
+    private_roles = {
+        str(row["episode_id"]): str(row["role"])
+        for row in private_role_rows
+    }
+    operational_roles = {
+        str(row["episode_id"]): str(row["role"])
+        for row in operational_role_rows
+    }
+    development_ids = {
+        episode_id
+        for episode_id, role in private_roles.items()
+        if role == "development" and episode_id != "base"
+    }
+    mismatches = {
+        episode_id
+        for episode_id, private_role in private_roles.items()
+        if episode_id in operational_roles
+        and operational_roles[episode_id] != private_role
+    }
+    mismatches.update(development_ids - set(operational_roles))
+    operational_development_ids = {
+        episode_id
+        for episode_id, role in operational_roles.items()
+        if role == "development"
+    }
+    mismatches.update(operational_development_ids - set(private_roles))
+    if mismatches:
+        raise DevelopmentSupportError(
+            "operational episode roles disagree with the private episode_manifest.role "
+            f"for: {', '.join(sorted(mismatches))}"
+        )
+
+    episode_ids = tuple(sorted(development_ids))
     if not episode_ids:
         raise DevelopmentSupportError("the selected policy run has no development episodes")
 
@@ -680,36 +992,10 @@ def run_development_support(
         policy_name=policy_name,
     )
 
-    private_path = harness_root / "base" / "private" / "evaluator.sqlite"
-    private_context = load_private_evaluation_data(
-        private_path,
-        episode_ids=episode_ids,
-    )
-    as_of_by_episode = dict(private_context.episode_end_at)
-
-    default_report_path = (
-        harness_root
-        / "base"
-        / "private"
-        / "reports"
-        / "p5_0b"
-        / policy_name
-        / "development_support.json"
-    )
-    output_path = Path(report_path).expanduser().resolve() if report_path else default_report_path.resolve()
-    private_reports = (harness_root / "base" / "private" / "reports").resolve()
-    try:
-        output_path.relative_to(private_reports)
-    except ValueError as exc:
-        raise DevelopmentSupportError(
-            "P5.0b reports must stay under the shared private reports directory"
-        ) from exc
-
     report = build_development_support_report(
         operational_db_path=operational_path,
         private_db_path=private_path,
         episode_ids=episode_ids,
-        as_of_by_episode=as_of_by_episode,
         policy_name=policy_name,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
