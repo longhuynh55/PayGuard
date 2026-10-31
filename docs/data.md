@@ -217,17 +217,19 @@ Khóa chính là `(txn_id, episode_id, model_version)`, cho phép giữ các phi
 | `event_at` | `TEXT` UTC | Bằng `as_of_time`; thời điểm nghiệp vụ của snapshot metric. |
 | `available_at` | `TEXT` UTC | Bằng `as_of_time`; thời điểm snapshot metric được đọc. |
 | `business_date` | `TEXT` | Ngày nghiệp vụ `Asia/Ho_Chi_Minh`, dạng `YYYY-MM-DD`. |
-| `feature` | `TEXT` | Feature P2.2 hoặc `decision_region` đối với tỉ lệ review. |
+| `feature` | `TEXT` | Feature P2.2, `txn_count` đối với metric volume, hoặc `decision_region` đối với tỉ lệ review. |
 | `segment` | `TEXT` | `all` ở P3.1; metric review ghi `model_version=<id>` để không gộp các phiên bản model. |
-| `value` | `REAL NULL` | PSI cho feature hoặc tỉ lệ review trên số model score trong cửa sổ. NULL khi không có mẫu để tính. |
-| `reference_window` | `TEXT` | Khoảng ngày nền cố định cho PSI (`YYYY-MM-DD/YYYY-MM-DD`, hai đầu gồm); `not_applicable` cho tỉ lệ review thô vì P2.5 không lưu score của base. |
-| `window_start` | `TEXT` | Ngày đầu cửa sổ nghiệp vụ 7 ngày, gồm cả ngày này. |
+| `value` | `REAL NULL` | PSI cho feature, tỉ lệ review trên số model score trong cửa sổ, hoặc độ lệch tương đối của volume ngày so với median daily count của reference. NULL khi không có nền hợp lệ. |
+| `reference_window` | `TEXT` | Khoảng ngày nền cố định cho PSI (`YYYY-MM-DD/YYYY-MM-DD`, hai đầu gồm); `not_applicable` cho tỉ lệ review thô vì P2.5 không lưu score của base; JSON phương pháp `reference_median_1d_count` và kỳ vọng `business_calendar` cho volume. |
+| `window_start` | `TEXT` | Ngày đầu cửa sổ nghiệp vụ; PSI/review dùng cửa sổ 7 ngày, volume dùng đúng ngày `business_date`. |
 | `window_end` | `TEXT` | Ngày cuối cửa sổ nghiệp vụ, gồm cả ngày này. |
-| `n_window` | `INTEGER` | Số feature value hữu hạn hoặc số model score trong cửa sổ, tùy metric. |
-| `n_reference` | `INTEGER` | Số feature value hữu hạn của base reference; bằng 0 với tỉ lệ review. |
-| `flags` | `TEXT` JSON array | Bộ cờ chất lượng vòng 1: `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `target_unavailable_at_decision=<số>`, `reference_targets_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
+| `n_window` | `INTEGER` | Số feature observation đã quan sát (gồm giá trị thiếu ở PSI), model score trong cửa sổ, hoặc số giao dịch ngày của metric volume. |
+| `n_reference` | `INTEGER` | Số feature observation của base (gồm giá trị thiếu), tổng giao dịch nền, hoặc 0 cho tỉ lệ review. |
+| `flags` | `TEXT` JSON array | Bộ cờ chất lượng: `window_incomplete`, `small_window_sample`, `small_reference_sample`, `no_window_samples`, `no_reference_samples`, `window_censored_samples=<số>`, `reference_censored_samples=<số>`, `window_missing_samples=<số>`, `reference_missing_samples=<số>`, `calendar_expectation_unavailable`, `target_unavailable_at_decision=<số>`, `reference_targets_unavailable_at_decision=<số>`. Không thay các cờ này bằng giá trị mặc định im lặng. |
 
-P3.1 chỉ tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Nếu có mẫu bị loại, `flags` chứa `window_censored_samples=<số>` hoặc `reference_censored_samples=<số>`. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
+P3 tính PSI cho feature có cờ quan sát tương ứng của P2.2: `txn_count_24h` dùng `history_window_observed_24h`, `amount_avg_7d` dùng `history_window_observed_7d`. Mẫu có cờ bằng 0 bị loại khỏi phân phối PSI ở cả cửa sổ lẫn reference; `n_window` và `n_reference` đếm mẫu còn lại sau lọc. Feature value NULL/không hữu hạn sau khi đã quan sát được giữ thành một bin thiếu riêng, không bị âm thầm loại khỏi PSI; các cờ censored và missing tách biệt. Đây là các cờ do P2.2 tính; P3 không tự suy ra lại tuổi lịch sử. `window_incomplete` tiếp tục đánh dấu cửa sổ 7 ngày chưa đủ ngày quan sát kể từ T0.
+
+Metric `volume.txn_count` dùng feature `txn_count`, segment `all`, đếm giao dịch của episode có `event_at` thuộc đúng ngày nghiệp vụ và `available_at <= as_of_time`. `value` là độ lệch tương đối của số đếm ngày so với median daily count của base trong reference 11/2025–1/2026; nền tính cả ngày zero và không điều kiện theo thứ. `reference_window` là JSON chứa khoảng nền, phương pháp `reference_median_1d_count` và `business_calendar_expected_relative_change` tổng hợp từ `expected_effect_json`/`scope_json` trên median channel phù hợp. Volume được miễn `minimum_sample_count`; PSI metrics mới bị chặn bởi ngưỡng mẫu này. Snapshot volume vẫn tuân thủ cùng `read_as_of` và không đọc truth.
 
 Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)` và cũng là khóa chính SQLite. Mọi nguồn dữ liệu temporal để tính bảng này, gồm `model_scores`, phải được đọc qua `read_as_of`; dòng chỉ khả dụng sau `as_of_time` không được xuất hiện. `daily_metrics` thuộc allowlist `read_as_of`, append-only, operational và không có dữ liệu truth.
 
@@ -240,12 +242,12 @@ Khóa logic là `(metric_id, episode_id, as_of_time, feature, segment)` và cũn
 | `alert_id` | `TEXT` | ID trung tính, tất định; SHA-256 rút gọn từ `episode_id`, `as_of_time`, `metric`, `feature`, `segment`, không chứa template hoặc truth. |
 | `episode_id` | `TEXT` | Episode của dòng metric đầu vào, khác `base`. |
 | `as_of_time` | `TEXT` UTC | Snapshot của `daily_metrics` đã sinh alert. |
-| `metric` | `TEXT` | `metric_id` của dòng `daily_metrics`; vòng 1 chỉ chấp nhận metric PSI. |
+| `metric` | `TEXT` | `metric_id` của dòng `daily_metrics`; gồm metric PSI và `volume.txn_count`. |
 | `feature` | `TEXT` | Feature P3.1 tương ứng. |
 | `segment` | `TEXT` | Segment P3.1 tương ứng. |
-| `value` | `REAL` | PSI đo được trên cửa sổ monitoring. |
-| `reference` | `TEXT` | `reference_window` của `daily_metrics`; đây là khoảng ngày nền, không phải một giá trị vô hướng riêng. |
-| `threshold` | `REAL` | Ngưỡng PSI tại lúc sinh alert; vòng 1 dùng `0.25` với điều kiện nghiêm ngặt `value > threshold`. |
+| `value` | `REAL` | PSI hoặc độ lệch tương đối quan sát được cho volume ngày. |
+| `reference` | `TEXT` | `reference_window` của `daily_metrics`; với volume chứa median reference baseline và public calendar expectation. |
+| `threshold` | `REAL` | PSI threshold, hoặc absolute relative-change threshold cho volume tại lúc sinh alert. Volume dùng `abs(value - business_calendar_expected_relative_change)` (expected = 0 nếu không có calendar); cả hai phép so sánh đều nghiêm ngặt `>`. |
 | `event_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric. |
 | `available_at` | `TEXT` UTC | Bằng `as_of_time` của dòng metric; alert được xem là khả dụng tại snapshot đó. |
 

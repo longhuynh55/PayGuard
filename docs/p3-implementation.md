@@ -75,6 +75,37 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Bối cảnh:** review P5.2 r1 ([findings](../review/findings/P5.2-r1.md)): (1) không có metric tổng lượng giao dịch theo ngày, nên sự cố seasonal (truth `txn_count`) không bao giờ ghép được và `seasonal_calendar` — runbook benign duy nhất — không có ca để chấm; (2) PSI `amount_avg_7d` vượt 0,25 ở 24/24 ngày cửa sổ đủ của mọi episode kể cả clean, alert chỉ bật/tắt do cổng `small_window_sample`, nên detection recall smoke 2/2 không chứng minh monitoring phát hiện lỗi pipeline.
 - **Việc:** (a) chẩn đoán vì sao PSI `amount_avg_7d` luôn cao (reference lệch giai đoạn, Tết, cách bin, phân phối A2A/kênh…) và sửa; kiểm trên episode clean thuộc development. (b) thêm metric tổng lượng giao dịch theo ngày so với kỳ vọng `business_calendar`, ánh xạ với truth `txn_count`. Ngưỡng chỉnh trên clean development theo [monitoring.md](monitoring.md) mục 1, không đọc calibration/test. Metric mới PHẢI khai báo trong `FEATURE_LOOKBACK_DAYS` và `MONITORING_FEATURE_TO_TRUTH_FEATURE` của matcher (`evaluation/matcher.py`); thiếu thì lookback mặc định 0, không báo lỗi ([P5.2 r2](../review/findings/P5.2-r2.md)).
 - **Nghiệm thu:** episode clean development không có alert nền hàng loạt; sự cố seasonal smoke sinh alert volume ghép được với truth; pipeline vẫn được phát hiện trên feature bị tác động; bảng cũ → mới cho alert/incident/recall smoke.
+- **Bàn giao P3.7 round 1:** PSI spike đến từ cụm card-testing theo khách hàng với effective n nhỏ; đánh đổi độ nhạy khi giảm từ 10 xuống 2 bin và việc đánh giá lại ở vòng 2 được ghi tại [monitoring.md](monitoring.md), mục 1. Round 1 dùng hai quantile bins, một pseudocount và bin missing riêng; PSI sạch có một ngày vượt ngưỡng trước cổng sample nhưng bị chặn, nên clean phát 0 alert. Volume round 1 dùng weekday baseline và hai ngưỡng; Fix 1 thay đổi các lựa chọn này như ghi ở phần bàn giao bên dưới.
+- **Smoke cũ → mới:** số cũ là smoke P5.2 trước P3.7 trên cùng profile; số mới đo lại sau P3.7 volume registration, đối soát bởi evaluator.
+
+  | Chỉ số | Cũ | Mới |
+  |---|---:|---:|
+  | Alerts | 24 | 23 |
+  | Incidents | 9 | 9 |
+  | Incidents matched | 4 | 7 |
+  | Ambiguous incidents | 0 | 0 |
+  | Incidents unmatched | 5 | 2 |
+  | Seasonal benign incidents matched | 0/2 | 2/2 |
+  | Detection recall cho sự cố cần can thiệp | 2/2 (1.0) | 2/2 (1.0) |
+
+  Clean development smoke `ep-0001` giảm từ 3 alert xuống 0; cả hai data-pipeline smoke vẫn có alert `amount_avg_7d` trên feature bị tác động. Round 1, hai seasonal smoke có volume alert `txn_count` vào 05/02 và đều match truth bằng cửa sổ matcher 7 ngày + lookback volume 1 ngày. Fix 1 thay cửa sổ volume thành 1+1 ngày; kết quả hiện tại ở phần bàn giao bên dưới.
+
+- **Bàn giao P3.7 Fix 1:** baseline volume dùng median all-days của 92 ngày reference (4 giao dịch/ngày), thay vì weekday match, để xử lý lệch pha card-testing mỗi bảy ngày địa phương (thứ Ba ở base, Chủ nhật trong episode). Ngưỡng duy nhất khóa ở maximum `abs(actual - calendar expectation)` của 30 ngày clean development `ep-0001`: 4,25. Tuy nhiên seasonal 05/02 có residual 3,0 (`ep-0003`) và 3,5 (`ep-0005`), nhỏ hơn cực đại clean 4,25; không có ngưỡng chung vừa giữ sạch nền vừa phát hiện cả hai. Theo quyết định người dùng, không hạ ngưỡng; P3.7 Fix 1 bị blocked tại điều kiện seasonal-match. Matcher đọc `metric_windows` public: volume 1 ngày + lookback 1; `amount_avg_7d` 7+7; `txn_count_24h` 7+1. Feature thiếu public lookback vẫn bị từ chối bằng `EvaluationMatcherError` theo P5.2 r2. Chẩn đoán PSI, tài liệu, giá trị mặc định fixture và ghi chú bàn giao đã được cập nhật theo review P3.7-r1.
+
+  | Smoke measure | Round 1 | Fix 1 |
+  |---|---:|---:|
+  | Alerts | 23 | 21 |
+  | Incidents | 9 | 7 |
+  | Matched | 7 | 5 |
+  | Ambiguous | 0 | 0 |
+  | Unmatched | 2 | 2 |
+  | Benign matched | 2/2 | 0/2 |
+  | Detection recall | 2/2 (1.0) | 2/2 (1.0) |
+  | `data_ticket` IDs | `ep-0002/incident-67c06d4b51c5196eb2894cd0`; `ep-0004/incident-367c348143656924203a5bc3` | `ep-0002/incident-67c06d4b51c5196eb2894cd0`; `ep-0004/incident-367c348143656924203a5bc3` |
+
+  Các ticket pipeline và invariant clean/seasonal giữ nguyên. Fix 1 giảm alert seasonal ở ngày sự kiện từ hai xuống không; `ep-0003` và `ep-0004` mỗi episode còn một volume alert nền tại T0 01/02 (đợt card-testing, residual 4,5 và 5,0), cả hai unmatched (`incident-6c9b3f…`, `incident-0cc327…`) — tính vào workload khi đếm P5.0b. Chi tiết phân phối/ngưỡng và lý do hoãn nằm tại [monitoring.md](monitoring.md), mục 1.
+
+  **Quyết định người dùng 31/10:** seasonal-volume-match acceptance và benign support counting được defer tới pilot 60 / P1.6 vòng 2. Smoke hiện tại không phân biệt được residual seasonal 3,0 (`ep-0003`) và 3,5 (`ep-0005`) với clean max residual 4,25 (`ep-0001`); giữ ngưỡng 4,25.
 
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.

@@ -1,8 +1,9 @@
-"""Daily point-in-time PSI and model review-rate metrics."""
+"""Daily point-in-time feature, volume, and model review-rate metrics."""
 
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 import io
@@ -10,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import sqlite3
+from statistics import median
 from typing import Any, TextIO
 from zoneinfo import ZoneInfo
 
@@ -46,6 +48,8 @@ _FEATURE_OBSERVATION_FLAG = {
 }
 _SUPPORTED_FEATURES = frozenset(_FEATURE_OBSERVATION_FLAG)
 _REFERENCE_NOT_APPLICABLE = "not_applicable"
+_DAILY_VOLUME_METRIC_ID = "volume.txn_count"
+_DAILY_VOLUME_FEATURE = "txn_count"
 
 
 class MonitoringMetricsError(ValueError):
@@ -68,6 +72,8 @@ class _MonitoringConfig:
     psi_bins: int
     psi_epsilon: float
     features: tuple[_FeatureSpec, ...]
+    volume_metric_id: str
+    volume_feature: str
     review_rate_metric_id: str
     review_rate_feature: str
 
@@ -76,6 +82,7 @@ class _MonitoringConfig:
 class _FeatureSamples:
     values: tuple[float, ...]
     censored_count: int
+    missing_count: int
 
 
 def _as_date(value: Any, *, field: str) -> date:
@@ -156,10 +163,10 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
     if not isinstance(psi, dict):
         raise MonitoringMetricsError("monitoring config psi must be an object")
     psi_bins = _config_value(
-        psi.get("number_of_bins"), field="psi.number_of_bins", expected_provenance="assumption"
+        psi.get("number_of_bins"), field="psi.number_of_bins"
     )
     psi_epsilon = _config_value(
-        psi.get("epsilon"), field="psi.epsilon", expected_provenance="assumption"
+        psi.get("epsilon"), field="psi.epsilon"
     )
     if isinstance(psi_bins, bool) or not isinstance(psi_bins, int) or psi_bins < 2:
         raise MonitoringMetricsError("monitoring PSI number_of_bins must be an integer >= 2")
@@ -188,6 +195,23 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
     if len({item.metric_id for item in features}) != len(features):
         raise MonitoringMetricsError("monitoring metric_id values must be unique")
 
+    daily_volume = raw.get("daily_volume")
+    if not isinstance(daily_volume, dict):
+        raise MonitoringMetricsError("monitoring config daily_volume must be an object")
+    volume_metric_id = daily_volume.get("metric_id")
+    volume_feature = daily_volume.get("feature")
+    if volume_metric_id != _DAILY_VOLUME_METRIC_ID:
+        raise MonitoringMetricsError(
+            f"monitoring daily_volume metric_id must be {_DAILY_VOLUME_METRIC_ID!r}"
+        )
+    if volume_feature != _DAILY_VOLUME_FEATURE:
+        raise MonitoringMetricsError(
+            f"monitoring daily_volume feature must be {_DAILY_VOLUME_FEATURE!r} "
+            "so it matches the public truth feature directly"
+        )
+    if volume_metric_id in {item.metric_id for item in features}:
+        raise MonitoringMetricsError("monitoring metric_id values must be unique")
+
     review_rate = raw.get("model_review_rate")
     if not isinstance(review_rate, dict):
         raise MonitoringMetricsError("monitoring config model_review_rate must be an object")
@@ -197,7 +221,7 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
         raise MonitoringMetricsError("monitoring model_review_rate needs a metric_id")
     if review_feature != "decision_region":
         raise MonitoringMetricsError("monitoring review-rate feature must be decision_region")
-    if review_metric_id in {item.metric_id for item in features}:
+    if review_metric_id in ({item.metric_id for item in features} | {volume_metric_id}):
         raise MonitoringMetricsError("monitoring metric_id values must be unique")
 
     return _MonitoringConfig(
@@ -209,6 +233,8 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
         psi_bins=psi_bins,
         psi_epsilon=float(psi_epsilon),
         features=tuple(features),
+        volume_metric_id=volume_metric_id,
+        volume_feature=volume_feature,
         review_rate_metric_id=review_metric_id,
         review_rate_feature=review_feature,
     )
@@ -277,6 +303,7 @@ def _feature_samples(
     observation_flag = _FEATURE_OBSERVATION_FLAG[feature]
     values: list[float] = []
     censored_count = 0
+    missing_count = 0
     for txn_id in txn_ids:
         row = rows_by_txn_id.get(txn_id)
         if row is None:
@@ -287,7 +314,9 @@ def _feature_samples(
         value = row[feature]
         if value is not None and math.isfinite(float(value)):
             values.append(float(value))
-    return _FeatureSamples(tuple(values), censored_count)
+        else:
+            missing_count += 1
+    return _FeatureSamples(tuple(values), censored_count, missing_count)
 
 
 def _quantile_edges(reference: np.ndarray, bins: int) -> np.ndarray:
@@ -300,8 +329,8 @@ def _quantile_edges(reference: np.ndarray, bins: int) -> np.ndarray:
 
 
 def population_stability_index(
-    window_values: tuple[float, ...] | list[float],
-    reference_values: tuple[float, ...] | list[float],
+    window_values: tuple[float | None, ...] | list[float | None],
+    reference_values: tuple[float | None, ...] | list[float | None],
     *,
     bins: int,
     epsilon: float,
@@ -311,21 +340,37 @@ def population_stability_index(
         raise MonitoringMetricsError("PSI bins must be an integer >= 2")
     if not math.isfinite(epsilon) or epsilon <= 0:
         raise MonitoringMetricsError("PSI epsilon must be finite and positive")
-    reference = np.asarray(reference_values, dtype=np.float64)
-    window = np.asarray(window_values, dtype=np.float64)
-    reference = reference[np.isfinite(reference)]
-    window = window[np.isfinite(window)]
-    if not len(reference) or not len(window):
+    def split_missing(values: tuple[float | None, ...] | list[float | None]) -> tuple[np.ndarray, int]:
+        numeric: list[float] = []
+        missing = 0
+        for value in values:
+            if value is None:
+                missing += 1
+            elif isinstance(value, bool):
+                missing += 1
+            elif isinstance(value, (int, float)) and math.isfinite(float(value)):
+                numeric.append(float(value))
+            else:
+                missing += 1
+        return np.asarray(numeric, dtype=np.float64), missing
+
+    reference, reference_missing = split_missing(reference_values)
+    window, window_missing = split_missing(window_values)
+    reference_total = len(reference) + reference_missing
+    window_total = len(window) + window_missing
+    if not reference_total or not window_total or not len(reference):
         return None
 
     internal_edges = _quantile_edges(reference, bins)
     reference_counts = np.histogram(reference, bins=np.r_[-np.inf, internal_edges, np.inf])[0]
     window_counts = np.histogram(window, bins=np.r_[-np.inf, internal_edges, np.inf])[0]
+    reference_counts = np.append(reference_counts, reference_missing)
+    window_counts = np.append(window_counts, window_missing)
     bin_count = len(reference_counts)
     reference_proportions = (reference_counts + epsilon) / (
-        len(reference) + epsilon * bin_count
+        reference_total + epsilon * bin_count
     )
-    window_proportions = (window_counts + epsilon) / (len(window) + epsilon * bin_count)
+    window_proportions = (window_counts + epsilon) / (window_total + epsilon * bin_count)
     value = float(
         np.sum(
             (window_proportions - reference_proportions)
@@ -367,6 +412,101 @@ def _base_metric(
         "n_reference": n_reference,
         "flags": flags,
     }
+
+
+def _robust_volume_baselines(
+    reference_rows: list[dict[str, Any]],
+    *,
+    reference_start: date,
+    reference_end_exclusive: date,
+    timezone: ZoneInfo,
+) -> tuple[float, dict[str, float], int]:
+    """Compute phase-independent median daily counts from the locked reference."""
+    reference_dates = tuple(
+        reference_start + timedelta(days=offset)
+        for offset in range((reference_end_exclusive - reference_start).days)
+    )
+    counts_by_date = {item: 0 for item in reference_dates}
+    channel_counts_by_date: dict[date, Counter[str]] = {
+        item: Counter() for item in reference_dates
+    }
+    for row in reference_rows:
+        business_date = _local_date(str(row["event_at"]), timezone)
+        if business_date not in counts_by_date:
+            continue
+        counts_by_date[business_date] += 1
+        channel_counts_by_date[business_date][str(row["channel"])] += 1
+
+    total_baseline = float(median(counts_by_date.values())) if counts_by_date else 0.0
+    channels = {
+        channel
+        for daily_counts in channel_counts_by_date.values()
+        for channel in daily_counts
+    }
+    channel_baselines = {
+        channel: float(
+            median(
+                channel_counts_by_date[business_date].get(channel, 0)
+                for business_date in reference_dates
+            )
+        )
+        for channel in channels
+    }
+
+    return total_baseline, channel_baselines, sum(counts_by_date.values())
+
+
+def _calendar_expected_volume_lift(
+    calendar_rows: list[dict[str, Any]],
+    *,
+    window_start: date,
+    window_end: date,
+    baseline_total: float,
+    baseline_channel: dict[str, float],
+    baseline_window_count: float,
+) -> float | None:
+    """Read the public calendar's weighted ``txn_count`` effect for one business date."""
+    if baseline_window_count <= 0:
+        return None
+
+    expected_delta = 0.0
+    for row in calendar_rows:
+        try:
+            event_date = date.fromisoformat(str(row["business_date"]))
+            effects = json.loads(str(row["expected_effect_json"]))
+            scope = json.loads(str(row["scope_json"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not window_start <= event_date <= window_end:
+            continue
+        effect = effects.get(_DAILY_VOLUME_FEATURE)
+        if effect is None:
+            continue
+        if not isinstance(effect, dict) or effect.get("aggregation") != "sum":
+            return None
+        relative_change = effect.get("relative_change")
+        if (
+            isinstance(relative_change, bool)
+            or not isinstance(relative_change, (int, float))
+            or not math.isfinite(float(relative_change))
+        ):
+            return None
+        if not isinstance(scope, dict):
+            return None
+        scoped_channels = scope.get("channel")
+        if scoped_channels is None:
+            event_baseline = baseline_total
+        elif isinstance(scoped_channels, list) and all(
+            isinstance(channel, str) and channel for channel in scoped_channels
+        ):
+            event_baseline = sum(
+                baseline_channel.get(channel, 0.0) for channel in scoped_channels
+            )
+        else:
+            return None
+        expected_delta += event_baseline * float(relative_change)
+
+    return expected_delta / baseline_window_count
 
 
 def compute_daily_metrics(
@@ -418,6 +558,23 @@ def compute_daily_metrics(
             as_of_time=reference_as_of,
         )
         reference_sources = [row for row in reference_snapshot if row["episode_id"] == "base"]
+        reference_volume_rows = [
+            row
+            for row in reference_sources
+            if monitoring_config.reference_start
+            <= _local_date(str(row["event_at"]), timezone)
+            < monitoring_config.reference_end_exclusive
+        ]
+        (
+            baseline_volume_count,
+            baseline_channel_volume_count,
+            reference_volume_count,
+        ) = _robust_volume_baselines(
+            reference_volume_rows,
+            reference_start=monitoring_config.reference_start,
+            reference_end_exclusive=monitoring_config.reference_end_exclusive,
+            timezone=timezone,
+        )
         reference_targets = [
             row
             for row in reference_sources
@@ -505,9 +662,25 @@ def compute_daily_metrics(
                 and window_start <= _local_date(str(row["event_at"]), timezone) <= business_date
             ]
             window_target_ids = [str(row["txn_id"]) for row in window_targets]
+            daily_volume_targets = [
+                row
+                for row in window_targets
+                if _local_date(str(row["event_at"]), timezone) == business_date
+            ]
+            window_volume_count = len(daily_volume_targets)
             unavailable_target_count = sum(
                 txn_id in episode_targets_unavailable for txn_id in window_target_ids
             )
+            calendar_snapshot = read_as_of(
+                operational,
+                "business_calendar",
+                episode_id=episode_id,
+                t0=t0_utc,
+                as_of_time=as_of_time,
+            )
+            calendar_rows = [
+                row for row in calendar_snapshot if row["episode_id"] == episode_id
+            ]
 
             for spec in monitoring_config.features:
                 window_samples = _feature_samples(
@@ -518,17 +691,27 @@ def compute_daily_metrics(
                 )
                 window_values = window_samples.values
                 baseline_values = reference_samples.values
+                window_observation_count = len(window_values) + window_samples.missing_count
+                reference_observation_count = (
+                    len(baseline_values) + reference_samples.missing_count
+                )
                 flags: list[str] = []
                 if not complete_window:
                     flags.append("window_incomplete")
-                if len(window_values) < monitoring_config.minimum_sample_count:
+                if window_observation_count < monitoring_config.minimum_sample_count:
                     flags.append("small_window_sample")
-                if len(baseline_values) < monitoring_config.minimum_sample_count:
+                if reference_observation_count < monitoring_config.minimum_sample_count:
                     flags.append("small_reference_sample")
-                if not window_values:
+                if not window_observation_count:
                     flags.append("no_window_samples")
-                if not baseline_values:
+                if not reference_observation_count:
                     flags.append("no_reference_samples")
+                if window_samples.missing_count:
+                    flags.append(f"window_missing_samples={window_samples.missing_count}")
+                if reference_samples.missing_count:
+                    flags.append(
+                        f"reference_missing_samples={reference_samples.missing_count}"
+                    )
                 if window_samples.censored_count:
                     flags.append(f"window_censored_samples={window_samples.censored_count}")
                 if reference_samples.censored_count:
@@ -543,8 +726,8 @@ def compute_daily_metrics(
                         f"{len(reference_targets_unavailable)}"
                     )
                 value = population_stability_index(
-                    window_values,
-                    baseline_values,
+                    [*window_values, *([None] * window_samples.missing_count)],
+                    [*baseline_values, *([None] * reference_samples.missing_count)],
                     bins=monitoring_config.psi_bins,
                     epsilon=monitoring_config.psi_epsilon,
                 )
@@ -559,11 +742,59 @@ def compute_daily_metrics(
                         value=value,
                         reference_window=reference_window,
                         window_start=window_start,
-                        n_window=len(window_values),
-                        n_reference=len(baseline_values),
+                        n_window=window_observation_count,
+                        n_reference=reference_observation_count,
                         flags=flags,
                     )
                 )
+
+            volume_window_start = business_date
+            baseline_window_count = baseline_volume_count
+            volume_flags: list[str] = []
+            if reference_volume_count == 0 or baseline_window_count <= 0:
+                volume_flags.append("no_reference_samples")
+
+            expected_calendar_lift = _calendar_expected_volume_lift(
+                calendar_rows,
+                window_start=volume_window_start,
+                window_end=business_date,
+                baseline_total=baseline_volume_count,
+                baseline_channel=baseline_channel_volume_count,
+                baseline_window_count=baseline_window_count,
+            )
+            if expected_calendar_lift is None:
+                volume_flags.append("calendar_expectation_unavailable")
+            volume_value = (
+                window_volume_count / baseline_window_count - 1.0
+                if baseline_window_count > 0
+                else None
+            )
+            volume_reference = json.dumps(
+                {
+                    "baseline_window": reference_window,
+                    "business_calendar_expected_relative_change": expected_calendar_lift,
+                    "method": "reference_median_1d_count",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            metric_rows.append(
+                _base_metric(
+                    metric_id=monitoring_config.volume_metric_id,
+                    episode_id=episode_id,
+                    as_of_time=as_of_time,
+                    business_date=business_date,
+                    feature=monitoring_config.volume_feature,
+                    segment="all",
+                    value=volume_value,
+                    reference_window=volume_reference,
+                    window_start=volume_window_start,
+                    n_window=window_volume_count,
+                    n_reference=reference_volume_count,
+                    flags=volume_flags,
+                )
+            )
 
             score_snapshot = read_as_of(
                 operational,

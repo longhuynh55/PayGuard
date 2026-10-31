@@ -23,9 +23,12 @@ _KNOWN_CLEAN_MINIMUM_SUPPORT_FP = (
     "incident-c89881b3dc8c2d6e9ebd1354",
 )
 _EXPECTED_SMOKE_DATA_TICKETS = {
-    ("ep-0002", "incident-ea21a6a3c09cbde42c6a40b1"),
-    ("ep-0004", "incident-553672f4a8f9fcd91ee734d2"),
-    ("ep-0004", "incident-7cfa5401d22e49b6c3a7faa1"),
+    # P3.7 re-derived incident IDs after changing the amount alert set:
+    # ep-0002/incident-ea21... -> incident-67c...; ep-0004/incident-553... -> incident-367...
+    # Fix1 changes only daily volume and evaluation windows, so these pipeline IDs stay stable.
+    ("ep-0002", "incident-67c06d4b51c5196eb2894cd0"),
+    ("ep-0004", "incident-367c348143656924203a5bc3"),
+    # P3.7 no longer creates a separate jump-containing ticket for old ep-0004/incident-7cfa...
     # BACKLOG-5 removes ep-0002/incident-e346f09c6706875fcc708684: QR n=3->1
     # while both days already have the x100 shift, a low-support coincidence per review finding 2.
     # Source: review/findings/P1.3-r2-r1.md.
@@ -48,6 +51,14 @@ def _assert_smoke_data_ticket_baseline(
     assert {
         pair for pair in data_ticket_pairs if pair[0] in non_pipeline_episode_ids
     } == set()
+    placeholders = ", ".join("?" for _ in non_pipeline_episode_ids)
+    with sqlite3.connect(run_dir / "operational" / "observations.sqlite") as connection:
+        unsafe_non_pipeline_decisions = connection.execute(
+            "SELECT episode_id, incident_id, action FROM decisions "
+            f"WHERE episode_id IN ({placeholders}) AND action IN ('data_ticket', 'close')",
+            tuple(sorted(non_pipeline_episode_ids)),
+        ).fetchall()
+    assert unsafe_non_pipeline_decisions == []
 
 
 def _cli(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -590,7 +601,9 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
     assert duplicate_rule_groups == 0
     assert len(agent_rows) >= 3
     assert {row[0] for row in agent_rows} == {
-        "ep-0001", "ep-0002", "ep-0003", "ep-0004", "ep-0005"
+        # Fix1 removes the clean ep-0001 background incident and the ep-0005
+        # seasonal incident below the shared volume residual threshold.
+        "ep-0002", "ep-0003", "ep-0004"
     }
     for _, trace_ids, input_tokens, output_tokens, total_tokens, cost_usd, model_slug, action in agent_rows:
         assert len(json.loads(trace_ids)) == 1

@@ -289,8 +289,17 @@ def test_late_incident_inside_public_metric_window_matches_truth(tmp_path: Path)
         ("amount_avg_7d", "amount", "2026-02-20T00:00:00.000001Z", "unmatched"),
         ("txn_count_24h", "txn_count", "2026-02-14T00:00:00.000000Z", "matched"),
         ("txn_count_24h", "txn_count", "2026-02-14T00:00:00.000001Z", "unmatched"),
+        ("txn_count", "txn_count", "2026-02-08T00:00:00.000000Z", "matched"),
+        ("txn_count", "txn_count", "2026-02-08T00:00:00.000001Z", "unmatched"),
     ],
-    ids=["amount-boundary", "amount-after-boundary", "count-boundary", "count-after-boundary"],
+    ids=[
+        "amount-boundary",
+        "amount-after-boundary",
+        "count-boundary",
+        "count-after-boundary",
+        "daily-volume-boundary",
+        "daily-volume-after-boundary",
+    ],
 )
 def test_metric_window_plus_feature_lookback_boundaries(
     tmp_path: Path,
@@ -330,6 +339,27 @@ def test_metric_window_plus_feature_lookback_boundaries(
         store.close()
 
 
+def test_monitoring_feature_without_public_lookback_is_rejected(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "unknown-lookback-run")
+    try:
+        _add_episode(store, "ep-unknown-lookback", "data_pipeline")
+        store.commit()
+        incidents = _incident_rows(
+            _alert(
+                episode_id="ep-unknown-lookback",
+                alert_id="alert-unknown-lookback",
+                feature="unknown_monitoring_feature",
+                at="2026-02-05T12:00:00.000000Z",
+            ),
+            episode_id="ep-unknown-lookback",
+        )
+
+        with pytest.raises(EvaluationMatcherError, match="has no public lookback"):
+            _evaluate(store, incidents, ["ep-unknown-lookback"])
+    finally:
+        store.close()
+
+
 def test_run_resolved_metric_window_must_match_public_contract(tmp_path: Path) -> None:
     store = create_export_stores(tmp_path / "resolved-window-run")
     try:
@@ -365,7 +395,14 @@ def test_matching_run_resolved_metric_window_is_used(tmp_path: Path) -> None:
                 "key": RUN_METADATA_KEY,
                 "value_json": {
                     "resolved_config": {
-                        "monitoring": {"window_days": {"value": 7}}
+                        "monitoring": {
+                            "window_days": {"value": 7},
+                            "metric_windows": {
+                                "psi.txn_count_24h": 7,
+                                "psi.amount_avg_7d": 7,
+                                "volume.txn_count": 1,
+                            },
+                        }
                     }
                 },
             },
@@ -375,6 +412,37 @@ def test_matching_run_resolved_metric_window_is_used(tmp_path: Path) -> None:
         result = _evaluate(store, (), ["ep-resolved-window-match"])
 
         assert result.report["metric_window_days"] == 7
+    finally:
+        store.close()
+
+
+def test_run_resolved_per_metric_windows_must_match_public_contract(tmp_path: Path) -> None:
+    store = create_export_stores(tmp_path / "resolved-per-metric-window-run")
+    try:
+        _add_episode(store, "ep-resolved-per-metric", "data_pipeline")
+        insert_private_record(
+            store.private,
+            "run_metadata",
+            {
+                "key": RUN_METADATA_KEY,
+                "value_json": {
+                    "resolved_config": {
+                        "monitoring": {
+                            "window_days": {"value": 7},
+                            "metric_windows": {
+                                "psi.txn_count_24h": 7,
+                                "psi.amount_avg_7d": 7,
+                                "volume.txn_count": 2,
+                            },
+                        }
+                    }
+                },
+            },
+        )
+        store.commit()
+
+        with pytest.raises(EvaluationMatcherError, match="per-metric windows"):
+            _evaluate(store, (), ["ep-resolved-per-metric"])
     finally:
         store.close()
 

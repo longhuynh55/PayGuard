@@ -15,7 +15,11 @@ import pytest
 from evaluation import evaluate_detection_recall
 from model.evaluate import score_monitoring_episodes, train_operational_model
 from monitoring.incidents import compute_incidents
-from monitoring.metrics import compute_daily_metrics, population_stability_index
+from monitoring.metrics import (
+    _robust_volume_baselines,
+    compute_daily_metrics,
+    population_stability_index,
+)
 from monitoring.signals import compute_alerts
 from monitoring.store import persist_monitoring_rows
 from simulator.asof import read_as_of
@@ -196,6 +200,56 @@ def test_psi_is_zero_for_same_distribution_and_positive_for_clear_shift() -> Non
     ) > 0.5
 
 
+def test_psi_treats_missing_feature_values_as_a_separate_bucket() -> None:
+    reference = [float(value) for value in range(1, 101)] + [None] * 2
+    same_distribution = [float(value) for value in range(1, 101)] + [None] * 2
+    null_shift = [float(value) for value in range(1, 21)] + [None] * 20
+
+    assert population_stability_index(
+        same_distribution, reference, bins=2, epsilon=1.0
+    ) == pytest.approx(0.0)
+    assert population_stability_index(null_shift, reference, bins=2, epsilon=1.0) > 0.5
+
+
+def test_daily_volume_reference_median_is_independent_of_weekday_phase() -> None:
+    reference_start = date(2025, 11, 1)
+    reference_end = reference_start + timedelta(days=7)
+
+    def rows_with_burst(burst_day: date) -> list[dict[str, str]]:
+        rows = []
+        for offset in range(7):
+            business_date = reference_start + timedelta(days=offset)
+            count = 16 if business_date == burst_day else 4
+            rows.extend(
+                {
+                    "event_at": _local_timestamp(
+                        datetime.combine(business_date, time(12, 0), tzinfo=BUSINESS_TZ)
+                    ),
+                    "channel": "card",
+                }
+                for _ in range(count)
+            )
+        return rows
+
+    tuesday = date(2025, 11, 4)
+    sunday = date(2025, 11, 2)
+    tuesday_baseline = _robust_volume_baselines(
+        rows_with_burst(tuesday),
+        reference_start=reference_start,
+        reference_end_exclusive=reference_end,
+        timezone=BUSINESS_TZ,
+    )
+    sunday_baseline = _robust_volume_baselines(
+        rows_with_burst(sunday),
+        reference_start=reference_start,
+        reference_end_exclusive=reference_end,
+        timezone=BUSINESS_TZ,
+    )
+
+    assert tuesday_baseline == sunday_baseline
+    assert tuesday_baseline == (4.0, {"card": 4.0}, 40)
+
+
 def test_daily_metrics_are_deterministic_and_use_vietnam_business_date(
     operational_store: StorePair,
 ) -> None:
@@ -228,6 +282,84 @@ def test_daily_metrics_are_deterministic_and_use_vietnam_business_date(
     assert metric["window_end"] == "2026-02-10"
     assert metric["as_of_time"] == "2026-02-10T16:59:59.999999Z"
     assert "small_window_sample" in metric["flags"]
+
+
+def test_daily_volume_metric_is_as_of_and_carries_public_calendar_expectation(
+    operational_store: StorePair,
+) -> None:
+    reference_day = date(2025, 11, 1)
+    while reference_day < date(2026, 2, 1):
+        _add_transaction(
+            operational_store.operational,
+            txn_id=f"txn-volume-reference-{reference_day.isoformat()}",
+            episode_id="base",
+            created_at=datetime.combine(
+                reference_day, time(12, 0), tzinfo=BUSINESS_TZ
+            ),
+        )
+        reference_day += timedelta(days=1)
+
+    event_date = date(2026, 2, 10)
+    event_start = datetime.combine(event_date, time.min, tzinfo=BUSINESS_TZ)
+    insert_operational_record(
+        operational_store.operational,
+        "business_calendar",
+        {
+            "calendar_event_id": "calendar-volume-expected",
+            "episode_id": "ep-a",
+            "event_at": _local_timestamp(event_start),
+            "available_at": _local_timestamp(event_start),
+            "business_date": event_date.isoformat(),
+            "event_name": "promotion-day",
+            "lag_days": 0,
+            "expected_effect_json": {
+                "txn_count": {"aggregation": "sum", "relative_change": 0.5}
+            },
+            "scope_json": {"channel": ["qr"]},
+        },
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-before-cutoff-a",
+        episode_id="ep-a",
+        created_at=datetime(2026, 2, 10, 12, 0, tzinfo=BUSINESS_TZ),
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-before-cutoff-b",
+        episode_id="ep-a",
+        created_at=datetime(2026, 2, 10, 13, 0, tzinfo=BUSINESS_TZ),
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-after-cutoff",
+        episode_id="ep-a",
+        created_at=datetime(2026, 2, 10, 14, 0, tzinfo=BUSINESS_TZ),
+        available_at=datetime(2026, 2, 11, 0, 0, tzinfo=BUSINESS_TZ),
+    )
+    _add_transaction(
+        operational_store.operational,
+        txn_id="txn-volume-other-episode",
+        episode_id="ep-b",
+        created_at=datetime(2026, 2, 10, 15, 0, tzinfo=BUSINESS_TZ),
+    )
+
+    rows = compute_daily_metrics(operational_store.operational, episode_ids=("ep-a",))
+    metric = _daily_row(
+        rows,
+        metric_id="volume.txn_count",
+        episode_id="ep-a",
+        business_date="2026-02-10",
+    )
+    reference = json.loads(metric["reference_window"])
+
+    assert metric["feature"] == "txn_count"
+    assert metric["segment"] == "all"
+    assert metric["n_window"] == 2
+    assert metric["n_reference"] > 0
+    assert reference["method"] == "reference_median_1d_count"
+    assert reference["business_calendar_expected_relative_change"] > 0
+    assert "small_window_sample" not in metric["flags"]
 
 
 def test_daily_metric_does_not_change_for_rows_available_after_as_of(
@@ -384,9 +516,11 @@ def test_psi_excludes_transactions_censored_by_p2_observation_flags(
         assert metric["n_reference"] >= 30
 
 
-def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
-    tmp_path: Path,
-) -> None:
+@pytest.fixture(scope="module")
+def p37_smoke_match_context(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[set[str], set[str]]:
+    tmp_path = tmp_path_factory.mktemp("p3-smoke")
     store = create_export_stores(tmp_path / "p3-smoke")
     simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
     episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
@@ -448,10 +582,11 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
             }
         )
     assert result.stderr.startswith("metric_count=")
-    assert len(rows) == len(generated.episodes) * 30 * 3
+    assert len(rows) == len(generated.episodes) * 30 * 4
     assert {row["metric_id"] for row in rows} == {
         "psi.txn_count_24h",
         "psi.amount_avg_7d",
+        "volume.txn_count",
         "model.review_rate",
     }
     assert any(int(row["n_reference"]) > 0 for row in rows if row["metric_id"].startswith("psi."))
@@ -481,7 +616,16 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         episode_id: len(result.alerts)
         for episode_id, result in alert_results.items()
     }
-    print(f"P3.2 smoke alert counts: {alert_counts}")
+    print(f"P3.7 smoke alert counts: {alert_counts}")
+    # Fix 1 removes weekday phasing and applies the development-max residual
+    # threshold uniformly; these are the resulting smoke counts.
+    assert alert_counts == {
+        "ep-0001": 0,
+        "ep-0002": 3,
+        "ep-0003": 1,
+        "ep-0004": 17,
+        "ep-0005": 0,
+    }
 
     incident_results = {
         episode_id: compute_incidents(result.alerts, episode_id=episode_id)
@@ -491,13 +635,13 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         episode_id: result.report["incident_count"]
         for episode_id, result in incident_results.items()
     }
-    print(f"P3.3 smoke incident counts: {incident_counts}")
+    print(f"P3.7 smoke incident counts: {incident_counts}")
     assert incident_counts == {
-        "ep-0001": 2,
+        "ep-0001": 0,
         "ep-0002": 2,
-        "ep-0003": 2,
-        "ep-0004": 2,
-        "ep-0005": 1,
+        "ep-0003": 1,
+        "ep-0004": 4,
+        "ep-0005": 0,
     }
     stored_metrics = []
     stored_alerts = []
@@ -571,10 +715,20 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert detection_recall["detected"] == 2
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
-    assert evaluation_result.report["incident_counts"]["matched"] == 4
-    assert evaluation_result.report["incident_counts"]["ambiguous"] == 0
-    assert evaluation_result.report["incident_counts"]["benign_matched"] == 0
-    assert evaluation_result.report["incident_counts"]["unmatched"] == 5
+    incident_counts = evaluation_result.report["incident_counts"]
+    # P3.7 Fix 1's single development threshold leaves seasonal matching blocked.
+    assert incident_counts["matched"] == 5
+    assert incident_counts["ambiguous"] == 0
+    assert incident_counts["benign_matched"] == 0
+    assert incident_counts["unmatched"] == 2
+    seasonal_episode_ids = {
+        episode.episode_id for episode in generated.episodes if episode.template == "seasonal"
+    }
+    matched_volume_episode_ids = {
+        match["episode_id"]
+        for match in evaluation_result.report["incident_matches"]
+        if match["feature"] == "txn_count" and match["matched_truth_ids"]
+    }
     assert evaluation_result.report_path.is_file()
     for episode_id in ("ep-0003", "ep-0005"):
         if alert_counts.get(episode_id) == 5:
@@ -582,11 +736,8 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
 
     clean_episode = next(item for item in generated.episodes if item.template == "clean")
     clean_result = alert_results[clean_episode.episode_id]
-    # With two PSI metrics over 30 daily snapshots, at most five alerts is a
-    # deliberately small smoke false-alarm budget; it does not change the
-    # monitoring.md threshold if the clean episode exceeds it.
-    assert len(clean_result.alerts) <= 5, (
-        f"clean smoke generated {len(clean_result.alerts)} alerts; counts={alert_counts}"
+    assert len(clean_result.alerts) == 0, (
+        f"clean development smoke generated background alerts: {alert_counts}"
     )
 
     pipeline_episode = next(
@@ -604,6 +755,14 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
         f"data_pipeline smoke has no post-effect amount_avg_7d alert; "
         f"count={len(pipeline_result.alerts)} report={pipeline_result.report}"
     )
+    seasonal_volume_alerts = [
+        alert
+        for episode in generated.episodes
+        if episode.template == "seasonal"
+        for alert in alert_results[episode.episode_id].alerts
+        if alert["metric"] == "volume.txn_count" and alert["feature"] == "txn_count"
+    ]
+    assert seasonal_volume_alerts, "seasonal smoke has no daily volume alert"
 
     signals_output = tmp_path / "alerts.csv"
     report_output = tmp_path / "signals_report.json"
@@ -648,3 +807,22 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert sorted(stored_pipeline_alerts, key=lambda row: row["alert_id"]) == sorted(
         pipeline_result.alerts, key=lambda row: row["alert_id"]
     )
+    return seasonal_episode_ids, matched_volume_episode_ids
+
+
+def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
+    p37_smoke_match_context: tuple[set[str], set[str]],
+) -> None:
+    seasonal_episode_ids, _ = p37_smoke_match_context
+    assert seasonal_episode_ids == {"ep-0003", "ep-0005"}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="P3.7: smoke world cannot separate seasonal from clean volume noise (clean max residual 4.25 vs seasonal 3.0/3.5); deferred to pilot 60 / P1.6 round 2 — user decision 31/10",
+)
+def test_smoke_seasonal_volume_incidents_match_truth(
+    p37_smoke_match_context: tuple[set[str], set[str]],
+) -> None:
+    seasonal_episode_ids, matched_volume_episode_ids = p37_smoke_match_context
+    assert seasonal_episode_ids <= matched_volume_episode_ids

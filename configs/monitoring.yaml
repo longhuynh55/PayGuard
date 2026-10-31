@@ -31,6 +31,29 @@ window_days:
     kind: contract
     reference: docs/monitoring.md, section 1.
 
+metric_windows:
+  psi.txn_count_24h:
+    value: 7
+    unit: inclusive local business dates
+    rationale: PSI uses the locked seven-day monitoring window.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/evaluation.md, section 2.
+  psi.amount_avg_7d:
+    value: 7
+    unit: inclusive local business dates
+    rationale: PSI uses the locked seven-day monitoring window.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/evaluation.md, section 2.
+  volume.txn_count:
+    value: 1
+    unit: inclusive local business dates
+    rationale: The daily volume metric observes exactly one business date.
+    provenance:
+      kind: contract
+      reference: docs/monitoring.md, section 1; docs/evaluation.md, section 2.
+
 minimum_sample_count:
   value: 30
   unit: observations
@@ -41,25 +64,29 @@ minimum_sample_count:
 
 psi:
   number_of_bins:
-    value: 10
+    value: 2
     unit: quantile bins
-    rationale: Initial reference quantile bin count for PSI.
+    rationale: Two broad reference quantile bins keep the seven-day PSI estimate supported by its small transaction window.
     provenance:
-      kind: assumption
-      reference: Assumption, not tuned; no benchmark result is claimed.
+      kind: source
+      reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
   epsilon:
-    value: 0.000001
-    unit: pseudocount per bin
-    rationale: Smooth empty bins when calculating PSI.
+    value: 1.0
+    unit: count pseudocount per bin
+    rationale: Add one count per PSI bin so an empty seven-day bin does not dominate the estimate.
     provenance:
-      kind: assumption
-      reference: Assumption, not tuned; no benchmark result is claimed.
+      kind: source
+      reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
 
 features:
   - metric_id: psi.txn_count_24h
     feature: txn_count_24h
   - metric_id: psi.amount_avg_7d
     feature: amount_avg_7d
+
+daily_volume:
+  metric_id: volume.txn_count
+  feature: txn_count
 
 model_review_rate:
   metric_id: model.review_rate
@@ -69,7 +96,14 @@ signals:
   psi_threshold:
     value: 0.25
     unit: PSI
-    rationale: Round-one starting threshold for the PSI signal.
+    rationale: Retain the round-one PSI operating point after correcting sparse-window binning; clean development stays below the existing smoke background-alert budget.
     provenance:
       kind: source
-      reference: "ngưỡng khởi đầu theo monitoring.md, chưa chỉnh"
+      reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
+  volume_relative_change_threshold:
+    value: 4.25
+    unit: absolute relative change
+    rationale: Strictly exceed the maximum absolute one-day deviation from the public calendar expectation across the 30 clean development snapshots after the phase-independent median reference baseline.
+    provenance:
+      kind: source
+      reference: docs/monitoring.md, section 1; maximum absolute delivered one-day residual over clean development episode ep-0001 (30 dates) after reference_median_1d_count; 4.25.

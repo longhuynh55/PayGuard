@@ -45,6 +45,7 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
 ### P5.0b — Bảng support trên development
 - **Mục tiêu:** đo trên episode `development` (không calibration/test): số truth duy nhất theo episode và nhóm nguyên nhân; matched/ambiguous/unmatched; cửa sổ đủ; rule coverage; số ca tới agent; số ca đủ điều kiện đóng. Báo cáo private.
 - **Nghiệm thu:** bảng tái lập bằng một lệnh; ghi rõ là pilot/feasibility, không tăng episode hay đổi 12/24/24.
+- **Phụ thuộc:** tình trạng seasonal-volume-match / benign support theo quyết định người dùng 31/10 được ghi tại [bàn giao P3.7](p3-implementation.md).
 
 ### P5.1 — Harness tối thiểu và sổ chi phí bền
 - **Mục tiêu:** một lệnh chạy dữ liệu → model → monitoring → alert → triage → báo cáo (MASTER mục 1). Base đóng băng sau scores/metrics/alerts, trước mọi incident/decision; mỗi policy chạy trên bản copy operational riêng; incident tính lại theo lịch sử decision riêng.

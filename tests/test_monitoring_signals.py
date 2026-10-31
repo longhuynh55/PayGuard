@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from monitoring.metrics import DAILY_METRIC_COLUMNS
@@ -135,3 +137,89 @@ def test_mixed_episode_rows_are_rejected() -> None:
             episode_id="ep-a",
             as_of_time="2026-02-10T16:59:59.999999Z",
         )
+
+
+def test_volume_alert_uses_one_threshold_for_departure_from_calendar_expectation() -> None:
+    reference = json.dumps(
+        {
+            "baseline_window": "2025-11-01/2026-01-31",
+            "business_calendar_expected_relative_change": 0.6,
+            "method": "reference_median_1d_count",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row = _metric_row(
+        metric_id="volume.txn_count",
+        value=5.0,
+        feature="txn_count",
+        reference_window=reference,
+    )
+
+    result = compute_alerts(
+        [row],
+        episode_id="ep-a",
+        as_of_time=row["as_of_time"],
+    )
+
+    assert len(result.alerts) == 1
+    assert result.alerts[0]["metric"] == "volume.txn_count"
+    assert result.alerts[0]["feature"] == "txn_count"
+    assert result.alerts[0]["value"] == 5.0
+    assert result.alerts[0]["threshold"] == 4.25
+    assert result.report["volume_rows_evaluated"] == 1
+
+
+def test_unannounced_daily_volume_uses_its_clean_development_threshold() -> None:
+    reference = json.dumps(
+        {
+            "baseline_window": "2025-11-01/2026-01-31",
+            "business_calendar_expected_relative_change": 0.0,
+            "method": "reference_median_1d_count",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    rows = [
+        _metric_row(
+            metric_id="volume.txn_count",
+            value=4.25,
+            feature="txn_count",
+            reference_window=reference,
+        ),
+        _metric_row(
+            metric_id="volume.txn_count",
+            as_of_time="2026-02-11T16:59:59.999999Z",
+            value=4.250001,
+            feature="txn_count",
+            reference_window=reference,
+        ),
+    ]
+
+    result = compute_alerts(
+        rows,
+        episode_id="ep-a",
+        as_of_time="2026-02-11T16:59:59.999999Z",
+    )
+
+    assert len(result.alerts) == 1
+    assert result.alerts[0]["value"] == 4.250001
+    assert result.alerts[0]["threshold"] == 4.25
+
+
+def test_volume_alert_suppresses_missing_calendar_expectation() -> None:
+    row = _metric_row(
+        metric_id="volume.txn_count",
+        value=0.8,
+        feature="txn_count",
+        reference_window="not-a-volume-reference",
+    )
+
+    result = compute_alerts(
+        [row],
+        episode_id="ep-a",
+        as_of_time=row["as_of_time"],
+    )
+
+    assert result.alerts == ()
+    assert result.report["suppressed"][0]["reasons"] == ["reference_not_available"]

@@ -26,12 +26,13 @@ FEATURE_NAMES = (
     "history_window_observed_7d",
 )
 
-# Public lookbacks used by monitoring and the evaluator for the features that
-# currently produce P3.1 PSI metrics. Keep the matching horizon tied to the
-# feature SQL below.
+# Public lookbacks used by monitoring and the evaluator. Model features mirror
+# the SQL below; `txn_count` is the one-business-day P3.7 volume metric from
+# docs/data.md.
 FEATURE_LOOKBACK_DAYS = {
     "txn_count_24h": 1,
     "amount_avg_7d": 7,
+    "txn_count": 1,
 }
 
 _TRANSACTION_COLUMNS = (

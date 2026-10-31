@@ -814,9 +814,8 @@ def _smoke_runbook_context(tmp_path_factory):
         known_false_positive = latest_by_id.get(
             _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
         )
-        assert known_false_positive is not None
-        assert known_false_positive["episode_id"] == "ep-0001"
-        assert known_false_positive["feature"] == "amount_avg_7d"
+        # P3.7 removes the clean background alert that created this old incident.
+        assert known_false_positive is None
         yield {
             "store": store,
             "simulator_config": simulator_config,
@@ -867,10 +866,15 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         assert isinstance(window_end_raw, str)
         window_start = date.fromisoformat(window_start_raw)
         window_end = date.fromisoformat(window_end_raw)
-        window_contains_jump = (
-            window_start <= previous_jump_day and jump_day <= window_end
-        )
+        # The source metric window begins on the first post-T0 day; the runbook
+        # still compares that day with the immediately preceding observed day.
+        window_contains_jump = window_start <= jump_day <= window_end
         if window_contains_jump:
+            transition = unit_check["details"].get("matched_transition", {})
+            assert transition.get("before_last_business_date") == previous_jump_day.isoformat()
+            assert transition.get("after_start_business_date") == jump_day.isoformat()
+            assert transition.get("before_transaction_count", 0) >= 2
+            assert transition.get("after_transaction_count", 0) >= 2
             jump_decisions_by_episode[incident["episode_id"]].append(
                 (incident, unit_check, decision)
             )
@@ -911,29 +915,19 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         first_jump_decisions.append(first_jump_decision)
 
     assert len(first_jump_decisions) == len(pipeline_ids) == 2
-    assert len(pipeline_decisions) == 4
+    # P3.7 re-derived the amount alert windows, producing five amount incidents
+    # across the two pipeline episodes; each still follows the BACKLOG-5 gate.
+    assert len(pipeline_decisions) == 5
     for incident in latest_by_id.values():
         if incident["episode_id"] not in non_pipeline_ids:
-            continue
-        if incident["incident_id"] == _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID:
             continue
         checks = check_unit_or_null_change(store.operational, incident)
         assert checks["unit_or_null_change"]["status"] == "not_applicable"
 
 
-def test_clean_ep0001_card_window_minimum_support_false_positive(
+def test_clean_ep0001_background_false_positive_is_absent(
     _smoke_runbook_context,
 ) -> None:
-    store = _smoke_runbook_context["store"]
-    incident = _smoke_runbook_context["latest_by_id"][
-        _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
-    ]
-    checks = check_unit_or_null_change(store.operational, incident)
-    # User decision 31/10/2026: this known sparse card case follows small_sample → insufficient.
-    unit_check = checks["unit_or_null_change"]
-    assert unit_check["status"] == "pending"
-    assert unit_check["details"]["evaluation_status"] == "insufficient"
-    decision = _gate(incident, checks)
-    assert decision["action"] == "human_review"
-    assert decision["action"] not in {"data_ticket", "close"}
-    assert decision["evidence_status"] == "insufficient"
+    latest_by_id = _smoke_runbook_context["latest_by_id"]
+    assert _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID not in latest_by_id
+    assert not any(row["episode_id"] == "ep-0001" for row in latest_by_id.values())

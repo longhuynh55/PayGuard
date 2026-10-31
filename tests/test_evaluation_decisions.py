@@ -358,7 +358,8 @@ def test_unmatched_close_is_not_treated_as_benign(tmp_path: Path) -> None:
                     "unmatched-close",
                     "2026-02-06T00:00:00.000000Z",
                     "close",
-                    feature="unknown_feature",
+                    # Registered lookback, but the truth only affects amount.
+                    feature="txn_count_24h",
                 )
             ],
         )

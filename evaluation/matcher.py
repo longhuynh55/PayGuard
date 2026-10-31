@@ -25,6 +25,7 @@ from simulator.validate import RUN_METADATA_KEY
 MONITORING_FEATURE_TO_TRUTH_FEATURE = {
     "amount_avg_7d": "amount",
     "txn_count_24h": "txn_count",
+    "txn_count": "txn_count",
 }
 
 
@@ -91,6 +92,98 @@ def _public_metric_window_days() -> int:
     return days
 
 
+def _public_metric_windows() -> tuple[dict[str, int], dict[str, int]]:
+    """Read per-metric windows and resolve them through the public feature map."""
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "monitoring.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise EvaluationMatcherError(
+            f"could not read public monitoring config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(config, Mapping) or config.get("schema_version") != 1:
+        raise EvaluationMatcherError("public monitoring config schema_version must be 1")
+
+    raw_windows = config.get("metric_windows")
+    if not isinstance(raw_windows, Mapping) or not raw_windows:
+        raise EvaluationMatcherError(
+            "public monitoring config metric_windows must be a non-empty object"
+        )
+    metric_to_feature: dict[str, str] = {}
+    raw_features = config.get("features")
+    if not isinstance(raw_features, list):
+        raise EvaluationMatcherError("public monitoring config features must be an array")
+    for index, item in enumerate(raw_features):
+        if not isinstance(item, Mapping):
+            raise EvaluationMatcherError(
+                f"public monitoring config features[{index}] must be an object"
+            )
+        metric_id, feature = item.get("metric_id"), item.get("feature")
+        if not isinstance(metric_id, str) or not metric_id.strip() or not isinstance(
+            feature, str
+        ) or not feature.strip():
+            raise EvaluationMatcherError(
+                f"public monitoring config features[{index}] needs metric_id and feature"
+            )
+        metric_to_feature[metric_id] = feature
+
+    daily_volume = config.get("daily_volume")
+    if not isinstance(daily_volume, Mapping):
+        raise EvaluationMatcherError("public monitoring config daily_volume must be an object")
+    volume_metric_id, volume_feature = (
+        daily_volume.get("metric_id"),
+        daily_volume.get("feature"),
+    )
+    if not isinstance(volume_metric_id, str) or not isinstance(volume_feature, str):
+        raise EvaluationMatcherError(
+            "public monitoring config daily_volume must declare metric_id and feature"
+        )
+    metric_to_feature[volume_metric_id] = volume_feature
+
+    if set(raw_windows) != set(metric_to_feature):
+        raise EvaluationMatcherError(
+            "public monitoring config metric_windows must cover every configured metric"
+        )
+    global_days = _public_metric_window_days()
+    windows_by_metric: dict[str, int] = {}
+    windows_by_feature: dict[str, int] = {}
+    for metric_id, raw_window in raw_windows.items():
+        days = raw_window.get("value") if isinstance(raw_window, Mapping) else None
+        provenance = raw_window.get("provenance") if isinstance(raw_window, Mapping) else None
+        if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+            raise EvaluationMatcherError(
+                f"public monitoring config metric_windows.{metric_id}.value must be a positive integer"
+            )
+        unit = raw_window.get("unit") if isinstance(raw_window, Mapping) else None
+        rationale = raw_window.get("rationale") if isinstance(raw_window, Mapping) else None
+        reference = provenance.get("reference") if isinstance(provenance, Mapping) else None
+        if (
+            not isinstance(provenance, Mapping)
+            or provenance.get("kind") != "contract"
+            or not isinstance(reference, str)
+            or not reference.strip()
+            or not isinstance(unit, str)
+            or not unit.strip()
+            or not isinstance(rationale, str)
+            or not rationale.strip()
+        ):
+            raise EvaluationMatcherError(
+                f"public monitoring config metric_windows.{metric_id} must have locked provenance, unit, and rationale"
+            )
+        if str(metric_id).startswith("psi.") and days != global_days:
+            raise EvaluationMatcherError(
+                f"public PSI metric window {metric_id!r} does not match window_days"
+            )
+        feature = metric_to_feature[str(metric_id)]
+        windows_by_metric[str(metric_id)] = days
+        prior = windows_by_feature.setdefault(feature, days)
+        if prior != days:
+            raise EvaluationMatcherError(
+                f"public monitoring feature {feature!r} has conflicting metric windows"
+            )
+    return windows_by_metric, windows_by_feature
+
+
 def _window_days_from_config(
     config: Mapping[str, Any], *, source: str
 ) -> int | None:
@@ -114,12 +207,40 @@ def _window_days_from_config(
     return days
 
 
+def _metric_windows_from_config(
+    config: Mapping[str, Any], *, source: str
+) -> dict[str, int] | None:
+    """Extract optional run-resolved per-metric windows for contract checking."""
+    monitoring_config: Any = config
+    for key in ("monitoring", "monitoring_config"):
+        candidate = config.get(key)
+        if isinstance(candidate, Mapping) and "metric_windows" in candidate:
+            monitoring_config = candidate
+            break
+    if not isinstance(monitoring_config, Mapping) or "metric_windows" not in monitoring_config:
+        return None
+    raw_windows = monitoring_config["metric_windows"]
+    if not isinstance(raw_windows, Mapping):
+        raise EvaluationMatcherError(f"{source} metric_windows must be an object")
+    result: dict[str, int] = {}
+    for metric_id, raw_window in raw_windows.items():
+        days = raw_window.get("value") if isinstance(raw_window, Mapping) else raw_window
+        if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+            raise EvaluationMatcherError(
+                f"{source} metric_windows.{metric_id} must be a positive integer"
+            )
+        result[str(metric_id)] = days
+    return result
+
+
 def _resolved_metric_window_days(
     connection: sqlite3.Connection, manifest_configs: Iterable[str]
 ) -> int:
     """Use run-resolved settings when present and verify the public contract."""
     public_days = _public_metric_window_days()
     resolved_values: list[tuple[str, int]] = []
+    public_metric_windows, _ = _public_metric_windows()
+    resolved_metric_windows: list[tuple[str, dict[str, int]]] = []
 
     for index, config_json in enumerate(manifest_configs):
         try:
@@ -134,6 +255,13 @@ def _resolved_metric_window_days(
             )
             if days is not None:
                 resolved_values.append((f"episode manifest config {index}", days))
+            metric_windows = _metric_windows_from_config(
+                snapshot, source=f"episode manifest config {index}"
+            )
+            if metric_windows is not None:
+                resolved_metric_windows.append(
+                    (f"episode manifest config {index}", metric_windows)
+                )
 
     try:
         run_metadata = connection.execute(
@@ -163,6 +291,17 @@ def _resolved_metric_window_days(
                             days,
                         )
                     )
+                metric_windows = _metric_windows_from_config(
+                    resolved,
+                    source=f"run metadata {RUN_METADATA_KEY!r} resolved_config",
+                )
+                if metric_windows is not None:
+                    resolved_metric_windows.append(
+                        (
+                            f"run metadata {RUN_METADATA_KEY!r} resolved_config",
+                            metric_windows,
+                        )
+                    )
 
     distinct_values = {days for _, days in resolved_values}
     if len(distinct_values) > 1:
@@ -177,7 +316,27 @@ def _resolved_metric_window_days(
                 "run-resolved monitoring window does not match the locked public "
                 f"contract ({resolved_days} != {public_days} days)"
             )
-        return resolved_days
+    else:
+        resolved_days = public_days
+    distinct_metric_windows = {
+        tuple(sorted(metric_windows.items()))
+        for _, metric_windows in resolved_metric_windows
+    }
+    if len(distinct_metric_windows) > 1:
+        details = "; ".join(
+            f"{source}={dict(sorted(metric_windows.items()))}"
+            for source, metric_windows in resolved_metric_windows
+        )
+        raise EvaluationMatcherError(
+            f"run per-metric window configs disagree: {details}"
+        )
+    if distinct_metric_windows:
+        resolved_metric_windows_map = dict(next(iter(distinct_metric_windows)))
+        if resolved_metric_windows_map != public_metric_windows:
+            raise EvaluationMatcherError(
+                "run-resolved per-metric windows do not match the locked public contract "
+                f"({resolved_metric_windows_map!r} != {public_metric_windows!r})"
+            )
     return public_days
 
 
@@ -418,7 +577,7 @@ def match_incidents(
 ) -> tuple[dict[str, Any], ...]:
     """Match P3.3 incident snapshots to selected private truths.
 
-    The truth interval includes the public monitoring window and the monitored
+    The truth interval includes each metric's public window and the monitored
     feature's own lookback. Ambiguous candidates remain available for risk and
     routing metrics; multiple incidents may independently match one truth.
     """
@@ -431,6 +590,13 @@ def match_incidents(
         or metric_window_days <= 0
     ):
         raise EvaluationMatcherError("metric_window_days must be a positive integer")
+    _, metric_windows_by_feature = _public_metric_windows()
+    public_window_days = _public_metric_window_days()
+    if metric_window_days != public_window_days:
+        raise EvaluationMatcherError(
+            "metric_window_days does not match the locked public monitoring contract "
+            f"({metric_window_days} != {public_window_days})"
+        )
 
     truth_by_episode: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     seen_truth_ids: set[str] = set()
@@ -531,7 +697,19 @@ def match_incidents(
                 f"incident {incident_id!r} has no visible alert snapshot"
             )
         incident_window = (min(alert_available_times), max(alert_available_times))
-        feature_lookback_days = FEATURE_LOOKBACK_DAYS.get(first["feature"], 0)
+        monitoring_feature = first["feature"]
+        try:
+            feature_lookback_days = FEATURE_LOOKBACK_DAYS[monitoring_feature]
+        except KeyError as exc:
+            raise EvaluationMatcherError(
+                f"monitoring feature {monitoring_feature!r} has no public lookback"
+            ) from exc
+        try:
+            feature_metric_window_days = metric_windows_by_feature[monitoring_feature]
+        except KeyError as exc:
+            raise EvaluationMatcherError(
+                f"monitoring feature {monitoring_feature!r} has no public metric window"
+            ) from exc
         matched_truth_ids: list[str] = []
         for truth in sorted(
             truth_by_episode.get(first["episode_id"], ()),
@@ -540,7 +718,7 @@ def match_incidents(
             truth_window = _truth_window(
                 truth,
                 episode_end_at=episode_end_at[first["episode_id"]],
-                metric_window_days=metric_window_days,
+                metric_window_days=feature_metric_window_days,
                 feature_lookback_days=feature_lookback_days,
             )
             if _scope_matches(
