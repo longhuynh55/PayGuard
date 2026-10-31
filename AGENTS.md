@@ -41,5 +41,7 @@ python3 review/check_links.py
 ```
 Môi trường dùng **uv** (Python 3.12); trong sandbox Codex đặt `UV_CACHE_DIR=/tmp/payguard-uv-cache`. Luật tự điều phối và điều kiện DỪNG: [docs/orchestration.md](docs/orchestration.md). Khi có code: chạy test bằng `uv run pytest`; KHÔNG `pip install` ngoài uv.
 
+**Luật test cho model (người dùng chốt 31/10/2026):** hạn chế chạy test; trong lúc làm CHỈ chạy riêng lẻ các test liên quan tới phần đang sửa (`uv run pytest -q tests/<file>.py::<test>`), KHÔNG chạy lại full suite sau mỗi lần sửa. Test viết mới tập trung vào **functional test**: kiểm hành vi/hợp đồng của chức năng qua API hoặc CLI công khai (đầu vào → đầu ra, bất biến), không viết nhiều unit test vụn bám chi tiết cài đặt. Full suite chỉ chạy **một lần** ở bước "Trước khi báo xong" (implementer) và một lần khi review/merge (reviewer/orchestrator).
+
 ## Git
 CHỈ commit/push khi người dùng yêu cầu. KHÔNG đưa `data/`, `.venv/`, cache vào git.
