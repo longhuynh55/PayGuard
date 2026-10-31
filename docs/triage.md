@@ -97,3 +97,11 @@ Có kiểm tra cho đóng benign, routing pipeline không cần benign/score, ro
 ## 8. Trace `run_sql` P4.4a
 
 Mỗi lần gọi `run_sql` trả `tool_trace_id` tất định và trace tạm thời gồm SQL đã sinh (NULL nếu chưa có), số dòng trả về, cờ cắt ở giới hạn dòng, fingerprint snapshot as-of, lỗi có cấu trúc hoặc NULL, và record LLM. Record LLM có model trả về, canonical slug, provider, prompt/completion/reasoning tokens, chi phí USD, độ trễ và cache key theo mục 5. ID trace được dẫn xuất từ câu hỏi, episode, `as_of_time`, fingerprint snapshot và cache key; cùng đầu vào tạo cùng ID. Trace không chứa API key, đường dẫn DB hoặc dữ liệu từ bảng private.
+
+## 9. CLI trong P5.1 harness
+
+Trong `<benchmark-root>/policies/<policy>`, `python -m triage run` và `python -m triage measure` kiểm tra current code/config/prompt/sampling hashes với harness và policy manifests trước khi mở operational DB hoặc ghi output. Cả hai từ chối khi manifest lệch; `run` tiếp tục xác nhận decision rows hiện có khớp `policy_version` và `model_slug` agent trong manifest. Provider phải khớp provider/model của policy.
+
+Harness truyền durable ledger chung ở `<state-dir>/cost-ledger.jsonl` cho mọi provider có thể gọi LLM; role ledger và lock markers cũng cùng thư mục state ngoài các benchmark roots (xem [data.md §9](data.md#9-p51-harness-artifacts)). Cap $10 USD và nguồn giá trị được ghi ở [p5-implementation.md](p5-implementation.md); mode P4 ngoài harness giữ cap $1 trong `configs/llm.yaml`. `measure` chọn development trước, chỉ đọc calibration khi chưa đủ mẫu development và khi callback lock guard cho phép; role đã chạm được ghi vào ledger. CLI evaluator, role locks, report paths và hành vi decision set rỗng được định nghĩa tại [evaluation.md, mục 9](evaluation.md#9-cli-cham-decisions-va-chon-cap-p45-p51).
+
+Harness root hiện không có process lock. Chạy tuần tự các policy/lệnh trên cùng root; không khởi chạy đồng thời nhiều harness hoặc triage process trên một root.

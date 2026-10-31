@@ -314,3 +314,39 @@ def test_measure_persists_incident_snapshots_only_through_latest_selected_as_of(
         available_at <= latest_selected and event_at <= latest_selected
         for _, available_at, event_at in snapshots
     )
+
+
+def test_measure_checks_calibration_lock_before_reading_calibration_candidates(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "measure-calibration-lock"
+    database_path = _make_run(
+        run_dir,
+        (
+            ("ep-dev-a", "development"),
+            ("ep-dev-b", "development"),
+            ("ep-cal-a", "calibration"),
+        ),
+    )
+    provider, client = _fake_provider(database_path)
+    touched_roles = []
+
+    def require_role_lock(role: str, episode_ids: tuple[str, ...]) -> None:
+        touched_roles.append((role, episode_ids))
+        if role == "calibration":
+            raise MeasurementError("calibration prompt/rule lock is required")
+
+    with pytest.raises(MeasurementError, match="calibration prompt/rule lock"):
+        measure_triage(
+            run_dir,
+            agent_provider=provider,
+            provider_name="fake",
+            incidents=3,
+            out=run_dir / "guarded.json",
+            role_access_callback=require_role_lock,
+        )
+
+    assert [role for role, _ in touched_roles] == ["development", "calibration"]
+    assert client.requests == []
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM incidents").fetchone()[0] == 0

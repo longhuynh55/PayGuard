@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, time, timedelta
 import json
 from pathlib import Path
@@ -326,6 +326,7 @@ def measure_triage(
     out: str | Path,
     simulator_config_path: str | Path = "configs/simulator.yaml",
     triage_config_path: str | Path = "configs/triage.yaml",
+    role_access_callback: Callable[[str, tuple[str, ...]], None] | None = None,
 ) -> dict[str, Any]:
     """Select and measure a fixed development-first set of one-step incidents."""
     if isinstance(incidents, bool) or not isinstance(incidents, int) or incidents < 1:
@@ -369,6 +370,8 @@ def measure_triage(
         )
         if not development_ids:
             raise StorageError("operational database has no development episodes")
+        if role_access_callback is not None:
+            role_access_callback("development", development_ids)
 
         # Candidate checks read incident rows back through read_as_of, so every
         # snapshot stays staged in this transaction until the selection is known.
@@ -391,6 +394,8 @@ def measure_triage(
         selected = development_candidates[:incidents]
 
         if len(selected) < incidents and calibration_ids:
+            if role_access_callback is not None:
+                role_access_callback("calibration", calibration_ids)
             calibration_snapshot_times, calibration_rows = _prepare_incident_snapshots(
                 operational,
                 episode_ids=calibration_ids,
