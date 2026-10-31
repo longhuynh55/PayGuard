@@ -17,8 +17,8 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 | P5.0b Bảng support development | Codex | P5.2, P3.7 | Như mục P5.0b dưới |
 | P5.1 Harness + sổ chi phí | Codex | P4.1 vòng 2 merge | Như mục P5.1 dưới |
 | HARDEN-1 Guard role/lock + identity harness (người dùng duyệt 31/10, [audit](../review/findings/AUDIT-main-31-10.md) A2, A3, B1, B2, C1, C5b) | Codex | P5.0b | Như mục HARDEN-1 dưới |
-| P5.0c Report shell (người dùng duyệt 31/10, đề xuất brainstorm 2) | Codex | P5.0b, HARDEN-1 | Như mục P5.0c dưới |
-| P5.0d Khả thi chi phí pilot (người dùng duyệt 31/10, đề xuất brainstorm 3) | Codex | P5.0b, HARDEN-1 | Như mục P5.0d dưới |
+| P5.0c Report shell (người dùng duyệt 31/10, đề xuất brainstorm 2) | Codex | P5.0b, HARDEN-1; từ 31/10 sau P4 vòng 2, trước khóa prompt/rule (người dùng đổi thứ tự) | Như mục P5.0c dưới |
+| P5.0d Khả thi chi phí pilot (người dùng duyệt 31/10, đề xuất brainstorm 3) | Codex | P5.0b, HARDEN-1; từ 31/10 sau pilot 60 P1 vòng 2 và P5.0b chạy lại trên development pilot (người dùng đổi thứ tự) | Như mục P5.0d dưới |
 
 ### P5.2 — Matcher hoàn chỉnh trước calibration
 - **Mục tiêu:** matcher đúng [evaluation.md](evaluation.md) mục 2: thời gian gồm hiệu ứng trễ của cửa sổ metric, segment, feature; trạng thái `matched` / `ambiguous_match` / `unmatched`.
