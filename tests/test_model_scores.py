@@ -25,6 +25,7 @@ from model.conformal import (
 )
 from model.__main__ import _parser as model_parser
 from model.__main__ import main as model_main
+from model.artifacts import model_artifact_identity
 from model.evaluate import _metric_block
 from model.features import FEATURE_NAMES, build_score_feature_matrix
 import simulator.config as simulator_config_module
@@ -203,8 +204,7 @@ def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(
         ]
     ) == 2
     heldout_error = capsys.readouterr().err
-    assert "held-out model evaluation is disabled" in heldout_error
-    assert "content-hash bound into the frozen identity" in heldout_error
+    assert "outside a P5.1 harness is limited to development episodes" in heldout_error
 
     connection = sqlite3.connect(operational_path)
     connection.row_factory = sqlite3.Row
@@ -369,7 +369,16 @@ def test_harness_model_evaluate_without_selector_uses_development_only(
         )
     private_path = harness_root / "base" / "private" / "evaluator.sqlite"
     private_path.parent.mkdir(parents=True)
-    sqlite3.connect(private_path).close()
+    with sqlite3.connect(private_path) as connection:
+        connection.execute("CREATE TABLE episode_manifest (episode_id TEXT, role TEXT)")
+        connection.executemany(
+            "INSERT INTO episode_manifest VALUES (?, ?)",
+            [
+                ("ep-dev-1", "development"),
+                ("ep-cal-1", "calibration"),
+                ("ep-test-1", "test"),
+            ],
+        )
 
     verified_roles: list[tuple[str, ...]] = []
     accessed_roles: list[dict[str, list[str]]] = []
@@ -378,6 +387,12 @@ def test_harness_model_evaluate_without_selector_uses_development_only(
     def verify_policy(_policy_run: Path, *, required_roles: tuple[str, ...]) -> None:
         verified_roles.append(required_roles)
 
+    artifact_identity = {
+        "schema_version": 1,
+        "files": {},
+        "content_sha256": "d" * 64,
+    }
+
     def evaluate(_operational, _private, *, episode_ids, **_kwargs):
         evaluated_episodes.extend(episode_ids)
         return {"episodes": [{"episode_id": episode_id} for episode_id in episode_ids]}
@@ -385,6 +400,11 @@ def test_harness_model_evaluate_without_selector_uses_development_only(
     monkeypatch.setattr(model_cli, "find_harness_root", lambda _path: harness_root)
     monkeypatch.setattr(model_cli, "policy_name_for_run", lambda _path: "rule_agent_fake")
     monkeypatch.setattr(model_cli, "verify_harness_policy_run", verify_policy)
+    monkeypatch.setattr(
+        model_cli,
+        "verify_harness_model_artifacts",
+        lambda *_args, **_kwargs: artifact_identity,
+    )
     monkeypatch.setattr(
         model_cli,
         "assert_role_access",
@@ -434,7 +454,7 @@ def test_harness_model_evaluate_without_selector_uses_development_only(
     "selected_roles",
     [("test",), ("calibration",), ("development", "test")],
 )
-def test_model_evaluate_refuses_heldout_before_truth_report_or_role_ledger(
+def test_model_evaluate_refuses_changed_harness_artifacts_before_truth_report_or_role_ledger(
     selected_roles: tuple[str, ...],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -471,6 +491,8 @@ def test_model_evaluate_refuses_heldout_before_truth_report_or_role_ledger(
         ),
         encoding="utf-8",
     )
+    base_manifest_path = harness_root / "base" / "base-manifest.json"
+    base_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path = state_dir / "seed-role-ledger.json"
     ledger_before = json.dumps(
         {"schema_version": 1, "entries": {"existing": {"operation": "preserve"}}},
@@ -499,16 +521,31 @@ def test_model_evaluate_refuses_heldout_before_truth_report_or_role_ledger(
         provenance="frozen fixture",
     )
     joblib.dump(original_conformal, source_model_dir / "conformal.joblib")
+    frozen_artifacts = model_artifact_identity(source_model_dir)
+    base_manifest_path.write_text(
+        json.dumps({"model_artifacts": frozen_artifacts}),
+        encoding="utf-8",
+    )
+    policy_manifest_path = policy_run / "run-manifest.json"
+    policy_manifest_path.write_text(
+        json.dumps(
+            {
+                "policy_name": "rule_agent_fake",
+                "model_artifacts": frozen_artifacts,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     copied_data_root = tmp_path / "copied-data-root"
     shutil.copytree(source_data_root / "copied-run", copied_data_root / "copied-run")
     copied_model_dir = copied_data_root / "copied-run" / "model"
     copied_conformal = joblib.load(copied_model_dir / "conformal.joblib")
     joblib.dump(
-        replace(copied_conformal, fraud=replace(copied_conformal.fraud, threshold=0.99)),
+        replace(copied_conformal, fraud=replace(copied_conformal.fraud, threshold=1.0)),
         copied_model_dir / "conformal.joblib",
     )
-    assert joblib.load(copied_model_dir / "conformal.joblib").fraud.threshold == 0.99
+    assert joblib.load(copied_model_dir / "conformal.joblib").fraud.threshold == 1.0
 
     opened_paths: list[Path] = []
     original_connection = model_cli._connection
@@ -547,12 +584,67 @@ def test_model_evaluate_refuses_heldout_before_truth_report_or_role_ledger(
 
     assert model_cli.main(args) == 2
     error = capsys.readouterr().err
-    assert "held-out model evaluation is disabled" in error
-    assert "content-hash bound into the frozen identity" in error
-    assert "before pilot" in error
+    assert "frozen model artifact content hashes differ" in error
+    assert "conformal.joblib" in error
     assert opened_paths == [operational_path.resolve()]
     assert not (copied_model_dir / "reports" / "evaluation.json").exists()
     assert ledger_path.read_bytes() == ledger_before
+
+
+def test_model_evaluate_standalone_rejects_episode_role_relabel_before_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    operational_path = tmp_path / "standalone" / "operational.sqlite"
+    operational_path.parent.mkdir(parents=True)
+    with sqlite3.connect(operational_path) as connection:
+        connection.execute("CREATE TABLE episodes (episode_id TEXT, role TEXT)")
+        connection.execute(
+            "CREATE TRIGGER episodes_role_immutable BEFORE UPDATE OF role ON episodes "
+            "BEGIN SELECT RAISE(ABORT, 'episode roles are locked and immutable'); END"
+        )
+        connection.executemany(
+            "INSERT INTO episodes VALUES (?, ?)",
+            [("ep-0001", "development"), ("ep-0004", "test")],
+        )
+        connection.execute("DROP TRIGGER episodes_role_immutable")
+        connection.execute(
+            "UPDATE episodes SET role = 'development' WHERE episode_id = 'ep-0004'"
+        )
+
+    private_path = tmp_path / "standalone" / "private.sqlite"
+    with sqlite3.connect(private_path) as connection:
+        connection.execute("CREATE TABLE episode_manifest (episode_id TEXT, role TEXT)")
+        connection.executemany(
+            "INSERT INTO episode_manifest VALUES (?, ?)",
+            [("ep-0001", "development"), ("ep-0004", "test")],
+        )
+
+    data_root = tmp_path / "artifacts"
+    artifact_directory = data_root / "standalone-model" / "model"
+    artifact_directory.mkdir(parents=True)
+    monkeypatch.setattr(
+        model_cli,
+        "evaluate_model_scores",
+        lambda *_args, **_kwargs: pytest.fail("role mismatch must stop before truth evaluation"),
+    )
+
+    assert model_cli.main(
+        [
+            "evaluate",
+            "--run-id",
+            "standalone-model",
+            "--operational-db",
+            str(operational_path),
+            "--private-db",
+            str(private_path),
+            "--data-root",
+            str(data_root),
+        ]
+    ) == 2
+    assert "do not match private episode_manifest" in capsys.readouterr().err
+    assert not (artifact_directory / "reports" / "evaluation.json").exists()
 
 
 def test_evaluator_reports_insufficient_support_for_both_calibration_classes(

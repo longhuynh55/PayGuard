@@ -49,8 +49,8 @@ Audit as-of và split đạt; có logistic regression; observed-label và oracle
 
 CLI `model score` và `model evaluate` lấy thời lượng monitoring từ `episode.duration_days` trong cấu hình simulator công khai; hai lệnh không cần `configs/episodes.yaml`.
 
-`model evaluate` mặc định chỉ chấm episode development. Cả CLI standalone và harness đều từ chối calibration/test trước khi đọc private truth, ghi report hoặc cập nhật role ledger. Held-out model evaluation đang bị tắt cho tới khi model artifacts được content-hash bind vào frozen identity; cần follow-up trước pilot. Development vẫn được phép.
+`model evaluate` mặc định chỉ chấm episode development. Trong P5.1 harness, calibration/test cần chọn tường minh và qua lock tương ứng. Frozen BASE và policy run manifest bind model artifacts theo [data.md §9](data.md#9-p51-harness-artifacts); đổi artifact sau freeze bị từ chối trước role ledger và transaction truth. Ngoài harness, CLI chỉ chấm development. Trước khi đọc transaction truth, evaluator đối chiếu role operational đã chọn với private `episode_manifest.role`.
 
-Trong harness, `model evaluate` chỉ nhận đường dẫn `--simulator-config` đã được lock/run identity bao phủ; custom path bị từ chối trước khi mở private truth.
+Trong harness, `model evaluate` chỉ nhận đường dẫn `--simulator-config` đã được lock/run identity bao phủ; custom path bị từ chối trước khi mở private truth. Report được ghi dưới `model/reports/evaluation.json` của artifact run.
 
 > *Số đo bản 24/10 (đã rollback, split cũ train 7–10/calibration 11):* PR-AUC 0,92–0,93 trước drift, 0,48 sau drift; social engineering lọt 99%; tỉ lệ review không phản ứng với drift.
