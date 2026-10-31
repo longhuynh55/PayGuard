@@ -173,7 +173,7 @@ Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.
 | `intervention_start_at` | = `effect_available_at` |
 | `deadline_at` | `intervention_start_at + D`; D = 7 ngày (MVP), sensitivity 3/14 |
 | `accepted_actions` | Theo bảng dưới |
-| `parent_scenario` | Liên kết hai sự cố thành phần của episode hai nguyên nhân |
+| `parent_scenario` | Liên kết hai sự cố thành phần của episode hai nguyên nhân; khi mọi ứng viên của một incident cùng giá trị khác NULL thì ghép `matched` nhiều truth ([evaluation.md](evaluation.md), mục 2) |
 
 | Nguyên nhân | `accepted_actions` | Ghi chú |
 |---|---|---|
@@ -289,7 +289,7 @@ Evaluator ghi JSON tại `reports/p3_4_detection_recall.json` tương đối v�
 | `by_scenario` | `OBJECT[]` JSON | Số đếm theo cặp `cause`/`template`; `recall` là NULL khi mẫu số bằng 0. |
 | `truth_counts` | `OBJECT` JSON | Tổng số truth, truth cần can thiệp và truth benign trong episode đã chọn. |
 | `incident_counts` | `OBJECT` JSON | Tổng số incident đã xét, matched, ambiguous, unmatched và matched với truth benign. |
-| `ambiguous_incident_ids` | `TEXT[]` JSON | Incident có hơn một truth ứng viên; cách tính xem [evaluation.md](evaluation.md), mục 2. |
+| `ambiguous_incident_ids` | `TEXT[]` JSON | Incident có hơn một truth ứng viên, trừ ca mọi ứng viên cùng `parent_scenario` khác NULL (khi đó `matched`); cách tính xem [evaluation.md](evaluation.md), mục 2. |
 | `unmatched_incident_ids` | `TEXT[]` JSON | Incident không có truth ứng viên; cách tính xem [evaluation.md](evaluation.md), mục 2. |
 | `benign_incident_ids` | `TEXT[]` JSON | Incident khớp ít nhất một truth benign. |
 | `incident_matches` | `OBJECT[]` JSON | Trạng thái, truth ID được xác nhận và truth ID ứng viên cho từng incident. |
@@ -356,7 +356,7 @@ Các object con có cấu trúc cố định:
 - `unsafe_truth_rate`: `unsafe`, `denominator`, `rate` (`REAL NULL`), `unsafe_truth_ids`, `lower_bound_observed`, `basis`. `basis` là `observed_lower_bound`, `all_candidate_truths_included` hoặc `matched_truth_only`.
 - `timely_routing_recall`: `routed`, `denominator`, `recall` (`REAL NULL`), `truth_ids`, `missing_truth_ids`, `automatic_routing`, `human_review`. Hai bucket routing gồm `routed`, `denominator`, `recall` (`REAL NULL`), `truth_ids`.
 - `dangerous_closure_rate`: `dangerous_closures`, `denominator`, `rate` (`REAL NULL`), `dangerous_incident_ids`, `triaged_incident_ids`.
-- Mỗi `decision_matches` gồm `decision_id`, `incident_id`, `episode_id`, `decision_at`, `status`, `matched_truth_ids`, `candidate_truth_ids`. `status` là `matched`, `ambiguous_match` hoặc `unmatched`; `matched_truth_ids` chỉ chứa truth được ghép duy nhất, `candidate_truth_ids` giữ mọi ứng viên. Quy tắc scoring thuộc [evaluation.md](evaluation.md), mục 2–4.
+- Mỗi `decision_matches` gồm `decision_id`, `incident_id`, `episode_id`, `decision_at`, `status`, `matched_truth_ids`, `candidate_truth_ids`. `status` là `matched`, `ambiguous_match` hoặc `unmatched`; `matched_truth_ids` chỉ chứa truth được ghép (một ID, hoặc nhiều ID khi ca cùng `parent_scenario` khác NULL), `candidate_truth_ids` giữ mọi ứng viên. Quy tắc scoring thuộc [evaluation.md](evaluation.md), mục 2–4.
 
 Một run directory chỉ dùng một agent provider. Runner từ chối chạy nếu DB đã có quyết định `source='agent'` với `model_slug` khác provider đang chọn (bao gồm `NULL` của `unconfigured`); hãy dùng bản sao mới của run directory cho mỗi provider.
 

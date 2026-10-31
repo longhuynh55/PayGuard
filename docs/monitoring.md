@@ -5,7 +5,7 @@
 
 ## 1. Bốn tầng: metric → signal → alert → incident
 
-- Job chạy mỗi ngày trên giai đoạn monitoring; PSI dùng cửa sổ 7 ngày, còn metric volume là một ngày theo `configs/monitoring.yaml` `metric_windows`.
+- Job chạy mỗi ngày trên giai đoạn monitoring; PSI dùng cửa sổ 7 ngày, còn metric volume là một ngày theo `configs/monitoring.yaml` `metric_windows`. Khi nạp cấu hình, job từ chối `metric_windows` có volume khác 1 ngày hoặc PSI khác `window_days` (`MonitoringMetricsError`), vì matcher đọc cùng các cửa sổ này.
 - **Metric:** PSI/KS trên feature, phân phối score và uncertainty, tỉ lệ cảnh báo/review của model, **CBPE** (NannyML) ước lượng performance khi chưa có nhãn. Gồm cả feature phía người nhận (tỉ lệ người gửi lần đầu, chuyển ra trong 24 h, số tiền sát 10 triệu, tài khoản mới/ngủ lâu có tiền vào); segment TRANSFER tách riêng. Cửa sổ cash-out 24 h chỉ dùng khi đã quan sát đủ hoặc ghi rõ censored.
 - **Reference:** PSI/KS dùng 11/2025–1/2026, không cần nhãn. CBPE fit trên tháng 10 có nhãn theo policy với predictor cố định; CBPE không thay calibrator của model/conformal.
 - **P3.1 vòng 1:** cấu hình [monitoring.yaml](../configs/monitoring.yaml) chọn các feature P2.2 để tính PSI và khai báo bin, epsilon, provenance. PSI dùng hai quantile bins, pseudocount một transaction count mỗi bin, và một bin thiếu riêng; giá trị feature NULL sau khi đã quan sát được tính là missing thay vì bị bỏ khỏi phân phối. Tỉ lệ review là số `decision_region = review` chia tổng model score trong cửa sổ 7 ngày; do `model_scores` hiện chỉ lưu episode sau T0, metric này chưa có reference và chưa dùng để sinh signal; phần reference được để sang vòng 2 ([trạng thái bàn giao](p3-implementation.md)).
