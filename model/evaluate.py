@@ -7,13 +7,14 @@ from datetime import UTC, datetime, time, timedelta
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import joblib
 import numpy as np
 from sklearn.metrics import average_precision_score
 
+from model.artifacts import assert_model_artifact_identity
 from model.conformal import (
     ConformalReport,
     FittedMondrianConformal,
@@ -320,6 +321,40 @@ def _truth_for_episode(private: sqlite3.Connection, episode_id: str) -> dict[str
     return truth
 
 
+def validate_private_episode_roles(
+    private: sqlite3.Connection,
+    selected_roles: Mapping[str, Sequence[str]],
+) -> None:
+    """Match selected operational roles to the private immutable episode manifest."""
+    selected = {
+        str(episode_id): role
+        for role, episode_ids in selected_roles.items()
+        for episode_id in episode_ids
+    }
+    if not selected:
+        raise ValueError("role validation requires at least one selected episode")
+    placeholders = ", ".join("?" for _ in selected)
+    try:
+        rows = private.execute(
+            "SELECT episode_id, role FROM episode_manifest "
+            f"WHERE episode_id IN ({placeholders}) ORDER BY episode_id",
+            tuple(sorted(selected)),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise ValueError(f"private episode_manifest is unavailable: {exc}") from exc
+    private_roles = {str(row[0]): str(row[1]) for row in rows}
+    differences = [
+        (episode_id, role, private_roles.get(episode_id))
+        for episode_id, role in sorted(selected.items())
+        if private_roles.get(episode_id) != role
+    ]
+    if differences:
+        raise ValueError(
+            "selected operational episode roles do not match private episode_manifest: "
+            f"{differences!r}"
+        )
+
+
 def _coverage_dict(report: ConformalReport) -> dict[str, dict[str, int | float | bool | None]]:
     thresholds_by_class = {threshold.label: threshold for threshold in report.thresholds}
     return {
@@ -373,10 +408,17 @@ def evaluate_model_scores(
     model_directory: str | Path,
     simulator_config_path: str | Path = "configs/simulator.yaml",
     episode_ids: Sequence[str] | None = None,
+    expected_artifact_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate persisted scores against private simulator truth in a report only."""
     if operational is private:
         raise ValueError("evaluation requires separate operational and private connections")
+    if expected_artifact_identity is not None:
+        assert_model_artifact_identity(
+            model_directory,
+            expected_artifact_identity,
+            label="model evaluation artifact",
+        )
     _, _, conformal, model_metadata = _read_model_artifacts(model_directory)
     simulator_config = load_simulator_config(simulator_config_path)
     t0, monitor_end = _monitoring_window(simulator_config)
@@ -400,6 +442,19 @@ def evaluate_model_scores(
             raise ValueError(f"evaluation episode IDs are not registered: {unknown!r}")
     if not selected_episode_ids:
         raise ValueError("evaluation requires at least one selected development or locked episode")
+
+    selected_role_by_episode = dict(registered)
+    selected_roles = {
+        role: tuple(
+            episode_id
+            for episode_id in selected_episode_ids
+            if selected_role_by_episode[episode_id] == role
+        )
+        for role in sorted(
+            {selected_role_by_episode[episode_id] for episode_id in selected_episode_ids}
+        )
+    }
+    validate_private_episode_roles(private, selected_roles)
 
     episode_reports: list[dict[str, Any]] = []
     pooled_rows: list[dict[str, Any]] = []

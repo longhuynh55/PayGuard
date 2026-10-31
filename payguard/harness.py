@@ -12,6 +12,7 @@ import sys
 from typing import Any, Iterator, Mapping
 
 from evaluation.decisions import evaluate_operational_decisions
+from model.artifacts import assert_model_artifact_identity, model_artifact_identity
 from model.evaluate import score_monitoring_episodes, train_operational_model
 from model.train import artifact_directory_for_run
 from monitoring.metrics import compute_daily_metrics
@@ -331,6 +332,11 @@ def _prepare_model_monitoring(base_dir: Path) -> dict[str, Any]:
 def _freeze_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     operational_path = base_dir / "operational" / "observations.sqlite"
     pipeline_result = _prepare_model_monitoring(base_dir)
+    artifact_dir = artifact_directory_for_run(
+        MODEL_RUN_ID,
+        data_root=base_dir.parent / "artifacts",
+    )
+    artifact_identity = model_artifact_identity(artifact_dir)
     fingerprint = _input_fingerprint(operational_path)
     manifest_path = base_dir / "base-manifest.json"
     manifest = {
@@ -339,12 +345,17 @@ def _freeze_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[st
         "freeze_point": "after model_scores, daily_metrics, alerts; before incidents and decisions",
         "hashes": dict(identity_hashes),
         "input_fingerprint": fingerprint,
+        "model_artifacts": artifact_identity,
         "pipeline": pipeline_result,
     }
     if manifest_path.exists():
         previous = _validate_static_identity(manifest_path, identity_hashes, label="BASE")
         if previous.get("input_fingerprint") != fingerprint:
             raise RunIdentityError("BASE input fingerprint changed while resuming the harness")
+        if previous.get("model_artifacts") != artifact_identity:
+            raise RunIdentityError(
+                "BASE model artifact identity changed while resuming the harness"
+            )
     else:
         _write_json(manifest_path, manifest)
     return fingerprint, pipeline_result
@@ -354,13 +365,6 @@ def _ensure_frozen_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> t
     manifest_path = base_dir / "base-manifest.json"
     if manifest_path.exists():
         manifest = _validate_static_identity(manifest_path, identity_hashes, label="BASE")
-        fingerprint = _input_fingerprint(base_dir / "operational" / "observations.sqlite")
-        if manifest.get("input_fingerprint") != fingerprint:
-            raise RunIdentityError("BASE input fingerprint changed after it was frozen")
-        _assert_base_is_frozen(
-            base_dir / "operational" / "observations.sqlite",
-            str(manifest["input_fingerprint"]),
-        )
         artifacts = base_dir.parent / "artifacts" / MODEL_RUN_ID / "model"
         required = (
             "metadata.json",
@@ -369,8 +373,30 @@ def _ensure_frozen_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> t
             "conformal.joblib",
             "model_scores.csv",
         )
-        if all((artifacts / name).is_file() for name in required):
-            return fingerprint, dict(manifest.get("pipeline", {}))
+        missing = [name for name in required if not (artifacts / name).is_file()]
+        if missing:
+            raise RunIdentityError(
+                "frozen BASE model artifacts are missing: " + ", ".join(missing)
+            )
+        frozen_artifacts = manifest.get("model_artifacts")
+        if not isinstance(frozen_artifacts, dict):
+            raise RunIdentityError("frozen BASE manifest has no model artifact identity")
+        try:
+            assert_model_artifact_identity(
+                artifacts,
+                frozen_artifacts,
+                label="frozen BASE model artifact",
+            )
+        except ValueError as exc:
+            raise RunIdentityError(str(exc)) from exc
+        fingerprint = _input_fingerprint(base_dir / "operational" / "observations.sqlite")
+        if manifest.get("input_fingerprint") != fingerprint:
+            raise RunIdentityError("BASE input fingerprint changed after it was frozen")
+        _assert_base_is_frozen(
+            base_dir / "operational" / "observations.sqlite",
+            str(manifest["input_fingerprint"]),
+        )
+        return fingerprint, dict(manifest.get("pipeline", {}))
     return _freeze_base(base_dir, identity_hashes)
 
 
@@ -394,12 +420,17 @@ def _policy_manifest(
     identity: Mapping[str, Any],
     *,
     base_fingerprint: str,
+    model_artifacts: Mapping[str, Any],
 ) -> dict[str, Any]:
+    frozen_identity = {**dict(identity), "model_artifacts": dict(model_artifacts)}
     return {
         "schema_version": 1,
-        **dict(identity),
+        **frozen_identity,
         "base_fingerprint": base_fingerprint,
-        "run_fingerprint": run_fingerprint(identity, base_fingerprint=base_fingerprint),
+        "run_fingerprint": run_fingerprint(
+            frozen_identity,
+            base_fingerprint=base_fingerprint,
+        ),
     }
 
 
@@ -424,6 +455,7 @@ def _ensure_policy_manifest(
             "provider_name",
             "policy_version",
             "model_slug",
+            "model_artifacts",
             "base_fingerprint",
             "run_fingerprint",
         )
@@ -531,7 +563,18 @@ def _policy_run(
             "policy run refused: runtime/config/prompt/sampling hashes changed while "
             f"the policy was starting: {', '.join(hash_differences)}"
         )
-    manifest = _policy_manifest(policy_name, identity, base_fingerprint=base_fingerprint)
+    model_artifacts = model_artifact_identity(
+        artifact_directory_for_run(
+            MODEL_RUN_ID,
+            data_root=base_dir.parent / "artifacts",
+        )
+    )
+    manifest = _policy_manifest(
+        policy_name,
+        identity,
+        base_fingerprint=base_fingerprint,
+        model_artifacts=model_artifacts,
+    )
     policy_dir = root / "policies" / policy_name
     _ensure_policy_manifest(policy_dir, manifest)
 

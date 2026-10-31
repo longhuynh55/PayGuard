@@ -13,6 +13,7 @@ from model.evaluate import (
     evaluate_model_scores,
     score_monitoring_episodes,
     train_operational_model,
+    validate_private_episode_roles,
 )
 from model.train import artifact_directory_for_run
 from payguard.identity import (
@@ -21,7 +22,10 @@ from payguard.identity import (
     policy_name_for_run,
     repository_root,
 )
-from payguard.run_identity import verify_harness_policy_run
+from payguard.run_identity import (
+    verify_harness_model_artifacts,
+    verify_harness_policy_run,
+)
 
 
 def _connection(path: str | Path, *, read_only: bool) -> sqlite3.Connection:
@@ -123,13 +127,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         selected_roles = {"development"}
     held_out_roles = selected_roles & {"calibration", "test"}
-    if held_out_roles:
-        print(
-            "ERROR: held-out model evaluation is disabled until model artifacts are "
-            "content-hash bound into the frozen identity; follow-up is required before pilot",
-            file=sys.stderr,
-        )
-        return 2
     for episode_id, role in role_rows:
         if role in selected_roles:
             roles.setdefault(str(role), []).append(str(episode_id))
@@ -140,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if (harness_root is not None or any(role != "development" for role in selected_roles)) and (
+    if (harness_root is not None or held_out_roles) and (
         Path(args.simulator_config).expanduser().resolve()
         != (repository_root() / "configs" / "simulator.yaml").resolve()
     ):
@@ -150,16 +147,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if harness_root is None and any(role != "development" for role in selected_roles):
-        print(
-            "ERROR: model evaluate outside a P5.1 harness is limited to development episodes",
-            file=sys.stderr,
-        )
-        return 2
     selected_episode_ids = tuple(
         episode_id for role in sorted(roles) for episode_id in roles[role]
     )
     policy_name = None
+    expected_artifact_identity = None
     try:
         if harness_root is not None:
             policy_run = operational_path.parent.parent
@@ -175,7 +167,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError(
                     "model evaluate in a harness must use the frozen BASE evaluator store"
                 )
+            expected_artifact_identity = verify_harness_model_artifacts(
+                policy_run,
+                model_directory=artifact_dir,
+            )
             verify_harness_policy_run(policy_run, required_roles=tuple(sorted(roles)))
+        elif held_out_roles:
+            raise ValueError(
+                "model evaluate outside a P5.1 harness is limited to development episodes"
+            )
+
+        # This reads only the private episode-role manifest. It must pass before
+        # role-ledger writes and before the evaluator reads transaction truth.
+        with _connection(private_path, read_only=True) as private:
+            validate_private_episode_roles(private, roles)
+
+        if harness_root is not None:
             assert_role_access(
                 harness_root,
                 operation="model.evaluate.cli",
@@ -195,6 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_directory=artifact_dir,
             simulator_config_path=args.simulator_config,
             episode_ids=selected_episode_ids,
+            expected_artifact_identity=expected_artifact_identity,
         )
     print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
     return 0

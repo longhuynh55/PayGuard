@@ -104,7 +104,7 @@ Có bảng và biểu đồ cuối cùng cho README: metric rủi ro trên tập
 
 Lệnh chung vẫn là `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Có thể lặp `--episode-role development|calibration|test` để giới hạn role. Trong P5.1 harness, không truyền thì chọn mọi role có trong run. `--out <path>` chọn nơi ghi report. Run P4 ngoài harness đọc operational DB trong `<run-dir>` và mặc định ghi `private/reports/p4_5_decisions.json`.
 
-`python -m model evaluate` là CLI riêng để đánh giá score model bằng private truth; hiện CLI này chỉ cho phép development. Held-out model evaluation bị tắt cho tới khi model artifacts được content-hash bind vào frozen identity, với follow-up bắt buộc trước pilot; xem hợp đồng tại [model.md](model.md).
+`python -m model evaluate` là CLI riêng để đánh giá score model bằng private truth; mặc định chỉ chọn development. Trong P5.1 harness, calibration/test được chọn tường minh và cần lock tương ứng; evaluator xác minh artifact hash với frozen BASE và policy run manifest trước khi ghi role ledger hoặc đọc transaction truth. Ngoài harness, CLI chỉ cho phép development. Mọi role operational được chọn phải khớp `episode_manifest.role` private trước khi đọc transaction truth; xem hợp đồng tại [model.md](model.md) và [data.md §9](data.md#9-p51-harness-artifacts).
 
 ### Khi `--run` trỏ vào policy của harness P5.1
 

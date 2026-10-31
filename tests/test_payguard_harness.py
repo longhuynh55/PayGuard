@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+import model.__main__ as model_cli
 import payguard.identity as identity
 import payguard.harness as harness
 import payguard.run_identity as run_identity_module
@@ -73,7 +74,9 @@ def _lock_both_policies(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 
 
 def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "benchmark"
     original_dirty_entries = identity._dirty_entries
@@ -127,6 +130,28 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
     assert Path(fake["evaluation"]["report_path"]).is_relative_to(
         root / "base/private/reports"
     )
+
+    model_eval_args = [
+        "evaluate",
+        "--run-id",
+        "payguard-p5",
+        "--operational-db",
+        str(root / "policies/rule_agent_fake/operational/observations.sqlite"),
+        "--private-db",
+        str(root / "base/private/evaluator.sqlite"),
+        "--data-root",
+        str(root / "artifacts"),
+        "--episode-role",
+        "test",
+    ]
+    capsys.readouterr()
+    assert model_cli.main(model_eval_args) == 0
+    model_eval = json.loads(capsys.readouterr().out)
+    assert Path(root / "artifacts/payguard-p5/model/reports/evaluation.json").is_file()
+    assert [row["episode_id"] for row in model_eval["episodes"]] == [
+        "ep-0004",
+        "ep-0005",
+    ]
     assert human["evaluation"]["episode_ids"] == ["ep-0004", "ep-0005"]
     assert fake["evaluation"]["episode_ids"] == ["ep-0004", "ep-0005"]
     role_ledger_path = benchmark_state_directory(root) / "seed-role-ledger.json"
@@ -610,6 +635,11 @@ def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
         },
     )
     base_fingerprint = "a" * 64
+    model_artifacts = {
+        "schema_version": 1,
+        "files": {},
+        "content_sha256": "c" * 64,
+    }
     identity._atomic_write_json(
         root / "base" / "base-manifest.json",
         {
@@ -617,6 +647,7 @@ def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
             "profile": "smoke",
             "hashes": hashes,
             "input_fingerprint": base_fingerprint,
+            "model_artifacts": model_artifacts,
         },
     )
     run_identity = identity.current_run_identity(policy_name, benchmark_root=root)
@@ -624,8 +655,14 @@ def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
         policy_name,
         run_identity,
         base_fingerprint=base_fingerprint,
+        model_artifacts=model_artifacts,
     )
     identity._atomic_write_json(policy_dir / "run-manifest.json", run_manifest)
+    monkeypatch.setattr(
+        run_identity_module,
+        "verify_harness_model_artifacts",
+        lambda *_args, **_kwargs: model_artifacts,
+    )
 
     if mutation == "policy_version":
         current_version = identity.policy_identity(policy_name)["policy_version"]

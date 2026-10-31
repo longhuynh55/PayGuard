@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Mapping, Sequence
 
+from model.artifacts import assert_model_artifact_identity
 from payguard.identity import (
     RunIdentityError,
     assert_harness_state_directory,
@@ -141,6 +142,41 @@ def _assert_policy_lock_matches_manifest(
                     )
 
 
+def verify_harness_model_artifacts(
+    policy_dir: str | Path,
+    *,
+    model_directory: str | Path | None = None,
+) -> dict[str, Any]:
+    """Verify selected and frozen harness artifacts against BASE and policy manifests."""
+    run_path = Path(policy_dir).expanduser().resolve()
+    benchmark_root = find_harness_root(run_path)
+    if benchmark_root is None:
+        raise RunIdentityError(f"not a P5 harness policy run: {run_path}")
+    base_manifest = _read_json(benchmark_root / "base" / "base-manifest.json")
+    run_manifest = _read_json(run_path / "run-manifest.json")
+    expected = base_manifest.get("model_artifacts")
+    if not isinstance(expected, dict):
+        raise RunIdentityError("frozen BASE manifest has no model artifact identity")
+    if run_manifest.get("model_artifacts") != expected:
+        raise RunIdentityError(
+            "policy run-manifest model artifact identity differs from frozen BASE"
+        )
+    artifact_path = (
+        Path(model_directory).expanduser().resolve()
+        if model_directory is not None
+        else benchmark_root / "artifacts" / "payguard-p5" / "model"
+    )
+    try:
+        assert_model_artifact_identity(
+            artifact_path,
+            expected,
+            label="frozen model artifact",
+        )
+    except ValueError as exc:
+        raise RunIdentityError(str(exc)) from exc
+    return expected
+
+
 def verify_harness_policy_run(
     policy_dir: str | Path,
     *,
@@ -173,9 +209,6 @@ def verify_harness_policy_run(
     base_fingerprint = base_manifest.get("input_fingerprint")
     if not isinstance(base_fingerprint, str) or len(base_fingerprint) != 64:
         raise RunIdentityError("BASE manifest has no valid input fingerprint")
-    base_database = base_dir / "operational" / "observations.sqlite"
-    _assert_base_is_frozen(base_database, base_fingerprint)
-
     actual_manifest = _read_json(run_path / "run-manifest.json")
     run_hashes = actual_manifest.get("hashes")
     if not isinstance(run_hashes, dict):
@@ -189,11 +222,26 @@ def verify_harness_policy_run(
             )
     if actual_manifest.get("base_fingerprint") != base_fingerprint:
         raise RunIdentityError("policy run-manifest BASE fingerprint differs from frozen BASE")
-    if actual_manifest.get("run_fingerprint") != run_fingerprint(
-        {**current_identity, "hashes": lock_identity_hashes(current_hashes)},
+    run_fingerprint_identity = {
+        **current_identity,
+        "hashes": lock_identity_hashes(current_hashes),
+    }
+    base_artifacts = base_manifest.get("model_artifacts")
+    run_artifacts = actual_manifest.get("model_artifacts")
+    if base_artifacts is not None or run_artifacts is not None:
+        if run_artifacts != base_artifacts:
+            raise RunIdentityError(
+                "policy run-manifest model artifact identity differs from frozen BASE"
+            )
+        run_fingerprint_identity["model_artifacts"] = base_artifacts
+    expected_run_fingerprint = run_fingerprint(
+        run_fingerprint_identity,
         base_fingerprint=base_fingerprint,
-    ):
+    )
+    if actual_manifest.get("run_fingerprint") != expected_run_fingerprint:
         raise RunIdentityError("policy resume refused: run-manifest fingerprint is inconsistent")
+    base_database = base_dir / "operational" / "observations.sqlite"
+    _assert_base_is_frozen(base_database, base_fingerprint)
 
     operational_path = run_path / "operational" / "observations.sqlite"
     if operational_path.is_file():
