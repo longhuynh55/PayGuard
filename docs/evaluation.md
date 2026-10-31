@@ -102,18 +102,22 @@ Có bảng và biểu đồ cuối cùng cho README: metric rủi ro trên tập
 
 ## 9. CLI chấm `decisions` và chọn cặp (P4.5, P5.1)
 
-Lệnh chung vẫn là `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Có thể lặp `--episode-role development|calibration|test` để giới hạn role; không truyền thì chọn mọi role có trong run. `--out <path>` chọn nơi ghi report. Run P4 ngoài harness đọc operational DB trong `<run-dir>` và mặc định ghi `private/reports/p4_5_decisions.json`.
+Lệnh chung vẫn là `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Có thể lặp `--episode-role development|calibration|test` để giới hạn role. Trong P5.1 harness, không truyền thì chọn mọi role có trong run. `--out <path>` chọn nơi ghi report. Run P4 ngoài harness đọc operational DB trong `<run-dir>` và mặc định ghi `private/reports/p4_5_decisions.json`.
+
+`python -m model evaluate` là CLI riêng để đánh giá score model bằng private truth; hiện CLI này chỉ cho phép development. Held-out model evaluation bị tắt cho tới khi model artifacts được content-hash bind vào frozen identity, với follow-up bắt buộc trước pilot; xem hợp đồng tại [model.md](model.md).
 
 ### Khi `--run` trỏ vào policy của harness P5.1
 
 - Truyền `--run <benchmark-root>/policies/<policy>`. Evaluator đọc operational data từ policy copy và chỉ đọc truth từ `<benchmark-root>/base/private/evaluator.sqlite`. `--run <benchmark-root>/base` bị từ chối vì BASE không phải policy run.
 - Không truyền `--out` thì report là `<benchmark-root>/base/private/reports/p5_1/<policy>/decisions_cli.json`. Report tùy chỉnh phải resolve bên trong `<benchmark-root>/base/private/reports/`; đường dẫn thoát khỏi private report tree bị từ chối.
-- Lệnh mặc định chọn mọi role. Trước khi nạp truth, lock guard yêu cầu `<state-dir>/locks/<profile>/prompt-rule.json` cho calibration và `<state-dir>/locks/<profile>/policy/<policy>.json` cho test; hash hiện tại phải khớp marker, và policy lock phải khớp `policy_version`/`model_slug`. Chỉ định role tường minh bằng `--episode-role` cho phép bỏ qua lock của các role không chọn. Development không cần lock. State directory và lock artifacts được định nghĩa tại [data.md §9](data.md#9-p51-harness-artifacts).
+- Lệnh mặc định chọn mọi role. Trước khi nạp truth, lock guard yêu cầu `<state-dir>/locks/<profile>/prompt-rule.json` cho calibration và `<state-dir>/locks/<profile>/policy/<policy>.json` cho test. Hash nội dung hiện tại phải khớp marker và run manifest; test lock còn phải khớp policy, `policy_version`, và `model_slug` trong run manifest. Evaluator cũng xác minh fingerprint của policy copy bằng BASE đã freeze. Chỉ định role tường minh bằng `--episode-role` cho phép bỏ qua lock của các role không chọn. Development không cần lock. State directory và lock artifacts được định nghĩa tại [data.md §9](data.md#9-p51-harness-artifacts).
 - Quy tắc chọn cặp, selector, quyết định rule và số dòng bị loại trong harness dùng nguyên [quy tắc P4.5](#chọn-cặp-trong-run-p4).
 - Nếu policy copy chưa có decision rows, harness vẫn tạo report rỗng cho identity policy đã chọn: số quyết định bằng 0, truth được lấy theo role đã chọn và metric không có mẫu số được ghi `null`/`NA`. Run ngoài harness không suy ra policy từ một report history; dùng `--policy-version` khi một decision set rỗng cần identity cụ thể.
 - Một report chỉ thuộc một tập role và một cặp policy/model. Chọn output path khác hoặc role khác để giữ các báo cáo song song.
 
 ### Chọn cặp trong run P4
+
+- Mặc định evaluator chỉ chọn episode development. Held-out role phải được chọn tường minh và qua role guard; test cần một policy/model pair khớp named lock, còn calibration cần prompt-rule lock. Profile lock `pilot` được chuẩn hóa thành `benchmark` theo [data.md §9](data.md#9-p51-harness-artifacts).
 
 - Lệnh: `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Đọc `operational/observations.sqlite` ở chế độ read-only, ghi báo cáo vào `private/reports/p4_5_decisions.json`, in `policy_version` và `model_slug` đã chọn.
 - **Một báo cáo chỉ gồm một cặp `(policy_version, model_slug)`.** Quyết định agent trong DB tạo danh sách cặp ứng viên. Nếu có nhiều hơn một cặp mà không truyền selector, lệnh từ chối: thoát mã 2, liệt kê các cặp, không ghi báo cáo.

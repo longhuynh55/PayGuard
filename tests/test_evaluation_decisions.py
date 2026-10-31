@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
+import evaluation.__main__ as evaluation_cli
 from evaluation import DecisionEvaluationError, evaluate_decisions, evaluate_operational_decisions
 from evaluation.__main__ import main as evaluation_main
+from payguard.identity import policy_identity
 from simulator.storage import (
     create_export_stores,
     insert_operational_record,
@@ -37,7 +42,7 @@ def _add_episode(store) -> None:
     insert_operational_record(
         store.operational,
         "episodes",
-        {"episode_id": EPISODE_ID, "role": "calibration"},
+        {"episode_id": EPISODE_ID, "role": "development"},
     )
     insert_private_record(store.private, "private_episodes", {"episode_id": EPISODE_ID})
     insert_private_record(
@@ -45,7 +50,7 @@ def _add_episode(store) -> None:
         "episode_manifest",
         {
             "episode_id": EPISODE_ID,
-            "role": "calibration",
+            "role": "development",
             "seed": 123,
             "template": "data_pipeline",
             "content_fingerprint": "a" * 64,
@@ -697,6 +702,21 @@ def test_triage_runtime_modules_do_not_import_evaluation() -> None:
                 violations.append(str(path.relative_to(ROOT)))
 
     assert violations == []
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import triage.__main__; "
+            "assert not any(name == 'evaluation' or name.startswith('evaluation.') "
+            "for name in sys.modules)",
+        ],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _agent_decision(
@@ -894,6 +914,96 @@ def test_cli_selector_flags_report_one_pair(
         )
         assert report["selection"]["model_slug"] == "fake/b"
         assert report["decision_counts"]["total"] == 2
+    finally:
+        store.close()
+
+
+def test_p4_cli_honors_episode_role_and_defaults_to_development(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PAYGUARD_BENCHMARK_STATE_DIR", str(tmp_path / "benchmark-state"))
+    store = _store(tmp_path)
+    test_episode_id = "ep-test-role"
+    try:
+        insert_operational_record(
+            store.operational,
+            "episodes",
+            {"episode_id": test_episode_id, "role": "test"},
+        )
+        insert_private_record(store.private, "private_episodes", {"episode_id": test_episode_id})
+        insert_private_record(
+            store.private,
+            "episode_manifest",
+            {
+                "episode_id": test_episode_id,
+                "role": "test",
+                "seed": 456,
+                "template": "data_pipeline",
+                "content_fingerprint": "c" * 64,
+                "config_fingerprint": "d" * 64,
+                "config_json": json.dumps(
+                    _manifest_config(), sort_keys=True, separators=(",", ":")
+                ),
+            },
+        )
+        development_decision = _decision(
+            "dev-row", "2026-02-06T00:00:00.000000Z", "data_ticket"
+        )
+        test_decision = _decision(
+            "test-row",
+            "2026-02-06T00:00:00.000000Z",
+            "fraud_ops",
+            incident_id="incident-test",
+        )
+        test_decision["episode_id"] = test_episode_id
+        test_decision["policy_version"] = policy_identity("rule_human")["policy_version"]
+        _persist_operational(store, [development_decision, test_decision])
+
+        assert evaluation_main(
+            [
+                "decisions",
+                "--run",
+                str(tmp_path / "evaluation-run"),
+                "--episode-role",
+                "development",
+            ]
+        ) == 0
+        output = capsys.readouterr().out
+        assert "decision_count=1" in output
+        report_path = store.private_path.parent / "reports" / "p4_5_decisions.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["episode_ids"] == [EPISODE_ID]
+        assert report["decision_counts"]["total"] == 1
+
+        assert evaluation_main(
+            ["decisions", "--run", str(tmp_path / "evaluation-run")]
+        ) == 0
+        default_report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert default_report["episode_ids"] == [EPISODE_ID]
+
+        evaluator_called = False
+
+        def mark_evaluator_called(*_args, **_kwargs):
+            nonlocal evaluator_called
+            evaluator_called = True
+            raise AssertionError("held-out truth read before role lock")
+
+        monkeypatch.setattr(evaluation_cli, "evaluate_operational_decisions", mark_evaluator_called)
+        assert evaluation_main(
+            [
+                "decisions",
+                "--run",
+                str(tmp_path / "evaluation-run"),
+                "--episode-role",
+                "test",
+                "--policy-version",
+                str(policy_identity("rule_human")["policy_version"]),
+            ]
+        ) == 2
+        assert "required lock marker is missing or invalid" in capsys.readouterr().err
+        assert evaluator_called is False
     finally:
         store.close()
 

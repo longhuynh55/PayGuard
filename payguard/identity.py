@@ -14,6 +14,7 @@ from typing import Any, Iterator, Mapping
 
 import yaml
 
+from triage.llm import load_llm_config
 from triage.runbooks import load_triage_config
 
 
@@ -31,9 +32,12 @@ PROMPT_FILES = ("triage/agent.py", "triage/tools.py")
 POLICY_PROVIDERS = {
     "rule_human": ("unconfigured", None),
     "rule_agent_fake": ("fake", "fake/payguard-p4-round1"),
+    "rule_agent_openrouter_k1": ("openrouter", None),
 }
 ROLES = frozenset({"development", "calibration", "test"})
 LOCK_PROFILES = frozenset({"smoke", "benchmark"})
+LOCK_PROFILE_ALIASES = {"pilot": "benchmark"}
+LOCK_PROFILE_CHOICES = frozenset({*LOCK_PROFILES, *LOCK_PROFILE_ALIASES})
 BENCHMARK_STATE_DIR_ENV = "PAYGUARD_BENCHMARK_STATE_DIR"
 
 
@@ -221,18 +225,61 @@ def lock_identity_hashes(hashes: Mapping[str, Any]) -> dict[str, Any]:
     return {key: hashes[key] for key in keys}
 
 
+def normalize_lock_profile(profile: str) -> str:
+    """Map simulator profile names to the shared lock namespace."""
+    if not isinstance(profile, str):
+        raise RunIdentityError(f"unsupported lock profile: {profile!r}")
+    normalized = LOCK_PROFILE_ALIASES.get(profile, profile)
+    if normalized not in LOCK_PROFILES:
+        raise RunIdentityError(f"unsupported lock profile: {profile!r}")
+    return normalized
+
+
+def identity_hash_mismatches(
+    expected: Mapping[str, Any], actual: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Return content hash fields that differ, ignoring informational Git metadata."""
+    expected_hashes = lock_identity_hashes(expected)
+    actual_hashes = lock_identity_hashes(actual)
+    mismatches: list[str] = []
+    for field in ("code_hash", "config_hash", "prompt_hash", "sampling_hash"):
+        if expected_hashes[field] != actual_hashes[field]:
+            mismatches.append(field)
+    for field in ("config_hashes", "prompt_hashes"):
+        expected_values = expected_hashes[field]
+        actual_values = actual_hashes[field]
+        if not isinstance(expected_values, Mapping) or not isinstance(actual_values, Mapping):
+            mismatches.append(field)
+            continue
+        for name in sorted(set(expected_values) | set(actual_values)):
+            if expected_values.get(name) != actual_values.get(name):
+                mismatches.append(f"{field}[{name}]")
+    return tuple(mismatches)
+
+
 def _harness_profile(root: Path) -> str:
     manifest_path = root / "harness-manifest.json"
     if not manifest_path.is_file():
+        for candidate in (root / "generation-manifest.json", root / "base" / "generation-manifest.json"):
+            if candidate.is_file():
+                try:
+                    manifest = json.loads(candidate.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise RunIdentityError(
+                        f"generation manifest is missing or invalid: {candidate}"
+                    ) from exc
+                profile = manifest.get("profile") if isinstance(manifest, dict) else None
+                if isinstance(profile, str):
+                    return normalize_lock_profile(profile)
         return "smoke"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RunIdentityError(f"harness manifest is missing or invalid: {manifest_path}") from exc
     profile = manifest.get("profile") if isinstance(manifest, dict) else None
-    if profile not in LOCK_PROFILES:
+    if not isinstance(profile, str):
         raise RunIdentityError(f"harness manifest has an unsupported lock profile: {profile!r}")
-    return str(profile)
+    return normalize_lock_profile(profile)
 
 
 def assert_harness_state_directory(
@@ -276,6 +323,8 @@ def policy_identity(policy_name: str) -> dict[str, Any]:
     if policy_name not in POLICY_PROVIDERS:
         raise RunIdentityError(f"unsupported P5.1 policy: {policy_name!r}")
     provider_name, model_slug = POLICY_PROVIDERS[policy_name]
+    if provider_name == "openrouter":
+        model_slug = load_llm_config(repository_root() / "configs/llm.yaml").canonical_slug
     triage_config_path = repository_root() / "configs/triage.yaml"
     triage_config = load_triage_config(triage_config_path)
     policy_version = triage_config.get("policy_version")
@@ -301,7 +350,11 @@ def current_run_identity(
 
 
 def run_fingerprint(identity: Mapping[str, Any], *, base_fingerprint: str) -> str:
-    return _sha256(_canonical({"identity": identity, "base_fingerprint": base_fingerprint}))
+    material = dict(identity)
+    hashes = material.get("hashes")
+    if isinstance(hashes, Mapping):
+        material["hashes"] = lock_identity_hashes(hashes)
+    return _sha256(_canonical({"identity": material, "base_fingerprint": base_fingerprint}))
 
 
 def _lock_file(
@@ -311,8 +364,7 @@ def _lock_file(
     *,
     profile: str,
 ) -> Path:
-    if profile not in LOCK_PROFILES:
-        raise RunIdentityError(f"unsupported lock profile: {profile!r}")
+    profile = normalize_lock_profile(profile)
     state_dir = benchmark_state_directory(root, create=False)
     if kind == "prompt-rule":
         if policy_name is not None:
@@ -346,9 +398,20 @@ def create_lock(
 ) -> Path:
     root = Path(benchmark_root).expanduser().resolve()
     state_dir = benchmark_state_directory(root, create=False)
+    profile = normalize_lock_profile(profile)
     harness_manifest_path = root / "harness-manifest.json"
+    has_profile_manifest = harness_manifest_path.is_file() or any(
+        (root / name).is_file()
+        for name in ("generation-manifest.json", "base/generation-manifest.json")
+    )
     if harness_manifest_path.is_file():
         assert_harness_state_directory(root)
+    if has_profile_manifest:
+        root_profile = _harness_profile(root)
+        if profile != root_profile:
+            raise RunIdentityError(
+                f"lock profile {profile!r} does not match run manifest profile {root_profile!r}"
+            )
     dirty_entries = _dirty_entries()
     if dirty_entries:
         paths = ", ".join(path for _, path in dirty_entries[:5])
@@ -394,19 +457,21 @@ def _read_lock(path: Path) -> dict[str, Any]:
     return value
 
 
-def assert_role_access(
+def verify_role_locks(
     benchmark_root: str | Path,
     *,
     operation: str,
     role_episode_ids: Mapping[str, tuple[str, ...] | list[str]],
     policy_name: str | None,
 ) -> None:
+    """Verify calibration/test locks without recording a role-ledger touch."""
     root = Path(benchmark_root).expanduser().resolve()
     manifest_path = root / "harness-manifest.json"
     if manifest_path.is_file():
         assert_harness_state_directory(root)
     profile = _harness_profile(root)
-    identity_hashes = lock_identity_hashes(current_hashes(benchmark_root=root))
+    current_hashes_value = current_hashes(benchmark_root=root)
+    identity_hashes = lock_identity_hashes(current_hashes_value)
     current_policy = policy_identity(policy_name) if policy_name else None
     for role, episode_ids in role_episode_ids.items():
         if role not in ROLES or not episode_ids:
@@ -418,9 +483,15 @@ def assert_role_access(
                 raise RunIdentityError(f"wrong lock kind in {lock_path}")
             locked_identity = marker.get("identity")
             if not isinstance(locked_identity, dict) or locked_identity.get("hashes") != identity_hashes:
+                differences = (
+                    identity_hash_mismatches(locked_identity.get("hashes", {}), current_hashes_value)
+                    if isinstance(locked_identity, dict)
+                    else ()
+                )
                 raise RunIdentityError(
                     "calibration analysis refused: current code/config/prompt/sampling hashes "
-                    f"do not match locks/{profile}/prompt-rule.json"
+                    f"do not match locks/{profile}/prompt-rule.json; differing hashes: "
+                    f"{', '.join(differences) or 'invalid lock identity'}"
                 )
         elif role == "test":
             if current_policy is None:
@@ -439,9 +510,31 @@ def assert_role_access(
                 or marker.get("profile") != profile
                 or locked_identity != expected
             ):
-                raise RunIdentityError(
-                    f"test analysis refused: current hashes/policy do not match {lock_path}"
+                differences = (
+                    identity_hash_mismatches(locked_identity.get("hashes", {}), current_hashes_value)
+                    if isinstance(locked_identity, dict)
+                    else ()
                 )
+                raise RunIdentityError(
+                    f"test analysis refused: current hashes/policy do not match {lock_path}; "
+                    f"differing hashes: {', '.join(differences) or 'policy identity'}"
+                )
+
+
+def assert_role_access(
+    benchmark_root: str | Path,
+    *,
+    operation: str,
+    role_episode_ids: Mapping[str, tuple[str, ...] | list[str]],
+    policy_name: str | None,
+) -> None:
+    root = Path(benchmark_root).expanduser().resolve()
+    verify_role_locks(
+        root,
+        operation=operation,
+        role_episode_ids=role_episode_ids,
+        policy_name=policy_name,
+    )
     record_role_touches(
         root,
         operation=operation,
@@ -487,7 +580,7 @@ def record_role_touches(
     entry_material = {
         "benchmark_root": str(root),
         "code_identity_hash": _sha256(
-            _canonical(current_hashes(benchmark_root=root))
+            _canonical(lock_identity_hashes(current_hashes(benchmark_root=root)))
         ),
         "operation": operation,
         "policy_name": policy_name,

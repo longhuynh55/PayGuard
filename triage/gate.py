@@ -310,7 +310,7 @@ def _evidence_status(
     return "sufficient"
 
 
-def _mandatory_runbook_reasons(
+def mandatory_runbook_reasons(
     runbook: str | None,
     checklist_results: Mapping[str, Mapping[str, Any]],
 ) -> list[str]:
@@ -338,13 +338,13 @@ def _mandatory_runbook_reasons(
     return []
 
 
-def _checklist_tool_failure(
+def checklist_tool_failure(
     checklist_results: Mapping[str, Mapping[str, Any]],
 ) -> bool:
     return any(item.get("status") == "error" for item in checklist_results.values())
 
 
-def _checklist_requires_human_review(
+def checklist_requires_human_review(
     checklist_results: Mapping[str, Mapping[str, Any]],
 ) -> bool:
     return any(
@@ -501,12 +501,30 @@ def evaluate_gate(
     normalized_checklists, checklist_errors = _normalize_checklists(
         proposal.get("checklist_results")
     )
-    checklist_tool_error = _checklist_tool_failure(normalized_checklists)
+    # This reserved result is code-owned, never accepted from a provider.
+    normalized_checklists.pop("__runner_guard", None)
+    checklist_tool_error = checklist_tool_failure(normalized_checklists)
 
     if not isinstance(tool_error, bool):
         tool_error = True
         proposal_errors.append("Tool error flag is invalid.")
     tool_failure = tool_error or checklist_tool_error
+    # Persist runner-owned causes of a forced-human decision in the existing
+    # checklist JSON contract so the support evaluator can distinguish them
+    # from ordinary insufficient evidence.
+    runner_failure_reasons: list[str] = []
+    if tool_error:
+        runner_failure_reasons.append("runner_tool_error")
+    if not snapshot_valid:
+        runner_failure_reasons.append("invalid_snapshot")
+    if runner_failure_reasons:
+        normalized_checklists["__runner_guard"] = {
+            "status": "not_applicable",
+            "details": {
+                "forced_human": True,
+                "reason_codes": sorted(runner_failure_reasons),
+            },
+        }
     tool_error_reasons: list[str] = []
     if checklist_tool_error:
         tool_error_reasons.append("A checklist tool reported an error.")
@@ -521,7 +539,7 @@ def evaluate_gate(
     mandatory_review = (
         mandatory_human_review is True
         or bool(explicit_review_reasons)
-        or _checklist_requires_human_review(normalized_checklists)
+        or checklist_requires_human_review(normalized_checklists)
     )
     if not isinstance(mandatory_human_review, bool):
         mandatory_review = True
@@ -569,7 +587,7 @@ def evaluate_gate(
     if evidence_status == "conflicting":
         explicit_review_reasons.append("Checklist evidence is conflicting.")
         mandatory_review = True
-    runbook_review_reasons = _mandatory_runbook_reasons(
+    runbook_review_reasons = mandatory_runbook_reasons(
         runbook, normalized_checklists
     )
     if runbook_review_reasons:

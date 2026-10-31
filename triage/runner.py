@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, time, timedelta
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 from zoneinfo import ZoneInfo
 
 from monitoring.incidents import OperationalDecisionSource, compute_incidents
@@ -200,6 +200,7 @@ def run_triage(
     simulator_config_path: str | Path = "configs/simulator.yaml",
     triage_config_path: str | Path = "configs/triage.yaml",
     agent_provider: AgentProposalProvider | None = None,
+    episode_ids: Sequence[str] | None = None,
 ) -> dict[str, int]:
     """Run deterministic daily monitoring, rule gate, and decision persistence.
 
@@ -242,17 +243,26 @@ def run_triage(
             operational,
             model_slug=provider_model_slug,
         )
-        episode_ids = tuple(
-            row[0]
+        registered_episode_ids = tuple(
+            str(row[0])
             for row in operational.execute(
                 "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
             )
         )
-        if not episode_ids:
+        if not registered_episode_ids:
             raise StorageError("operational database has no registered non-base episodes")
+        if episode_ids is None:
+            selected_episode_ids = registered_episode_ids
+        else:
+            selected_episode_ids = tuple(dict.fromkeys(episode_ids))
+            unknown = sorted(set(selected_episode_ids) - set(registered_episode_ids))
+            if unknown:
+                raise StorageError(f"triage episode IDs are not registered: {unknown!r}")
+            if not selected_episode_ids:
+                raise StorageError("triage requires at least one selected episode")
 
         metric_catalog: list[dict[str, Any]] = []
-        for episode_id in episode_ids:
+        for episode_id in selected_episode_ids:
             metric_catalog.extend(
                 read_as_of(
                     operational,
@@ -272,7 +282,7 @@ def run_triage(
         metric_rows_seen = len(metric_catalog)
 
         for as_of_time in snapshot_times:
-            for episode_id in episode_ids:
+            for episode_id in selected_episode_ids:
                 alert_snapshot = read_as_of(
                     operational,
                     "alerts",
@@ -386,7 +396,7 @@ def run_triage(
 
         operational.commit()
         return {
-            "episode_count": len(episode_ids),
+            "episode_count": len(selected_episode_ids),
             "daily_metric_rows_seen": metric_rows_seen,
             "alert_rows_seen": alert_rows_seen,
             "incident_snapshots_inserted": incidents_inserted,

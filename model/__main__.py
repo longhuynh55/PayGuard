@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from typing import Sequence
 
 from model.evaluate import (
@@ -14,6 +15,13 @@ from model.evaluate import (
     train_operational_model,
 )
 from model.train import artifact_directory_for_run
+from payguard.identity import (
+    assert_role_access,
+    find_harness_root,
+    policy_name_for_run,
+    repository_root,
+)
+from payguard.run_identity import verify_harness_policy_run
 
 
 def _connection(path: str | Path, *, read_only: bool) -> sqlite3.Connection:
@@ -52,6 +60,12 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--private-db", required=True)
     evaluate_parser.add_argument("--data-root", default="data")
     evaluate_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
+    evaluate_parser.add_argument(
+        "--episode-role",
+        choices=("development", "calibration", "test"),
+        action="append",
+        help="evaluate selected roles; standalone runs default to development only",
+    )
     return parser
 
 
@@ -86,15 +100,101 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"score_count": len(rows), "episode_counts": counts}, sort_keys=True))
         return 0
 
+    operational_path = Path(args.operational_db).expanduser().resolve()
+    private_path = Path(args.private_db).expanduser().resolve()
+    harness_root = find_harness_root(operational_path)
+    roles: dict[str, list[str]] = {}
+    with _connection(operational_path, read_only=True) as operational:
+        role_rows = operational.execute(
+            "SELECT episode_id, role FROM episodes WHERE episode_id <> 'base' "
+            "ORDER BY role, episode_id"
+        ).fetchall()
+    unknown_roles = sorted(
+        {str(row[1]) for row in role_rows} - {"development", "calibration", "test"}
+    )
+    if unknown_roles:
+        print(
+            f"ERROR: operational episodes have unknown roles: {unknown_roles}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.episode_role:
+        selected_roles = set(args.episode_role)
+    else:
+        selected_roles = {"development"}
+    held_out_roles = selected_roles & {"calibration", "test"}
+    if held_out_roles:
+        print(
+            "ERROR: held-out model evaluation is disabled until model artifacts are "
+            "content-hash bound into the frozen identity; follow-up is required before pilot",
+            file=sys.stderr,
+        )
+        return 2
+    for episode_id, role in role_rows:
+        if role in selected_roles:
+            roles.setdefault(str(role), []).append(str(episode_id))
+    if selected_roles != set(roles):
+        print(
+            "ERROR: selected episode roles have no episodes: "
+            f"{sorted(selected_roles - set(roles))}",
+            file=sys.stderr,
+        )
+        return 2
+    if (harness_root is not None or any(role != "development" for role in selected_roles)) and (
+        Path(args.simulator_config).expanduser().resolve()
+        != (repository_root() / "configs" / "simulator.yaml").resolve()
+    ):
+        print(
+            "ERROR: model evaluate refuses custom simulator config paths not covered by "
+            "the verified lock/run identity",
+            file=sys.stderr,
+        )
+        return 2
+    if harness_root is None and any(role != "development" for role in selected_roles):
+        print(
+            "ERROR: model evaluate outside a P5.1 harness is limited to development episodes",
+            file=sys.stderr,
+        )
+        return 2
+    selected_episode_ids = tuple(
+        episode_id for role in sorted(roles) for episode_id in roles[role]
+    )
+    policy_name = None
+    try:
+        if harness_root is not None:
+            policy_run = operational_path.parent.parent
+            policy_name = policy_name_for_run(policy_run)
+            if (
+                policy_name is None
+                or policy_run.parent != harness_root / "policies"
+                or operational_path != policy_run / "operational" / "observations.sqlite"
+            ):
+                raise ValueError("model evaluate in a harness requires a policy operational copy")
+            expected_private = harness_root / "base" / "private" / "evaluator.sqlite"
+            if private_path != expected_private.resolve():
+                raise ValueError(
+                    "model evaluate in a harness must use the frozen BASE evaluator store"
+                )
+            verify_harness_policy_run(policy_run, required_roles=tuple(sorted(roles)))
+            assert_role_access(
+                harness_root,
+                operation="model.evaluate.cli",
+                role_episode_ids=roles,
+                policy_name=policy_name,
+            )
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     with (
-        _connection(args.operational_db, read_only=True) as operational,
-        _connection(args.private_db, read_only=True) as private,
+        _connection(operational_path, read_only=True) as operational,
+        _connection(private_path, read_only=True) as private,
     ):
         report = evaluate_model_scores(
             operational,
             private,
             model_directory=artifact_dir,
             simulator_config_path=args.simulator_config,
+            episode_ids=selected_episode_ids,
         )
     print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
     return 0

@@ -382,6 +382,7 @@ def test_validate_accepts_populated_monitoring_tables(p3_monitoring_smoke_run: P
 def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
     tmp_path: Path, valid_smoke_run: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("PAYGUARD_BENCHMARK_STATE_DIR", str(tmp_path / "benchmark-state"))
     run_dir = tmp_path / "p4-smoke"
     shutil.copytree(valid_smoke_run, run_dir)
     database = run_dir / "operational" / "observations.sqlite"
@@ -496,10 +497,23 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
 def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
     tmp_path: Path,
     valid_smoke_run: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PAYGUARD_BENCHMARK_STATE_DIR", str(tmp_path / "benchmark-state"))
     run_dir = tmp_path / "p4-fake-agent-smoke"
     shutil.copytree(valid_smoke_run, run_dir)
     database = run_dir / "operational" / "observations.sqlite"
+    import payguard.identity as identity
+    from payguard.identity import create_lock
+
+    monkeypatch.setattr(identity, "_dirty_entries", lambda: ())
+    create_lock(run_dir, "prompt-rule", profile="smoke")
+    create_lock(
+        run_dir,
+        "policy",
+        policy_name="rule_agent_fake",
+        profile="smoke",
+    )
 
     from monitoring.metrics import compute_daily_metrics
     from monitoring.signals import compute_alerts
@@ -560,6 +574,12 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         str(run_dir),
         "--agent-provider",
         "fake",
+        "--episode-role",
+        "development",
+        "--episode-role",
+        "calibration",
+        "--episode-role",
+        "test",
     )
     assert first.returncode == 0, first.stdout + first.stderr
     with sqlite3.connect(database) as connection:
@@ -619,6 +639,12 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         str(run_dir),
         "--agent-provider",
         "fake",
+        "--episode-role",
+        "development",
+        "--episode-role",
+        "calibration",
+        "--episode-role",
+        "test",
     )
     assert replay.returncode == 0, replay.stdout + replay.stderr
     with sqlite3.connect(database) as connection:
@@ -627,7 +653,18 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
         ).fetchall()
     assert after == before
 
-    evaluated = _module_cli("evaluation", "decisions", "--run", str(run_dir))
+    evaluated = _module_cli(
+        "evaluation",
+        "decisions",
+        "--run",
+        str(run_dir),
+        "--episode-role",
+        "development",
+        "--episode-role",
+        "calibration",
+        "--episode-role",
+        "test",
+    )
     assert evaluated.returncode == 0, evaluated.stdout + evaluated.stderr
     report_path = run_dir / "private" / "reports" / "p4_5_decisions.json"
     assert report_path.is_file()

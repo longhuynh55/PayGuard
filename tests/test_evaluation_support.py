@@ -3,11 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import sqlite3
+import pytest
 
 from evaluation.__main__ import main as evaluation_main
 import evaluation.support as support
 import payguard.identity as identity
 from payguard.identity import benchmark_state_directory
+from simulator.reproducibility import canonical_run_fingerprint
 from monitoring.incidents import compute_incidents
 from simulator.storage import (
     create_export_stores,
@@ -82,7 +86,7 @@ def _decision(decision_id: str, incident_id: str, source: str) -> dict[str, obje
         "conclusion": "Fixture decision.",
         "reason": "Agent closing is disabled.",
         "close_score": 1.0 if source == "agent" else None,
-        "policy_version": "fixture.policy.v1",
+        "policy_version": identity.policy_identity("rule_agent_fake")["policy_version"],
         "model_slug": "fake/payguard-p4-round1" if source == "agent" else None,
     }
 
@@ -124,8 +128,79 @@ def _support_harness(
     return benchmark_root, policy_run, base_store, policy_store
 
 
+def _finalize_support_harness(
+    benchmark_root: Path, policy_run: Path, state_dir: Path
+) -> None:
+    """Freeze a BASE copy and write the identity manifests used by the CLI guard."""
+    base_operational = benchmark_root / "base" / "operational" / "observations.sqlite"
+    policy_operational = policy_run / "operational" / "observations.sqlite"
+    shutil.copyfile(policy_operational, base_operational)
+    connection = sqlite3.connect(base_operational)
+    try:
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND tbl_name IN ('decisions', 'incidents')"
+        ).fetchall()
+        for (trigger_name,) in triggers:
+            escaped = str(trigger_name).replace('"', '""')
+            connection.execute(f'DROP TRIGGER "{escaped}"')
+        connection.execute("DELETE FROM decisions")
+        connection.execute("DELETE FROM incidents")
+        connection.commit()
+    finally:
+        connection.close()
+    with sqlite3.connect(base_operational) as connection:
+        connection.row_factory = sqlite3.Row
+        base_fingerprint = canonical_run_fingerprint(
+            connection, empty_tables=("incidents", "decisions")
+        )
+    hashes = identity.current_hashes(benchmark_root=benchmark_root)
+    (benchmark_root / "harness-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": "smoke",
+                "state_dir": str(state_dir.resolve()),
+                "hashes": hashes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (benchmark_root / "base" / "base-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": "smoke",
+                "hashes": hashes,
+                "input_fingerprint": base_fingerprint,
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy_identity = identity.current_run_identity(
+        "rule_agent_fake", benchmark_root=benchmark_root
+    )
+    (policy_run / "run-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                **policy_identity,
+                "base_fingerprint": base_fingerprint,
+                "run_fingerprint": identity.run_fingerprint(
+                    policy_identity, base_fingerprint=base_fingerprint
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _insert_alert_incident(
-    policy_store, *, alert_id: str, feature: str = "txn_count"
+    policy_store,
+    *,
+    alert_id: str,
+    feature: str = "txn_count",
+    as_of_time: str = AS_OF,
 ) -> dict[str, object]:
     metric_id = "volume.txn_count" if feature == "txn_count" else f"psi.{feature}"
     insert_operational_record(
@@ -134,16 +209,16 @@ def _insert_alert_incident(
         {
             "metric_id": metric_id,
             "episode_id": "ep-dev",
-            "as_of_time": AS_OF,
-            "event_at": AS_OF,
-            "available_at": AS_OF,
-            "business_date": "2026-03-02",
+            "as_of_time": as_of_time,
+            "event_at": as_of_time,
+            "available_at": as_of_time,
+            "business_date": as_of_time[:10],
             "feature": feature,
             "segment": "all",
             "value": 1.0,
             "reference_window": "2025-11-01/2026-01-31",
-            "window_start": "2026-03-02",
-            "window_end": "2026-03-02",
+            "window_start": as_of_time[:10],
+            "window_end": as_of_time[:10],
             "n_window": 40,
             "n_reference": 100,
             "flags": [],
@@ -152,15 +227,15 @@ def _insert_alert_incident(
     alert = {
         "alert_id": alert_id,
         "episode_id": "ep-dev",
-        "as_of_time": AS_OF,
+        "as_of_time": as_of_time,
         "metric": metric_id,
         "feature": feature,
         "segment": "all",
         "value": 1.0,
         "reference": "2025-11-01/2026-01-31",
         "threshold": 4.25,
-        "event_at": AS_OF,
-        "available_at": AS_OF,
+        "event_at": as_of_time,
+        "available_at": as_of_time,
     }
     insert_operational_record(policy_store.operational, "alerts", alert)
     incident_rows = compute_incidents([alert], episode_id="ep-dev").incidents
@@ -293,6 +368,8 @@ def test_support_cli_is_development_only_private_and_byte_reproducible(
         base_store.close()
         policy_store.close()
 
+    _finalize_support_harness(benchmark_root, policy_run, state_dir)
+
     args = ["support", "--run", str(policy_run)]
     assert evaluation_main(args) == 0
     report_path = (
@@ -376,8 +453,9 @@ def test_support_cli_is_development_only_private_and_byte_reproducible(
     assert report_path.read_bytes() == first_report
 
 
-def test_support_cli_excludes_checklist_tool_failure_from_uq_conditions(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("failure_mode", ["checklist-error", "runner-error"])
+def test_support_cli_excludes_tool_failures_from_uq_conditions(
+    failure_mode: str, tmp_path: Path, monkeypatch
 ) -> None:
     benchmark_root, policy_run, base_store, policy_store = _support_harness(
         tmp_path, monkeypatch
@@ -389,20 +467,40 @@ def test_support_cli_excludes_checklist_tool_failure_from_uq_conditions(
         decision = _decision("error", str(incident["incident_id"]), "agent")
         checklists = decision["checklist_results_json"]
         assert isinstance(checklists, dict)
-        checklists["agent_run_sql"] = {
-            "status": "error",
-            "scope_match": True,
-            "window_complete": True,
-            "requires_human_review": False,
-        }
+        if failure_mode == "checklist-error":
+            checklists["agent_run_sql"] = {
+                "status": "error",
+                "scope_match": True,
+                "window_complete": True,
+                "requires_human_review": False,
+            }
+            assert "__runner_guard" not in checklists
+        else:
+            checklists["agent_run_sql"] = {
+                "status": "pass",
+                "scope_match": True,
+                "window_complete": True,
+                "requires_human_review": False,
+            }
+            checklists["__runner_guard"] = {
+                "status": "not_applicable",
+                "details": {
+                    "forced_human": True,
+                    "reason_codes": ["runner_tool_error"],
+                },
+            }
         decision["evidence_status"] = "insufficient"
-        decision["reason"] = "A checklist tool reported an error."
+        decision["reason"] = "A tool reported an error."
         insert_operational_record(policy_store.operational, "decisions", decision)
         base_store.commit()
         policy_store.commit()
     finally:
         base_store.close()
         policy_store.close()
+
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
 
     assert evaluation_main(["support", "--run", str(policy_run)]) == 0
     report_path = (
@@ -433,6 +531,15 @@ def test_support_cli_reports_null_for_unmeasurable_close_enabled_on_state(
         incident = _insert_alert_incident(
             policy_store, alert_id="alert-seasonal-agent", feature="txn_count"
         )
+        _add_truth(
+            base_store,
+            truth_id="truth-seasonal-on-unmeasurable",
+            cause="seasonal",
+            requires_intervention=False,
+            rule_covered=False,
+            parent_scenario="on-unmeasurable",
+            features=["txn_count"],
+        )
         decision = _decision("seasonal", str(incident["incident_id"]), "agent")
         insert_operational_record(policy_store.operational, "decisions", decision)
         base_store.commit()
@@ -440,6 +547,10 @@ def test_support_cli_reports_null_for_unmeasurable_close_enabled_on_state(
     finally:
         base_store.close()
         policy_store.close()
+
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
 
     assert evaluation_main(["support", "--run", str(policy_run)]) == 0
     report_path = (
@@ -458,6 +569,151 @@ def test_support_cli_reports_null_for_unmeasurable_close_enabled_on_state(
     ] == 1
     assert on_state["conditions_1_to_3_incidents"] is None
     assert on_state["conditions_1_to_3_reason"]
+    truth_group = next(
+        row
+        for row in report["agent_support"]["by_truth_group"]
+        if row["group_type"] == "truth" and row["cause"] == "seasonal"
+    )
+    assert truth_group["by_close_enabled"]["on"][
+        "conditions_1_to_3_incidents"
+    ] is None
+    assert truth_group["by_close_enabled"]["on"]["conditions_1_to_3_reason"]
+
+
+@pytest.mark.parametrize(
+    ("case", "rule_time", "agent_time", "different_agent_start", "expected_on"),
+    [
+        ("same-start-prior-rule", "2026-03-01T16:59:59.000000Z", AS_OF, False, 0),
+        ("different-start-prior-rule", "2026-03-01T16:59:59.000000Z", AS_OF, True, 0),
+        (
+            "future-rule",
+            AS_OF,
+            "2026-03-02T16:58:59.000000Z",
+            False,
+            1,
+        ),
+    ],
+)
+def test_support_cli_on_projection_matches_feature_segment_and_prior_time_only(
+    case: str,
+    rule_time: str,
+    agent_time: str,
+    different_agent_start: bool,
+    expected_on: int,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    benchmark_root, policy_run, base_store, policy_store = _support_harness(
+        tmp_path, monkeypatch
+    )
+    try:
+        incident = _insert_alert_incident(
+            policy_store,
+            alert_id="alert-on-projection",
+            feature="txn_count",
+            as_of_time="2026-02-28T16:59:59.000000Z",
+        )
+        incident_id = str(incident["incident_id"])
+        same_scope_start = str(incident["opened_at"])
+        rule = _decision("prior-rule", incident_id, "rule")
+        agent = _decision("later-agent", incident_id, "agent")
+        for decision, decision_time in ((rule, rule_time), (agent, agent_time)):
+            for field in ("decision_at", "as_of_time", "event_at", "available_at"):
+                decision[field] = decision_time
+            start_at = same_scope_start
+            if decision is agent and different_agent_start:
+                start_at = "2026-02-27T16:59:59.000000Z"
+            decision["scope_json"] = {
+                "feature": "txn_count",
+                "segment": "all",
+                "start_at": start_at,
+                "end_at": decision_time,
+            }
+        insert_operational_record(policy_store.operational, "decisions", rule)
+        insert_operational_record(policy_store.operational, "decisions", agent)
+        base_store.commit()
+        policy_store.commit()
+    finally:
+        base_store.close()
+        policy_store.close()
+
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
+    assert evaluation_main(["support", "--run", str(policy_run)]) == 0
+    report_path = (
+        benchmark_root
+        / "base"
+        / "private"
+        / "reports"
+        / "p5_0b"
+        / "rule_agent_fake"
+        / "development_support.json"
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["agent_support"]["uq_conditions"]["by_close_enabled"]["on"][
+        "conditions_1_to_3_incidents"
+    ] == expected_on
+
+
+def test_support_cli_emits_rows_for_truth_groups_without_matched_incidents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    benchmark_root, policy_run, base_store, policy_store = _support_harness(
+        tmp_path, monkeypatch
+    )
+    try:
+        _add_truth(
+            base_store,
+            truth_id="truth-unmatched-seasonal",
+            cause="seasonal",
+            requires_intervention=False,
+            rule_covered=False,
+            parent_scenario="unmatched-two-cause",
+            features=["amount"],
+        )
+        _add_truth(
+            base_store,
+            truth_id="truth-unmatched-fraud",
+            cause="fraud_surge",
+            requires_intervention=True,
+            rule_covered=False,
+            parent_scenario="unmatched-two-cause",
+            features=["amount"],
+        )
+        incident = _insert_alert_incident(
+            policy_store, alert_id="alert-unmatched-truth-group", feature="txn_count"
+        )
+        decision = _decision("unmatched-agent", str(incident["incident_id"]), "agent")
+        insert_operational_record(policy_store.operational, "decisions", decision)
+        base_store.commit()
+        policy_store.commit()
+    finally:
+        base_store.close()
+        policy_store.close()
+
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
+    assert evaluation_main(["support", "--run", str(policy_run)]) == 0
+    report_path = (
+        benchmark_root
+        / "base"
+        / "private"
+        / "reports"
+        / "p5_0b"
+        / "rule_agent_fake"
+        / "development_support.json"
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["incident_counts"]["unmatched"] == 1
+    truth_groups = {
+        row["cause"]: row
+        for row in report["agent_support"]["by_truth_group"]
+        if row["group_type"] == "truth"
+    }
+    assert set(truth_groups) == {"seasonal", "fraud_surge"}
+    assert all(row["incidents_reaching_agent"] == 0 for row in truth_groups.values())
 
 
 def test_support_cli_refuses_role_mismatch_before_truth_or_role_ledger(
@@ -472,6 +728,10 @@ def test_support_cli_refuses_role_mismatch_before_truth_or_role_ledger(
     finally:
         base_store.close()
         policy_store.close()
+
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
 
     truth_loads: list[tuple[str, ...]] = []
 
@@ -492,6 +752,64 @@ def test_support_cli_refuses_role_mismatch_before_truth_or_role_ledger(
     assert "roles disagree with the private episode_manifest.role" in captured.err
     assert truth_loads == []
     assert ledger_path.read_bytes() == ledger_before
+
+
+def test_support_cli_rejects_saved_checklist_without_status_as_support_error(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    benchmark_root, policy_run, base_store, policy_store = _support_harness(
+        tmp_path, monkeypatch
+    )
+    try:
+        incident = _insert_alert_incident(
+            policy_store, alert_id="alert-missing-checklist-status"
+        )
+        decision = _decision("missing-status", str(incident["incident_id"]), "agent")
+        insert_operational_record(policy_store.operational, "decisions", decision)
+        base_store.commit()
+        policy_store.commit()
+    finally:
+        base_store.close()
+        policy_store.close()
+
+    operational_path = policy_run / "operational" / "observations.sqlite"
+    connection = sqlite3.connect(operational_path)
+    try:
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='decisions'"
+        ).fetchall()
+        for (trigger_name,) in triggers:
+            escaped = str(trigger_name).replace('"', '""')
+            connection.execute(f'DROP TRIGGER "{escaped}"')
+        row = connection.execute(
+            "SELECT decision_id, checklist_results_json FROM decisions"
+        ).fetchone()
+        checklists = json.loads(row[1])
+        del checklists["seasonal_calendar"]["status"]
+        connection.execute(
+            "UPDATE decisions SET checklist_results_json=? WHERE decision_id=?",
+            (json.dumps(checklists), row[0]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
+
+    assert evaluation_main(["support", "--run", str(policy_run)]) == 2
+    captured = capsys.readouterr()
+    assert "DevelopmentSupportError" in captured.err
+    assert "missing a valid status" in captured.err
+    assert not (
+        benchmark_root
+        / "base"
+        / "private"
+        / "reports"
+        / "p5_0b"
+        / "rule_agent_fake"
+        / "development_support.json"
+    ).exists()
 
 
 def test_support_cli_groups_matched_mixed_parent_truth_and_close_enabled_states(
@@ -520,6 +838,7 @@ def test_support_cli_groups_matched_mixed_parent_truth_and_close_enabled_states(
             features=["txn_count", "amount"],
         )
 
+        incident_ids = []
         for index, feature in enumerate(("txn_count", "amount_avg_7d"), start=1):
             incident = _insert_alert_incident(
                 policy_store,
@@ -527,6 +846,7 @@ def test_support_cli_groups_matched_mixed_parent_truth_and_close_enabled_states(
                 feature=feature,
             )
             incident_id = str(incident["incident_id"])
+            incident_ids.append(incident_id)
             rule = _decision(f"r{index}", incident_id, "rule")
             agent = _decision(f"a{index}", incident_id, "agent")
             rule["scope_json"] = {
@@ -550,6 +870,10 @@ def test_support_cli_groups_matched_mixed_parent_truth_and_close_enabled_states(
         base_store.close()
         policy_store.close()
 
+    _finalize_support_harness(
+        benchmark_root, policy_run, tmp_path / "benchmark-state"
+    )
+
     assert evaluation_main(["support", "--run", str(policy_run)]) == 0
     report_path = (
         benchmark_root
@@ -569,7 +893,19 @@ def test_support_cli_groups_matched_mixed_parent_truth_and_close_enabled_states(
     }
     assert by_cause["seasonal"]["matched_truths"] == 1
     assert by_cause["seasonal"]["rule_covered_truths"] == 1
+    assert by_cause["seasonal"]["matched_runbooks"] == ["seasonal_calendar"]
     assert by_cause["fraud_surge"]["matched_truths"] == 1
+    assert by_cause["fraud_surge"]["matched_runbooks"] == ["seasonal_calendar"]
+    assert report["rule_coverage"]["matched_runbooks"] == [
+        {
+            "runbook": "seasonal_calendar",
+            "incident_count": 2,
+            "incident_ids": sorted(incident_ids),
+            "matched_truth_ids": sorted(
+                ["truth-seasonal-benign", "truth-fraud-surge"]
+            ),
+        }
+    ]
     assert report["seasonal_benign_support"]["seasonal_benign_truths"] == 1
     assert report["seasonal_benign_support"]["matched_seasonal_benign_truths"] == 0
 

@@ -100,7 +100,11 @@ Mỗi lần gọi `run_sql` trả `tool_trace_id` tất định và trace tạm 
 
 ## 9. CLI trong P5.1 harness
 
-Trong `<benchmark-root>/policies/<policy>`, `python -m triage run` và `python -m triage measure` kiểm tra current code/config/prompt/sampling hashes với harness và policy manifests trước khi mở operational DB hoặc ghi output. Cả hai từ chối khi manifest lệch; `run` tiếp tục xác nhận decision rows hiện có khớp `policy_version` và `model_slug` agent trong manifest. Provider phải khớp provider/model của policy.
+Trong `<benchmark-root>/policies/<policy>`, `python -m triage run` và `python -m triage measure` kiểm tra hash nội dung runtime/config/prompt/sampling với harness và policy manifests trước khi mở operational DB hoặc ghi output; thay đổi Git HEAD/dirty flag không chặn resume. Harness triage cũng xác nhận BASE đang đóng băng, fingerprint policy copy bằng BASE, và decision rows hiện có khớp `policy_version`/`model_slug` trong manifest. Held-out role chỉ được triage sau khi lock tương ứng tồn tại và khớp run manifest.
+
+Lệnh standalone `triage run` dùng config mặc định đã được identity bao phủ khi chọn calibration/test; custom `--simulator-config`, `--triage-config` hoặc `--llm-config` path bị từ chối trước khi dựng provider. `triage measure` luôn dùng config mặc định đã được identity bao phủ vì có thể chuyển từ development sang calibration; custom path bị từ chối trước khi provider hoặc report được tạo.
+
+`triage run` mặc định chỉ xử lý development. Có thể lặp `--episode-role development|calibration|test` để chọn role; chỉ episode ID của role được chọn đi vào runner. Lệnh standalone cũng áp role lock qua state directory chung; OpenRouter standalone dùng ledger bền theo [data.md §9](data.md#9-p51-harness-artifacts). Provider và model phải khớp policy identity.
 
 Harness truyền durable ledger chung ở `<state-dir>/cost-ledger.jsonl` cho mọi provider có thể gọi LLM; role ledger và lock markers cũng cùng thư mục state ngoài các benchmark roots (xem [data.md §9](data.md#9-p51-harness-artifacts)). Cap $10 USD và nguồn giá trị được ghi ở [p5-implementation.md](p5-implementation.md); mode P4 ngoài harness giữ cap $1 trong `configs/llm.yaml`. `measure` chọn development trước, chỉ đọc calibration khi chưa đủ mẫu development và khi callback lock guard cho phép; role đã chạm được ghi vào ledger. CLI evaluator, role locks, report paths và hành vi decision set rỗng được định nghĩa tại [evaluation.md, mục 9](evaluation.md#9-cli-cham-decisions-va-chon-cap-p45-p51).
 

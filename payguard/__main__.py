@@ -7,7 +7,12 @@ import sys
 from typing import Sequence
 
 from payguard.harness import BENCHMARK_COST_CAP_USD, HarnessError, run_benchmark
-from payguard.identity import LOCK_PROFILES, POLICY_PROVIDERS, RunIdentityError, create_lock
+from payguard.identity import (
+    LOCK_PROFILE_CHOICES,
+    POLICY_PROVIDERS,
+    RunIdentityError,
+    create_lock,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,15 +37,11 @@ def _parser() -> argparse.ArgumentParser:
     lock_commands = lock_parser.add_subparsers(dest="lock_kind", required=True)
     prompt_lock = lock_commands.add_parser("prompt-rule", help="lock prompt and rule inputs")
     prompt_lock.add_argument("--out", required=True, help="benchmark root")
-    prompt_lock.add_argument(
-        "--profile", choices=tuple(sorted(LOCK_PROFILES)), default="smoke"
-    )
+    prompt_lock.add_argument("--profile", choices=tuple(sorted(LOCK_PROFILE_CHOICES)), default="smoke")
     policy_lock = lock_commands.add_parser("policy", help="lock one named policy")
     policy_lock.add_argument("--out", required=True, help="benchmark root")
     policy_lock.add_argument("--policy", choices=tuple(POLICY_PROVIDERS), required=True)
-    policy_lock.add_argument(
-        "--profile", choices=tuple(sorted(LOCK_PROFILES)), default="smoke"
-    )
+    policy_lock.add_argument("--profile", choices=tuple(sorted(LOCK_PROFILE_CHOICES)), default="smoke")
     return parser
 
 
