@@ -32,6 +32,8 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 - **Sổ chi phí:** ledger bền cộng mọi lời gọi (mọi nhánh, retry, recheck, lần chạy trước restart); chặn trước khi vượt trần đã khóa. **Người dùng chốt 31/10/2026 (review P5.1 r1, finding 2):** sổ chi phí và sổ role/lock nằm ở **một đường dẫn cố định ngoài mọi benchmark root** (và ngoài mọi DB/file tool agent đọc được), dùng chung cho mọi root, mọi lần đổi code; trần 10 USD và lock calibration/test áp cho toàn benchmark.
 - **Nghiệm thu:** fingerprint input giống nhau giữa các policy và không đổi sau chạy; resume idempotent; fake provider end-to-end; truth chỉ evaluator đọc; commit trước tool giữ như P4.4b.
 
+- **Trạng thái:** ✅ merge 31/10 ([r1](../review/findings/P5.1-r1.md), [r2](../review/findings/P5.1-r2.md); vòng sửa 3 người dùng duyệt, orchestrator chạy full test 371 passed thay cho review vòng 3).
+
 ### P5.1 — CLI, locks, ngân sách và identity
 
 Smoke workflow ví dụ dùng state directory tạm để tránh tạo trạng thái benchmark thật:
