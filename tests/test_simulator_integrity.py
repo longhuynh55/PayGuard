@@ -625,7 +625,23 @@ def test_smoke_generation_integrity_and_observable_daily_hourly_rhythm(tmp_path:
         transactions = [dict(row) for row in pair.operational.execute("SELECT * FROM transactions")]
         events = [dict(row) for row in pair.operational.execute("SELECT * FROM transaction_events")]
         assert {row["episode_id"] for row in customers + merchants + transactions + events} == {"base"}
-        assert {row["customer_id"] for row in transactions} <= set(world.customer_ids)
+        legitimate_new_ids = set(summary.legitimate_new_customer_ids)
+        assert len(legitimate_new_ids) == config.world.legitimate_new_accounts_per_base_history.value
+        assert {row["customer_id"] for row in transactions} <= (
+            set(world.customer_ids) | legitimate_new_ids
+        )
+        assert legitimate_new_ids <= {
+            row["customer_id"] for row in customers
+        }
+        assert all(
+            any(
+                row["customer_id"] == customer_id
+                and row["merchant_id"] is not None
+                and row["recipient_customer_id"] is None
+                for row in transactions
+            )
+            for customer_id in legitimate_new_ids
+        )
         assert all(
             (row["merchant_id"] is None) != (row["recipient_customer_id"] is None)
             for row in transactions

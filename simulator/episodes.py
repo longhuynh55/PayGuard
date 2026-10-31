@@ -11,13 +11,22 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from simulator.config import EpisodeAssignment, EpisodeConfig, ProfileName, SimulatorConfig
-from simulator.fraud import FraudSummary, generate_card_testing
+from simulator.fraud import (
+    FraudSummary,
+    generate_card_testing,
+    generate_other_fraud_mechanisms,
+)
 from simulator.incidents import IncidentSummary, inject_data_pipeline, inject_seasonal
 from simulator.labels import LabelSummary, generate_label_events
 from simulator.randomness import derive_seed
 from simulator.reproducibility import canonical_episode_fingerprint
 from simulator.storage import insert_operational_record, insert_private_record
-from simulator.transactions import TransactionSummary, generate_episode_transactions, generate_transactions
+from simulator.transactions import (
+    LEGITIMATE_NEW_ACCOUNTS_METADATA_KEY,
+    TransactionSummary,
+    generate_episode_transactions,
+    generate_transactions,
+)
 from simulator.world import (
     ACCOUNT_PROFILE_METADATA_KEY,
     WorldSummary,
@@ -94,6 +103,8 @@ def _inject_template(
     assignment: EpisodeAssignment,
     episode_id: str,
     seed: int,
+    world_summary: WorldSummary,
+    transaction_random_keys: dict[str, str],
 ) -> IncidentSummary | None:
     if assignment.template == "clean":
         return None
@@ -126,6 +137,8 @@ def _inject_template(
             episode_config.templates.seasonal.expected_relative_change.value
         ),
         seed=seed,
+        customer_ids=world_summary.customer_ids,
+        transaction_random_keys=transaction_random_keys,
     )
 
 
@@ -175,6 +188,7 @@ def generate_episodes(
     private.execute("SAVEPOINT p1_7_episode_run")
     try:
         base_world = generate_world(operational, simulator_config, profile)
+        transaction_random_keys: dict[str, str] = {}
         insert_private_record(
             private,
             "run_metadata",
@@ -188,6 +202,20 @@ def generate_episodes(
             simulator_config,
             profile,
             world_summary=base_world,
+            transaction_random_keys=transaction_random_keys,
+        )
+        insert_private_record(
+            private,
+            "run_metadata",
+            {
+                "key": LEGITIMATE_NEW_ACCOUNTS_METADATA_KEY,
+                "value_json": {
+                    "episode_id": "base",
+                    "seed": simulator_config.seed.value,
+                    "customer_ids": list(base_transactions.legitimate_new_customer_ids),
+                    "count": len(base_transactions.legitimate_new_customer_ids),
+                },
+            },
         )
         base_fraud = generate_card_testing(
             operational,
@@ -195,6 +223,17 @@ def generate_episodes(
             simulator_config,
             seed=simulator_config.seed.value,
             episode_id="base",
+            customer_ids=base_world.customer_ids,
+            transaction_random_keys=transaction_random_keys,
+        )
+        generate_other_fraud_mechanisms(
+            operational,
+            private,
+            simulator_config,
+            base_world,
+            seed=simulator_config.seed.value,
+            episode_id="base",
+            transaction_random_keys=transaction_random_keys,
         )
         base_labels = generate_label_events(
             operational,
@@ -202,6 +241,7 @@ def generate_episodes(
             simulator_config,
             seed=simulator_config.seed.value,
             episode_id="base",
+            transaction_random_keys=transaction_random_keys,
         )
 
         generated: list[GeneratedEpisode] = []
@@ -232,6 +272,7 @@ def generate_episodes(
                 seed=episode_seed,
                 duration_days=duration_days,
                 world_summary=base_world,
+                transaction_random_keys=transaction_random_keys,
             )
             fraud_summary = generate_card_testing(
                 operational,
@@ -240,6 +281,19 @@ def generate_episodes(
                 seed=episode_seed,
                 episode_id=episode_id,
                 duration_days=duration_days,
+                customer_ids=base_world.customer_ids,
+                transaction_random_keys=transaction_random_keys,
+            )
+            generate_other_fraud_mechanisms(
+                operational,
+                private,
+                simulator_config,
+                base_world,
+                seed=episode_seed,
+                episode_id=episode_id,
+                duration_days=duration_days,
+                include_episode_mechanisms=assignment.template != "clean",
+                transaction_random_keys=transaction_random_keys,
             )
             incident_summary = _inject_template(
                 operational,
@@ -249,6 +303,8 @@ def generate_episodes(
                 assignment,
                 episode_id,
                 episode_seed,
+                base_world,
+                transaction_random_keys,
             )
             label_summary = generate_label_events(
                 operational,
@@ -256,6 +312,7 @@ def generate_episodes(
                 simulator_config,
                 seed=episode_seed,
                 episode_id=episode_id,
+                transaction_random_keys=transaction_random_keys,
             )
 
             config_snapshot = _episode_config_snapshot(

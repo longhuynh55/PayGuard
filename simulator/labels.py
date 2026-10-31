@@ -7,12 +7,12 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from statistics import fmean
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
 from simulator.asof import read_as_of
 from simulator.config import SimulatorConfig
-from simulator.fraud import card_testing_metadata_key
+from simulator.fraud import card_testing_metadata_key, mechanism_metadata_key
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record, utc_timestamp
 
@@ -61,7 +61,7 @@ def label_truth_metadata_key(episode_id: str) -> str:
     return f"{LABEL_TRUTH_METADATA_KEY}:{episode_id}"
 
 
-def _load_card_testing_fraud_ids(
+def _load_card_testing_ids(
     private: sqlite3.Connection, episode_id: str
 ) -> set[str]:
     row = private.execute(
@@ -85,6 +85,28 @@ def _load_card_testing_fraud_ids(
     return fraud_ids
 
 
+def _load_p14_fraud_ids(
+    private: sqlite3.Connection, episode_id: str
+) -> set[str]:
+    card_fraud_ids = _load_card_testing_ids(private, episode_id)
+    fraud_ids = set(card_fraud_ids)
+    mechanisms_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?",
+        (mechanism_metadata_key(episode_id),),
+    ).fetchone()
+    if mechanisms_row is not None:
+        mechanisms = json.loads(mechanisms_row[0])
+        if not isinstance(mechanisms, dict) or mechanisms.get("episode_id") != episode_id:
+            raise ValueError("P1.4 mechanism truth metadata is malformed")
+        for group in mechanisms.get("groups", []):
+            if not isinstance(group, dict) or group.get("role") != "fraud":
+                continue
+            fraud_ids.update(group.get("transaction_ids", []))
+            fraud_ids.update(group.get("incoming_transaction_ids", []))
+            fraud_ids.update(group.get("outgoing_transaction_ids", []))
+    return fraud_ids
+
+
 def _source_for_channel(channel: str) -> str:
     """Choose a source supported by the observed transaction channel."""
     return "chargeback" if channel == "card" else "customer_report"
@@ -97,6 +119,7 @@ def generate_label_events(
     *,
     seed: int | None = None,
     episode_id: str = "base",
+    transaction_random_keys: Mapping[str, str] | None = None,
 ) -> LabelSummary:
     """Append reported labels for transactions in one base or episode stream.
 
@@ -145,14 +168,29 @@ def generate_label_events(
     ]
     if not transactions:
         raise ValueError("P1.3/P1.4 transactions must exist before label generation")
-    fraud_ids = _load_card_testing_fraud_ids(private, episode_id)
+    if transaction_random_keys is not None:
+        missing_draw_keys = sorted(
+            row["txn_id"]
+            for row in transactions
+            if row["txn_id"] not in transaction_random_keys
+        )
+        if missing_draw_keys:
+            raise ValueError(
+                "label generation is missing explicit stable draw keys for transactions: "
+                f"{missing_draw_keys[:3]}"
+            )
+    card_fraud_ids = _load_card_testing_ids(private, episode_id)
+    fraud_ids = _load_p14_fraud_ids(private, episode_id)
     txn_ids = {row["txn_id"] for row in transactions}
     if not fraud_ids <= txn_ids:
         missing = sorted(fraud_ids - txn_ids)
-        raise ValueError(f"card-testing truth references missing transactions: {missing[:3]}")
+        raise ValueError(f"P1.4 fraud truth references missing transactions: {missing[:3]}")
     for row in transactions:
         if row["txn_id"] in fraud_ids and row["channel"] != "card":
-            raise ValueError("card-testing fraud truth must reference card-channel transactions")
+            # Card-testing transactions are validated from their private group
+            # metadata; the other P1.4 mechanisms use their configured channels.
+            if row["txn_id"] in card_fraud_ids:
+                raise ValueError("card-testing fraud truth must reference card-channel transactions")
 
     label_config = config.label_reporting
     report_probability = label_config.probability_reported.value
@@ -172,7 +210,14 @@ def generate_label_events(
         for transaction in transactions:
             txn_id = transaction["txn_id"]
             true_label = "fraud" if txn_id in fraud_ids else "legit"
-            report_rng = keyed_rng(run_seed, "p1.labels.reporting", txn_id)
+            random_key = (
+                transaction_random_keys[txn_id]
+                if transaction_random_keys is not None
+                else txn_id
+            )
+            if not isinstance(random_key, str) or not random_key:
+                raise ValueError(f"label RNG draw key is invalid for transaction {txn_id}")
+            report_rng = keyed_rng(run_seed, "p1.labels.reporting", random_key)
             will_report = report_rng.random() < report_probability
             delay_days: int | None = None
             source: str | None = None
@@ -180,7 +225,7 @@ def generate_label_events(
             available_at: str | None = None
 
             if will_report:
-                delay_rng = keyed_rng(run_seed, "p1.labels.delay_days", txn_id)
+                delay_rng = keyed_rng(run_seed, "p1.labels.delay_days", random_key)
                 delay_days = delay_rng.randint(minimum_delay, maximum_delay)
                 reported_at = utc_timestamp(
                     _parse_timestamp(transaction["event_at"])
@@ -211,6 +256,7 @@ def generate_label_events(
                 {
                     "txn_id": txn_id,
                     "episode_id": transaction["episode_id"],
+                    "random_key": random_key,
                     "event_at": utc_timestamp(transaction["event_at"]),
                     "true_label": true_label,
                     "reported": will_report,

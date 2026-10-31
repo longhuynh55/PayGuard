@@ -61,12 +61,18 @@ def _assert_generated_invariants(result: dict, config: SimulatorConfig) -> None:
     transactions = content["transactions"]
     events = content["transaction_events"]
     assert result["foreign_key_errors"] == []
-    assert len(customers) == config.scale_for("smoke").customer_count.value
+    assert len(customers) == (
+        config.scale_for("smoke").customer_count.value
+        + config.world.legitimate_new_accounts_per_base_history.value
+    )
     assert len(merchants) == config.scale_for("smoke").merchant_count.value
     assert transactions
     assert len(events) == result["transactions"].lifecycle_event_count
     assert all(row["episode_id"] == "base" for row in customers + merchants + transactions + events)
     customer_ids = {row["customer_id"] for row in customers}
+    legitimate_new_ids = set(result["transactions"].legitimate_new_customer_ids)
+    assert len(legitimate_new_ids) == config.world.legitimate_new_accounts_per_base_history.value
+    assert legitimate_new_ids <= customer_ids
     merchant_ids = {row["merchant_id"] for row in merchants}
     transactions_by_id = {row["txn_id"]: row for row in transactions}
     assert all(row["customer_id"] in customer_ids for row in transactions)

@@ -134,6 +134,20 @@ world:
     provenance:
       kind: assumption
       reference: P1.3 round 2 world capability; no timing estimate is claimed.
+  legitimate_device_change_probability:
+    value: 0.03
+    unit: probability per transaction
+    rationale: Synthetic chance that a legitimate account uses a previously unseen device token on a transaction; a new device alone is not fraud truth.
+    provenance:
+      kind: assumption
+      reference: P1.4 background control for legitimate device changes; no population rate is claimed.
+  legitimate_new_accounts_per_base_history:
+    value: 2
+    unit: new legitimate accounts in the base history
+    rationale: Add a small synthetic cohort of ordinary customer accounts with merchant payment history early after history start so account creation is not unique to mule behavior and does not censor the monitoring reference or episode samples.
+    provenance:
+      kind: assumption
+      reference: P1.4 round 2 review fix; a minimal synthetic control cohort, not an estimate of account-opening rates.
   customer_segments:
     value: [retail]
     unit: segment codes
@@ -363,6 +377,184 @@ fraud:
       provenance:
         kind: assumption
         reference: P1.4 simulator mechanism assumption; no behavioral estimate is claimed.
+  near_threshold_minimum_amount:
+    value: 8000000
+    unit: integer VND
+    rationale: Lower bound for non-card-testing fraud amounts near the declared 10 million VND reference threshold.
+    provenance:
+      kind: assumption
+      reference: P1.4 synthetic fraud amount band; no transaction amount distribution is claimed.
+  near_threshold_maximum_amount:
+    value: 12000000
+    unit: integer VND
+    rationale: Upper bound for non-card-testing fraud amounts near the declared 10 million VND reference threshold.
+    provenance:
+      kind: assumption
+      reference: P1.4 synthetic fraud amount band; no transaction amount distribution is claimed.
+  ato:
+    campaign_interval_days:
+      value: 30
+      unit: local calendar days between ATO patterns
+      rationale: Distributes a small number of synthetic takeover examples across base history and episode futures.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no attack prevalence is claimed.
+    start_offset_days:
+      value: 10
+      unit: local calendar days after the ATO campaign start
+      rationale: Spreads takeover transactions across episode days instead of concentrating multiple mechanisms on one date.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no attack prevalence is claimed.
+    start_hour_local:
+      value: 11
+      unit: local wall-clock hour in Asia/Ho_Chi_Minh
+      rationale: Fixed synthetic local start hour for takeover transactions.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no time-of-day estimate is claimed.
+    transaction_count:
+      value: 2
+      unit: transactions per ATO pattern
+      rationale: Two near-threshold merchant payments expose a repeated device/session signature.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no attack-size estimate is claimed.
+    transaction_spacing_days:
+      value: 5
+      unit: local calendar days between ATO pattern transactions
+      rationale: Keeps repeated takeover spending observable while spreading synthetic volume over the episode.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no attack prevalence is claimed.
+    device_signature_probability:
+      value: 0.85
+      unit: probability in [0, 1]
+      rationale: A synthetic takeover uses a previously unseen device token with this probability; signatures can be absent.
+      provenance:
+        kind: assumption
+        reference: P1.4 probabilistic ATO signature assumption; no observed device-risk rate is claimed.
+    approval_probability:
+      value: 0.75
+      unit: probability in [0, 1]
+      rationale: Synthetic chance that an attempted takeover transaction is authorized.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; not an issuer estimate.
+    channel:
+      value: wallet
+      unit: channel code
+      rationale: Represent ATO spending through the wallet channel without adding an operational mechanism field.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no channel prevalence is claimed.
+  collusion:
+    campaign_interval_days:
+      value: 90
+      unit: local calendar days between collusion patterns
+      rationale: Sparse coordinated transfers in the pre-drift shared history.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no collusion prevalence is claimed.
+    start_hour_local:
+      value: 13
+      unit: local wall-clock hour in Asia/Ho_Chi_Minh
+      rationale: Fixed synthetic local start hour for coordinated transfers.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no time-of-day estimate is claimed.
+    sender_count:
+      value: 2
+      unit: sender accounts per collusion pattern
+      rationale: Two accounts contribute to a shared mule before the coordinated cash-out.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no group-size estimate is claimed.
+    transfer_spacing_minutes:
+      value: 5
+      unit: minutes between incoming transfers
+      rationale: Separates transfer event times so the chain has an unambiguous order.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no timing estimate is claimed.
+    cashout_delay_minutes:
+      value: 30
+      unit: minutes after each incoming transfer
+      rationale: Allows each incoming transfer to settle before its paired outbound transfer.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no timing estimate is claimed.
+  social_engineering:
+    campaign_interval_days:
+      value: 45
+      unit: local calendar days between social-engineering patterns
+      rationale: Distributes receiving-account and cash-out examples across the shared history and episode futures.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no attack prevalence is claimed.
+    start_offset_days:
+      value: 8
+      unit: local calendar days after the episode or history start
+      rationale: Leaves a complete seven-day account-history window before the mule's first receipt, while the account remains new under the 30-day recipient signal.
+      provenance:
+        kind: assumption
+        reference: P1.4 recipient-signal observation-window assumption; no attack prevalence is claimed.
+    new_account_warmup_days:
+      value: 7
+      unit: local calendar days before the first receipt
+      rationale: Makes the mule account observable for the full seven-day history window before funds arrive.
+      provenance:
+        kind: contract
+        reference: docs/data.md, section 1; docs/model.md, section 1.
+    start_hour_local:
+      value: 14
+      unit: local wall-clock hour in Asia/Ho_Chi_Minh
+      rationale: Fixed synthetic local start hour for victim transfers.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no time-of-day estimate is claimed.
+    fan_in_count:
+      value: 5
+      unit: distinct senders per recipient pattern
+      rationale: Gives mule and legitimate household-business control recipients the same high fan-in support.
+      provenance:
+        kind: assumption
+        reference: P1.4 synthetic control construction; not a population estimate.
+    older_sender_minimum_count:
+      value: 2
+      unit: senders age band 55+ per social-engineering group
+      rationale: Ensures an observable older-customer transfer share while keeping the same senders in the benign household-business control.
+      provenance:
+        kind: assumption
+        reference: P1.4 social-engineering feature support; no victim-age prevalence is claimed.
+    incoming_spacing_days:
+      value: 1
+      unit: local calendar days between incoming transfers
+      rationale: Preserves a five-sender fan-in within seven days while distributing synthetic volume across dates.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator schedule assumption; no attack prevalence is claimed.
+    cashout_delay_minutes:
+      value: 30
+      unit: minutes after each incoming transfer
+      rationale: Paired transfers leave the recipient after settlement and within the configured mule capability window.
+      provenance:
+        kind: assumption
+        reference: P1.4 simulator mechanism assumption; no timing estimate is claimed.
+    business_control_minimum_amount:
+      value: 100000
+      unit: integer VND
+      rationale: Lower bound for benign household-business receipts in the fan-in control.
+      provenance:
+        kind: assumption
+        reference: P1.4 benign control assumption; no business amount distribution is claimed.
+    business_control_maximum_amount:
+      value: 500000
+      unit: integer VND
+      rationale: Upper bound for benign household-business receipts in the fan-in control.
+      provenance:
+        kind: assumption
+        reference: P1.4 benign control assumption; no business amount distribution is claimed.
 
 label_reporting:
   maturity_horizon_days:
