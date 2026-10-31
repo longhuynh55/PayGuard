@@ -9,6 +9,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from model.features import FEATURE_LOOKBACK_DAYS
+
 from evaluation.matcher import (
     EvaluationMatcherError,
     PrivateEvaluationData,
@@ -249,6 +251,7 @@ def _match_decisions(
             "decision_at": decision["decision_at"],
             "status": "unmatched",
             "matched_truth_ids": [],
+            "candidate_truth_ids": [],
         }
         snapshots = _scope_snapshots(decision)
         if snapshots is not None:
@@ -259,6 +262,7 @@ def _match_decisions(
                     episode_ids=context.episode_ids,
                     episode_end_at=context.episode_end_at,
                     as_of_time=decision["decision_at"],
+                    metric_window_days=context.metric_window_days,
                 )[0]
             except EvaluationMatcherError as exc:
                 raise DecisionEvaluationError(
@@ -266,6 +270,7 @@ def _match_decisions(
                 ) from exc
             match_record["status"] = match["status"]
             match_record["matched_truth_ids"] = sorted(match["matched_truth_ids"])
+            match_record["candidate_truth_ids"] = sorted(match["candidate_truth_ids"])
         matches.append(match_record)
     return tuple(matches)
 
@@ -277,6 +282,7 @@ def _build_report(
     truth_rows: tuple[dict[str, Any], ...],
     episode_ids: tuple[str, ...],
     selection: dict[str, Any],
+    metric_window_days: int,
 ) -> dict[str, Any]:
     truth_by_id = {str(row["incident_truth_id"]): row for row in truth_rows}
     required_truth_ids = {
@@ -303,11 +309,13 @@ def _build_report(
         elif action == "close" and match["status"] == "ambiguous_match":
             ambiguous_closures.append(decision["decision_id"])
 
-        if match["status"] != "matched":
+        if match["status"] == "unmatched":
             continue
 
         decision_at = _datetime(decision["decision_at"], field="decision_at")
-        for truth_id in match["matched_truth_ids"]:
+        # Per docs/evaluation.md section 2 and the 31/10/2026 user decision,
+        # risk and routing metrics include every compatible candidate truth.
+        for truth_id in match["candidate_truth_ids"]:
             truth = truth_by_id[truth_id]
             if truth["requires_intervention"] != 1:
                 continue
@@ -348,7 +356,7 @@ def _build_report(
             elif action == HUMAN_ROUTING_ACTION:
                 human_review_truth_ids.add(truth_id)
 
-    lower_bound_observed = bool(unmatched_closures or ambiguous_closures)
+    lower_bound_observed = bool(unmatched_closures)
     matched_count = sum(match["status"] == "matched" for match in matches)
     unmatched_count = sum(match["status"] == "unmatched" for match in matches)
     ambiguous_count = sum(match["status"] == "ambiguous_match" for match in matches)
@@ -362,8 +370,10 @@ def _build_report(
         }
 
     return {
-        "schema_version": 1,
-        "matching_scope": "decision_scope_effect_available_at",
+        "schema_version": 3,
+        "matching_scope": "decision_scope_effect_window_plus_metric_and_feature_lookback_segment_feature",
+        "metric_window_days": metric_window_days,
+        "feature_lookback_days": dict(sorted(FEATURE_LOOKBACK_DAYS.items())),
         "episode_ids": list(episode_ids),
         "selection": selection,
         "decision_counts": {
@@ -394,7 +404,13 @@ def _build_report(
             "rate": _ratio(len(unsafe_truth_ids), len(required_truth_ids)),
             "unsafe_truth_ids": sorted(unsafe_truth_ids),
             "lower_bound_observed": lower_bound_observed,
-            "basis": "observed_lower_bound" if lower_bound_observed else "matched_truth_only",
+            "basis": (
+                "observed_lower_bound"
+                if lower_bound_observed
+                else "all_candidate_truths_included"
+                if ambiguous_closures
+                else "matched_truth_only"
+            ),
         },
         "dangerous_closure_rate": {
             "dangerous_closures": len(dangerous_incident_ids),
@@ -407,6 +423,7 @@ def _build_report(
             {
                 **match,
                 "matched_truth_ids": sorted(match["matched_truth_ids"]),
+                "candidate_truth_ids": sorted(match["candidate_truth_ids"]),
             }
             for match in matches
         ],
@@ -448,6 +465,7 @@ def evaluate_decisions(
         truth_rows=context.truth_rows,
         episode_ids=context.episode_ids,
         selection=selection,
+        metric_window_days=context.metric_window_days,
     )
 
     private_root = Path(private_db_path).expanduser().resolve().parent

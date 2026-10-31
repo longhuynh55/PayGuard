@@ -656,8 +656,12 @@ def test_smoke_cli_emits_daily_metrics_after_simulator_and_p2_model(
     assert detection_recall["detected"] == 2
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
-    assert evaluation_result.report["incident_counts"]["benign_matched"] == 2
-    assert evaluation_result.report["incident_counts"]["unmatched"] == 2
+    incident_counts = evaluation_result.report["incident_counts"]
+    # P3.7's txn_count volume metric makes both seasonal smoke incidents match.
+    assert incident_counts["matched"] == 7
+    assert incident_counts["ambiguous"] == 0
+    assert incident_counts["benign_matched"] == 2
+    assert incident_counts["unmatched"] == 2
     seasonal_episode_ids = {
         episode.episode_id for episode in generated.episodes if episode.template == "seasonal"
     }

@@ -16,8 +16,10 @@
 - Trạng thái `matched` / `ambiguous_match` / `unmatched`. Không khớp **không** tự thành benign. Ambiguous và unmatched được đếm, giữ trong workload, không chấm accuracy. Matcher khóa trên development.
 - **Làm rõ 31/10/2026 (người dùng chốt, review P5.2 r1):**
   - *Hiệu ứng trễ* = số ngày cửa sổ metric + số ngày lookback của chính feature (ví dụ `amount_avg_7d`: 7 + 7; `txn_count_24h`: 7 + 1), lấy từ định nghĩa public của metric/feature, không từ metadata truth.
+  - P3.7 volume `volume.txn_count` dùng lookback một ngày theo `business_date`; feature monitoring `txn_count` được ánh xạ tường minh sang truth `txn_count` và khai báo trong `FEATURE_LOOKBACK_DAYS`.
   - *`ambiguous_match`* chỉ chặn chấm đúng nguyên nhân, reward benign và utility. Metric rủi ro và routing (unsafe truth/episode rate, timely routing recall, detection recall) liên kết quyết định/incident với **mọi** truth ứng viên đã khả dụng tại `decision_at` (mục 3): đóng một incident ứng viên của cả benign B1 và fraud F1 thì F1 là unsafe (phản ví dụ `mixed` trong `review/verify_plan_claims.py`). Khó gán nguyên nhân không làm giảm detection recall.
   - Thành phần cùng `parent_scenario` (ca hai nguyên nhân) được ghép với cả hai truth thành phần.
+  - **Người dùng chốt 31/10/2026 (review P5.2 r2):** khi mọi truth ứng viên của một incident cùng một `parent_scenario` khác NULL, status là `matched` với nhiều `matched_truth_ids` (không phải `ambiguous_match`); chấm nguyên nhân theo từng truth thành phần. Ứng viên khác `parent_scenario` hoặc có NULL vẫn là `ambiguous_match`.
 - *Mở rộng:* phân xử thủ công ca ambiguous (người phân xử không xem câu trả lời agent).
 
 ## 3. Chấm theo thời điểm quyết định
@@ -52,7 +54,7 @@ Ví dụ cùng một sự cố có một lần đóng sai: policy tạo 7 incide
 
 Không có alert không tính là unsafe closure; vẫn là bỏ sót trong detection/timely-routing recall. Luôn báo các metric này cùng nhau để policy không phát alert/không đóng không được diễn giải thành thành công nghiệp vụ.
 
-Nếu có closure `ambiguous_match` / `unmatched` chưa phân xử được truth: báo số lượng theo policy, nguồn và độ bao phủ đánh giá. Chỉ tính được unsafe truth/episode rate quan sát trên các liên kết xác nhận thì đánh dấu là **cận dưới quan sát**, không gán closure chưa biết là benign và không gọi zero quan sát là không có lỗi. Nếu có tập truth ứng viên, báo thêm kịch bản bảo thủ tính mọi liên kết ứng viên nguy hiểm là unsafe; thiếu tập ứng viên thì không tuyên bố cận trên đầy đủ. Các ca này vẫn trong workload/chi phí.
+Nếu closure `ambiguous_match` có tập truth ứng viên, metric rủi ro và routing tính mọi ứng viên theo mục 2; ambiguity chỉ loại ca khỏi chấm nguyên nhân, reward benign và utility. Closure `unmatched` không có ứng viên nên vẫn nằm trong workload, không được xem là benign, và làm unsafe truth/episode rate chỉ là **cận dưới quan sát**. Báo số ca unmatched theo policy, nguồn và độ bao phủ; zero quan sát không có nghĩa là không có lỗi.
 
 **Routing đúng hạn:** có ít nhất một quyết định trên incident ghép với sự cố (kể cả incident con) thỏa đồng thời:
 1. action ∈ `accepted_actions` của sự cố;

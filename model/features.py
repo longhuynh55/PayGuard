@@ -26,6 +26,15 @@ FEATURE_NAMES = (
     "history_window_observed_7d",
 )
 
+# Public lookbacks used by monitoring and the evaluator. Model features mirror
+# the SQL below; `txn_count` is the one-business-day P3.7 volume metric from
+# docs/data.md.
+FEATURE_LOOKBACK_DAYS = {
+    "txn_count_24h": 1,
+    "amount_avg_7d": 7,
+    "txn_count": 1,
+}
+
 _TRANSACTION_COLUMNS = (
     "txn_id",
     "episode_id",
@@ -135,7 +144,7 @@ def _create_source_tables(
         )
 
 
-_FEATURE_QUERY = """
+_FEATURE_QUERY = f"""
 SELECT
     e.position,
     target.txn_id IS NOT NULL AS target_available,
@@ -155,7 +164,7 @@ SELECT
         WHERE h.customer_id = target.customer_id
           AND h.episode_id IN ('base', e.episode_id)
           AND h.available_at <= e.created_at
-          AND h.created_at >= e.created_at - INTERVAL '24 hours'
+          AND h.created_at >= e.created_at - INTERVAL '{FEATURE_LOOKBACK_DAYS['txn_count_24h'] * 24} hours'
           AND h.created_at < e.created_at
           AND h.txn_id <> e.txn_id
     ) AS txn_count_24h,
@@ -185,7 +194,7 @@ SELECT
         WHERE h.customer_id = target.customer_id
           AND h.episode_id IN ('base', e.episode_id)
           AND h.available_at <= e.created_at
-          AND h.created_at >= e.created_at - INTERVAL '7 days'
+          AND h.created_at >= e.created_at - INTERVAL '{FEATURE_LOOKBACK_DAYS['amount_avg_7d']} days'
           AND h.created_at < e.created_at
           AND h.txn_id <> e.txn_id
     ) AS amount_avg_7d,

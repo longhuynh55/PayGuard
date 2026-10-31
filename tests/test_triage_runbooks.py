@@ -312,6 +312,88 @@ def test_median_ratio_targets_route_data_ticket(tmp_path, ratio: float) -> None:
         store.close()
 
 
+def test_single_transaction_days_block_median_candidate_from_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        before_count=1,
+        after_count=1,
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pending"
+        assert unit["scope_match"] is True
+        assert unit["details"]["evaluation_status"] == "insufficient"
+        assert unit["details"]["matched_transition"][
+            "median_ratio_after_divided_by_before"
+        ] == 100
+        assert unit["details"]["change_detection"]["small_sample"] == {
+            "status": "insufficient",
+            "n_min": 2,
+            "under_minimum_days": [
+                {"business_date": "2026-02-01", "transaction_count": 1},
+                {"business_date": "2026-02-02", "transaction_count": 1},
+            ],
+            "daily_transaction_counts": [
+                {"business_date": "2026-02-01", "transaction_count": 1},
+                {"business_date": "2026-02-02", "transaction_count": 1},
+            ],
+        }
+        decision = _gate(incident, checks)
+        assert decision["action"] == "human_review"
+        assert decision["evidence_status"] == "insufficient"
+    finally:
+        store.close()
+
+
+def test_dense_median_candidate_still_routes_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=1_000_000,
+        before_count=8,
+        after_count=8,
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pass"
+        assert unit["details"]["change_detection"]["small_sample"]["status"] == "pass"
+        assert unit["details"]["matched_transition"]["before_transaction_count"] == 8
+        assert unit["details"]["matched_transition"]["after_transaction_count"] == 8
+        assert _gate(incident, checks)["action"] == "data_ticket"
+    finally:
+        store.close()
+
+
+def test_single_transaction_days_block_null_candidate_from_data_ticket(tmp_path) -> None:
+    store, incident = _fixture(
+        tmp_path,
+        before_amount=10_000,
+        after_amount=10_000,
+        before_count=1,
+        after_count=1,
+        after_null_count=1,
+    )
+    try:
+        checks = check_unit_or_null_change(store.operational, incident)
+        unit = checks["unit_or_null_change"]
+        assert unit["status"] == "pending"
+        assert unit["details"]["change_detection"]["null_rate_increase"][
+            "status"
+        ] == "insufficient"
+        assert unit["details"]["change_detection"]["small_sample"][
+            "status"
+        ] == "insufficient"
+        decision = _gate(incident, checks)
+        assert decision["action"] == "human_review"
+        assert decision["evidence_status"] == "insufficient"
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("after", "expected_status"),
     [
@@ -732,9 +814,8 @@ def _smoke_runbook_context(tmp_path_factory):
         known_false_positive = latest_by_id.get(
             _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
         )
-        assert known_false_positive is not None
-        assert known_false_positive["episode_id"] == "ep-0001"
-        assert known_false_positive["feature"] == "amount_avg_7d"
+        # P3.7 removes the clean background alert that created this old incident.
+        assert known_false_positive is None
         yield {
             "store": store,
             "simulator_config": simulator_config,
@@ -785,10 +866,15 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         assert isinstance(window_end_raw, str)
         window_start = date.fromisoformat(window_start_raw)
         window_end = date.fromisoformat(window_end_raw)
-        window_contains_jump = (
-            window_start <= previous_jump_day and jump_day <= window_end
-        )
+        # The source metric window begins on the first post-T0 day; the runbook
+        # still compares that day with the immediately preceding observed day.
+        window_contains_jump = window_start <= jump_day <= window_end
         if window_contains_jump:
+            transition = unit_check["details"].get("matched_transition", {})
+            assert transition.get("before_last_business_date") == previous_jump_day.isoformat()
+            assert transition.get("after_start_business_date") == jump_day.isoformat()
+            assert transition.get("before_transaction_count", 0) >= 2
+            assert transition.get("after_transaction_count", 0) >= 2
             jump_decisions_by_episode[incident["episode_id"]].append(
                 (incident, unit_check, decision)
             )
@@ -796,6 +882,13 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         assert decision["action"] != "close"
         if unit_check["status"] == "pass":
             assert decision["action"] == "data_ticket"
+        elif unit_check["status"] == "pending":
+            # User decision 31/10/2026: later pipeline incidents without the injector jump
+            # may be small-sample insufficient and must remain with human review.
+            assert not window_contains_jump
+            assert unit_check["details"]["evaluation_status"] == "insufficient"
+            assert decision["action"] == "human_review"
+            assert decision["action"] not in {"data_ticket", "close"}
         else:
             assert unit_check["status"] == "not_applicable"
             comparisons = unit_check["details"].get("comparisons", [])
@@ -805,6 +898,7 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
                 for item in comparisons
             )
             assert decision["action"] == "human_review"
+            assert decision["action"] not in {"data_ticket", "close"}
 
     first_jump_decisions = []
     for episode_id in sorted(pipeline_ids):
@@ -821,26 +915,19 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         first_jump_decisions.append(first_jump_decision)
 
     assert len(first_jump_decisions) == len(pipeline_ids) == 2
-    assert len(pipeline_decisions) == 4
+    # P3.7 re-derived the amount alert windows, producing five amount incidents
+    # across the two pipeline episodes; each still follows the BACKLOG-5 gate.
+    assert len(pipeline_decisions) == 5
     for incident in latest_by_id.values():
         if incident["episode_id"] not in non_pipeline_ids:
-            continue
-        if incident["incident_id"] == _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID:
             continue
         checks = check_unit_or_null_change(store.operational, incident)
         assert checks["unit_or_null_change"]["status"] == "not_applicable"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="unit_or_null_change lacks minimum transaction support; fixed by BACKLOG-5",
-)
-def test_clean_ep0001_card_window_minimum_support_false_positive(
+def test_clean_ep0001_background_false_positive_is_absent(
     _smoke_runbook_context,
 ) -> None:
-    store = _smoke_runbook_context["store"]
-    incident = _smoke_runbook_context["latest_by_id"][
-        _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID
-    ]
-    checks = check_unit_or_null_change(store.operational, incident)
-    assert checks["unit_or_null_change"]["status"] == "not_applicable"
+    latest_by_id = _smoke_runbook_context["latest_by_id"]
+    assert _KNOWN_MINIMUM_SUPPORT_FALSE_POSITIVE_ID not in latest_by_id
+    assert not any(row["episode_id"] == "ep-0001" for row in latest_by_id.values())
