@@ -17,6 +17,7 @@ from triage.llm import (
     LLMResult,
     load_llm_config,
 )
+from triage.cost_ledger import DurableCostLedger
 from triage.tools import run_sql
 
 
@@ -316,6 +317,9 @@ def build_agent_provider(
     operational_db: str | Path,
     *,
     llm_config_path: str | Path = DEFAULT_CONFIG_PATH,
+    cost_ledger: DurableCostLedger | None = None,
+    ledger_policy: str | None = None,
+    cost_cap_usd: float | None = None,
 ) -> AgentProposalProvider:
     """Construct the explicitly selected CLI provider; network access is opt-in."""
     if provider_name == "unconfigured":
@@ -327,16 +331,28 @@ def build_agent_provider(
             model_id="fake/payguard-p4-round1",
             canonical_slug="fake/payguard-p4-round1",
             retry_count=0,
+            max_total_cost_usd=(
+                cost_cap_usd if cost_cap_usd is not None else base_config.max_total_cost_usd
+            ),
         )
         fake_client = FakeLLMClient(
             config=fake_config,
             response_factory=_fake_agent_response,
+            cost_ledger=cost_ledger,
+            ledger_policy=ledger_policy,
         )
         return OneStepAgent(operational_db, fake_client)
     if provider_name == "openrouter":
+        llm_config = load_llm_config(llm_config_path)
+        if cost_cap_usd is not None:
+            llm_config = replace(llm_config, max_total_cost_usd=cost_cap_usd)
         return OneStepAgent(
             operational_db,
-            LLMClient(config_path=llm_config_path),
+            LLMClient(
+                config=llm_config,
+                cost_ledger=cost_ledger,
+                ledger_policy=ledger_policy,
+            ),
         )
     raise ValueError(f"unsupported agent provider: {provider_name!r}")
 

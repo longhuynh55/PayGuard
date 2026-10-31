@@ -100,7 +100,20 @@ Cùng monitoring, snapshot, dữ liệu as-of:
 
 Có bảng và biểu đồ cuối cùng cho README: metric rủi ro trên tập truth/episode cố định, metric vận hành kèm số incident con, giới hạn quyền tự đóng của agent, mẫu số/độ bao phủ đánh giá và khoảng bất định phù hợp, kể cả kết quả âm tính. Không yêu cầu agent phải thắng baseline.
 
-## 9. CLI chấm `decisions` và chọn cặp (P4.5)
+## 9. CLI chấm `decisions` và chọn cặp (P4.5, P5.1)
+
+Lệnh chung vẫn là `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Có thể lặp `--episode-role development|calibration|test` để giới hạn role; không truyền thì chọn mọi role có trong run. `--out <path>` chọn nơi ghi report. Run P4 ngoài harness đọc operational DB trong `<run-dir>` và mặc định ghi `private/reports/p4_5_decisions.json`.
+
+### Khi `--run` trỏ vào policy của harness P5.1
+
+- Truyền `--run <benchmark-root>/policies/<policy>`. Evaluator đọc operational data từ policy copy và chỉ đọc truth từ `<benchmark-root>/base/private/evaluator.sqlite`. `--run <benchmark-root>/base` bị từ chối vì BASE không phải policy run.
+- Không truyền `--out` thì report là `<benchmark-root>/base/private/reports/p5_1/<policy>/decisions_cli.json`. Report tùy chỉnh phải resolve bên trong `<benchmark-root>/base/private/reports/`; đường dẫn thoát khỏi private report tree bị từ chối.
+- Lệnh mặc định chọn mọi role. Trước khi nạp truth, lock guard yêu cầu `<state-dir>/locks/<profile>/prompt-rule.json` cho calibration và `<state-dir>/locks/<profile>/policy/<policy>.json` cho test; hash hiện tại phải khớp marker, và policy lock phải khớp `policy_version`/`model_slug`. Chỉ định role tường minh bằng `--episode-role` cho phép bỏ qua lock của các role không chọn. Development không cần lock. State directory và lock artifacts được định nghĩa tại [data.md §9](data.md#9-p51-harness-artifacts).
+- Quy tắc chọn cặp, selector, quyết định rule và số dòng bị loại trong harness dùng nguyên [quy tắc P4.5](#chọn-cặp-trong-run-p4).
+- Nếu policy copy chưa có decision rows, harness vẫn tạo report rỗng cho identity policy đã chọn: số quyết định bằng 0, truth được lấy theo role đã chọn và metric không có mẫu số được ghi `null`/`NA`. Run ngoài harness không suy ra policy từ một report history; dùng `--policy-version` khi một decision set rỗng cần identity cụ thể.
+- Một report chỉ thuộc một tập role và một cặp policy/model. Chọn output path khác hoặc role khác để giữ các báo cáo song song.
+
+### Chọn cặp trong run P4
 
 - Lệnh: `python -m evaluation decisions --run <run-dir> [--policy-version V] [--model-slug S]`. Đọc `operational/observations.sqlite` ở chế độ read-only, ghi báo cáo vào `private/reports/p4_5_decisions.json`, in `policy_version` và `model_slug` đã chọn.
 - **Một báo cáo chỉ gồm một cặp `(policy_version, model_slug)`.** Quyết định agent trong DB tạo danh sách cặp ứng viên. Nếu có nhiều hơn một cặp mà không truyền selector, lệnh từ chối: thoát mã 2, liệt kê các cặp, không ghi báo cáo.
@@ -108,3 +121,5 @@ Có bảng và biểu đồ cuối cùng cho README: metric rủi ro trên tập
 - Quyết định `rule` (`model_slug` NULL) luôn được tính cho `policy_version` đã chọn. Quyết định của policy khác và quyết định agent của cặp khác không được tính; số bị loại ghi ở `selection.excluded_decision_count`.
 - DB không có quyết định agent: cặp ứng viên là các `policy_version` của rule; có nhiều policy thì cần `--policy-version`.
 - Báo cáo có khối `selection` gồm `policy_version`, `model_slug` (NULL khi cặp đã chọn là agent chưa cấu hình hoặc chỉ có rule) và `excluded_decision_count`. Tên file không đổi theo cặp, nên chạy cặp khác trên cùng run-dir sẽ ghi đè báo cáo trước; `selection` cho biết báo cáo thuộc cặp nào.
+
+Hành vi `triage run`/`triage measure` trong policy directory harness được mô tả tại [triage.md](triage.md#9-cli-trong-p51-harness); lệnh standalone cũng kiểm tra run identity và policy manifest trước khi thao tác.
