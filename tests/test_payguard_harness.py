@@ -25,7 +25,7 @@ from payguard.identity import (
     record_role_touches,
 )
 from simulator.schema import PRIVATE_TABLES
-from triage.cost_ledger import CostLimitExceeded, DurableCostLedger
+from triage.cost_ledger import CostLedgerError, CostLimitExceeded, DurableCostLedger
 from triage.llm import FakeLLMClient, LLMClient, _RequestFailure, load_llm_config
 from triage.__main__ import main as triage_main
 
@@ -238,30 +238,13 @@ def test_two_policies_use_frozen_shared_base_and_resume_without_overwrite(
         )
 
 
-@pytest.mark.parametrize(
-    ("command", "source_path", "before", "after"),
-    [
-        (
-            "run",
-            ROOT / "configs/triage.yaml",
-            b"policy_version: payguard.triage.p4.round2.v1",
-            b"policy_version: payguard.triage.p4.round2.v9",
-        ),
-        (
-            "measure",
-            ROOT / "triage/agent.py",
-            b"offline provider choices",
-            b"offline provider variants",
-        ),
-    ],
-)
+@pytest.mark.parametrize(("command", "mutation"), [("run", "policy_version"), ("measure", "code_hash")])
 def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     command: str,
-    source_path: Path,
-    before: bytes,
-    after: bytes,
+    mutation: str,
 ) -> None:
     root = tmp_path / "harness"
     policy_name = "rule_agent_fake"
@@ -271,7 +254,12 @@ def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
     hashes = identity.current_hashes(benchmark_root=root)
     identity._atomic_write_json(
         root / "harness-manifest.json",
-        {"schema_version": 1, "profile": "smoke", "hashes": hashes},
+        {
+            "schema_version": 1,
+            "profile": "smoke",
+            "state_dir": str(benchmark_state_directory(root, create=False)),
+            "hashes": hashes,
+        },
     )
     base_fingerprint = "a" * 64
     identity._atomic_write_json(
@@ -291,17 +279,32 @@ def test_triage_cli_run_and_measure_refuse_real_identity_mutations(
     )
     identity._atomic_write_json(policy_dir / "run-manifest.json", run_manifest)
 
-    original = source_path.read_bytes()
-    assert before in original
-    source_path.write_bytes(original.replace(before, after, 1))
-    try:
-        args = [command, "--run", str(policy_dir), "--agent-provider", "fake"]
-        if command == "measure":
-            args.extend(("--incidents", "1", "--out", str(tmp_path / "measure.json")))
-        assert triage_main(args) == 2
-        assert "harness resume refused: current code/config/prompt/sampling hashes" in capsys.readouterr().err
-    finally:
-        source_path.write_bytes(original)
+    if mutation == "policy_version":
+        current_version = identity.policy_identity(policy_name)["policy_version"]
+        assert isinstance(current_version, str) and current_version
+        changed_version = f"{current_version}-r2mut"
+        original_loader = identity.load_triage_config
+        monkeypatch.setattr(
+            identity,
+            "load_triage_config",
+            lambda path: {
+                **original_loader(path),
+                "policy_version": changed_version,
+            },
+        )
+        expected_error = "policy resume refused: manifest mismatch"
+        monkeypatch.setattr(harness, "_assert_base_is_frozen", lambda *_args, **_kwargs: None)
+    else:
+        changed_hashes = {**hashes, "code_hash": "f" * 64}
+        monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: changed_hashes)
+        monkeypatch.setattr(harness, "current_hashes", lambda **_kwargs: changed_hashes)
+        expected_error = "harness resume refused: current code/config/prompt/sampling hashes"
+
+    args = [command, "--run", str(policy_dir), "--agent-provider", "fake"]
+    if command == "measure":
+        args.extend(("--incidents", "1", "--out", str(tmp_path / "measure.json")))
+    assert triage_main(args) == 2
+    assert expected_error in capsys.readouterr().err
 
 
 def test_benchmark_cost_cap_is_configured_from_master_plan() -> None:
@@ -317,8 +320,6 @@ def test_lock_refuses_dirty_tree_and_role_access_requires_current_hashes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "locked-run"
-    original_current_hashes = identity.current_hashes
-    monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: {"git_dirty": False})
     for dirty_entry in (
         ((" M", "triage/agent.py"),),
         (("??", "data/locked-run/generated.json"),),
@@ -327,7 +328,6 @@ def test_lock_refuses_dirty_tree_and_role_access_requires_current_hashes(
         with pytest.raises(RunIdentityError, match="uncommitted changes"):
             create_lock(root, "prompt-rule")
 
-    monkeypatch.setattr(identity, "current_hashes", original_current_hashes)
     monkeypatch.setattr(identity, "_dirty_entries", lambda: ())
     create_lock(root, "prompt-rule")
     assert_role_access(
@@ -347,6 +347,113 @@ def test_lock_refuses_dirty_tree_and_role_access_requires_current_hashes(
             role_episode_ids={"calibration": ("ep-0002",)},
             policy_name=None,
         )
+
+
+def test_lock_identity_ignores_git_metadata_but_rejects_runtime_hash_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "lock-identity"
+    monkeypatch.setattr(identity, "_dirty_entries", lambda: ())
+    lock_path = create_lock(root, "prompt-rule", profile="smoke")
+    original = identity.current_hashes(benchmark_root=root)
+
+    docs_only = {
+        **original,
+        "git_head": "f" * 40,
+        "git_dirty": False,
+    }
+    monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: docs_only)
+    assert create_lock(root, "prompt-rule", profile="smoke") == lock_path
+    assert_role_access(
+        root,
+        operation="lock.docs-only-commit",
+        role_episode_ids={"calibration": ("ep-cal-0001",)},
+        policy_name=None,
+    )
+
+    runtime_changed = {**docs_only, "code_hash": "0" * 64}
+    monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: runtime_changed)
+    with pytest.raises(RunIdentityError, match="different hashes.*new benchmark root does not reset locks"):
+        create_lock(root, "prompt-rule", profile="smoke")
+    with pytest.raises(RunIdentityError, match="current code/config/prompt/sampling hashes"):
+        assert_role_access(
+            root,
+            operation="lock.runtime-change",
+            role_episode_ids={"calibration": ("ep-cal-0002",)},
+            policy_name=None,
+        )
+
+
+def test_locks_are_independent_by_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "profile-locks"
+    monkeypatch.setattr(identity, "_dirty_entries", lambda: ())
+    smoke_prompt = create_lock(root, "prompt-rule", profile="smoke")
+    benchmark_prompt = create_lock(root, "prompt-rule", profile="benchmark")
+    smoke_policy = create_lock(
+        root,
+        "policy",
+        policy_name="rule_agent_fake",
+        profile="smoke",
+    )
+    benchmark_policy = create_lock(
+        root,
+        "policy",
+        policy_name="rule_agent_fake",
+        profile="benchmark",
+    )
+
+    assert smoke_prompt != benchmark_prompt
+    assert smoke_policy != benchmark_policy
+    assert smoke_prompt.is_relative_to(benchmark_state_directory(root) / "locks/smoke")
+    assert benchmark_prompt.is_relative_to(
+        benchmark_state_directory(root) / "locks/benchmark"
+    )
+    assert_role_access(
+        root,
+        operation="profile.smoke.calibration",
+        role_episode_ids={"calibration": ("ep-cal-0001",)},
+        policy_name="rule_agent_fake",
+    )
+    assert_role_access(
+        root,
+        operation="profile.smoke.test",
+        role_episode_ids={"test": ("ep-test-0001",)},
+        policy_name="rule_agent_fake",
+    )
+
+
+def test_code_hash_change_does_not_reset_spend_or_existing_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "shared-code-change"
+    monkeypatch.setattr(identity, "_dirty_entries", lambda: ())
+    lock_path = create_lock(root, "prompt-rule", profile="smoke")
+    state_dir = benchmark_state_directory(root)
+    ledger_path = state_dir / "cost-ledger.jsonl"
+    ledger = DurableCostLedger(ledger_path, cap_usd="10.00")
+    reservation = ledger.reserve("9.99", model_slug="model/a", policy="before-code-change")
+    ledger.settle(reservation, "9.99", model_slug="model/a", policy="before-code-change")
+
+    original = identity.current_hashes(benchmark_root=root)
+    changed = {**original, "code_hash": "1" * 64}
+    monkeypatch.setattr(identity, "current_hashes", lambda **_kwargs: changed)
+    with pytest.raises(RunIdentityError, match="different hashes.*new benchmark root does not reset locks"):
+        create_lock(root, "prompt-rule", profile="smoke")
+    with pytest.raises(RunIdentityError, match="current code/config/prompt/sampling hashes"):
+        assert_role_access(
+            root,
+            operation="code-change.calibration",
+            role_episode_ids={"calibration": ("ep-cal-0001",)},
+            policy_name=None,
+        )
+
+    reopened = DurableCostLedger(ledger_path, cap_usd="10.00")
+    assert reopened.snapshot()["spent_usd"] == "9.990000000000"
+    with pytest.raises(CostLimitExceeded, match="would exceed"):
+        reopened.reserve("0.02", model_slug="model/b", policy="after-code-change")
+    assert lock_path.is_file()
 
 
 def test_cost_role_and_lock_state_is_shared_across_benchmark_roots(
@@ -423,6 +530,81 @@ def test_shared_state_directory_must_be_outside_benchmark_root(
         benchmark_state_directory(root)
 
 
+def test_shared_state_directory_rejects_relative_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(identity.BENCHMARK_STATE_DIR_ENV, "relative-benchmark-state")
+    with pytest.raises(RunIdentityError, match="must be an absolute path"):
+        benchmark_state_directory(tmp_path / "benchmark", create=False)
+
+
+def test_benchmark_root_must_be_outside_shared_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir = tmp_path / "shared-state"
+    monkeypatch.setenv(identity.BENCHMARK_STATE_DIR_ENV, str(state_dir))
+    with pytest.raises(RunIdentityError, match="benchmark root must be outside"):
+        benchmark_state_directory(state_dir / "root", create=False)
+
+
+@pytest.mark.parametrize("command", ["resume", "triage-run", "triage-measure", "evaluator"])
+def test_harness_refuses_state_directory_change_before_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    root = tmp_path / "benchmark"
+    policy_name = "rule_agent_fake"
+    policy_dir = root / "policies" / policy_name
+    policy_dir.mkdir(parents=True)
+    hashes = identity.current_hashes(benchmark_root=root)
+    original_state_dir = benchmark_state_directory(root, create=False)
+    identity._atomic_write_json(
+        root / "harness-manifest.json",
+        {
+            "schema_version": 1,
+            "profile": "smoke",
+            "state_dir": str(original_state_dir),
+            "hashes": hashes,
+        },
+    )
+    identity._atomic_write_json(
+        policy_dir / "run-manifest.json",
+        {"policy_name": policy_name},
+    )
+    operational = policy_dir / "operational" / "observations.sqlite"
+    operational.parent.mkdir(parents=True)
+    with sqlite3.connect(operational) as connection:
+        connection.execute("CREATE TABLE episodes (episode_id TEXT, role TEXT)")
+        connection.execute("INSERT INTO episodes VALUES ('ep-test-0001', 'test')")
+
+    changed_state_dir = tmp_path / "other-state"
+    monkeypatch.setenv(identity.BENCHMARK_STATE_DIR_ENV, str(changed_state_dir))
+    message = "benchmark state directory mismatch"
+    if command == "resume":
+        with pytest.raises(RunIdentityError, match=message):
+            run_benchmark(
+                profile="smoke",
+                policy_name=policy_name,
+                output_dir=root,
+                analysis_role="development",
+            )
+    elif command in {"triage-run", "triage-measure"}:
+        args = [command.removeprefix("triage-"), "--run", str(policy_dir), "--agent-provider", "fake"]
+        if command == "triage-measure":
+            args.extend(("--incidents", "1", "--out", str(tmp_path / "measure.json")))
+        assert triage_main(args) == 2
+        assert message in capsys.readouterr().err
+    else:
+        assert evaluation_main(["decisions", "--run", str(policy_dir)]) == 2
+        assert message in capsys.readouterr().err
+
+    assert not changed_state_dir.exists()
+    assert not (tmp_path / "measure.json").exists()
+    assert not (root / "base/private/reports/p5_1/rule_agent_fake/decisions_cli.json").exists()
+
+
 def test_shared_state_directory_uses_home_default_when_not_overridden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -455,6 +637,49 @@ def test_cost_ledger_reserves_atomically_and_fake_calls_cost_zero(tmp_path: Path
     assert result.ok
     assert fake_ledger.snapshot()["spent_usd"] == "0.000000000000"
     assert fake_ledger.snapshot()["fake_call_count"] == 1
+
+
+def test_cost_ledger_records_and_enforces_one_cap_for_all_reservations(
+    tmp_path: Path,
+) -> None:
+    ledger_path = tmp_path / "fixed-cap-ledger.jsonl"
+    ledger = DurableCostLedger(ledger_path, cap_usd="1.00")
+    ledger.reserve("0.25", model_slug="model/a", policy="first")
+    events = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    reserve = next(event for event in events if event["event"] == "reserve")
+    assert reserve["cap_usd"] == "1.000000000000"
+
+    changed_cap = DurableCostLedger(ledger_path, cap_usd="2.00")
+    with pytest.raises(CostLedgerError, match="configured cost cap differs"):
+        changed_cap.snapshot()
+
+
+def test_in_memory_cap_refusal_is_written_to_durable_ledger(tmp_path: Path) -> None:
+    config = replace(load_llm_config(), max_total_cost_usd=1.0)
+    ledger = DurableCostLedger(tmp_path / "memory-block-ledger.jsonl", cap_usd="10.00")
+    calls = 0
+
+    def transport(_payload: dict[str, object], _timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {}
+
+    client = LLMClient(config=config, transport=transport, cost_ledger=ledger)
+    client._spent_cost_usd = 1.0
+    result = client.complete_json(
+        "Already over the local cap.",
+        episode_id="ep-0001",
+        as_of_time="2026-02-01T16:59:59.999999Z",
+        data_snapshot="snapshot",
+    )
+    events = [json.loads(line) for line in ledger.path.read_text().splitlines()]
+
+    assert not result.ok
+    assert result.error is not None and result.error.code == "cost_limit_exceeded"
+    assert calls == 0
+    assert [event["event"] for event in events] == ["blocked"]
+    assert events[0]["reason"] == "in_memory_cap"
+    assert ledger.snapshot()["blocked_request_count"] == 1
 
 
 def test_cost_ledger_limit_survives_new_process(tmp_path: Path) -> None:

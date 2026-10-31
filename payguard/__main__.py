@@ -7,7 +7,7 @@ import sys
 from typing import Sequence
 
 from payguard.harness import BENCHMARK_COST_CAP_USD, HarnessError, run_benchmark
-from payguard.identity import POLICY_PROVIDERS, RunIdentityError, create_lock
+from payguard.identity import LOCK_PROFILES, POLICY_PROVIDERS, RunIdentityError, create_lock
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,9 +32,15 @@ def _parser() -> argparse.ArgumentParser:
     lock_commands = lock_parser.add_subparsers(dest="lock_kind", required=True)
     prompt_lock = lock_commands.add_parser("prompt-rule", help="lock prompt and rule inputs")
     prompt_lock.add_argument("--out", required=True, help="benchmark root")
+    prompt_lock.add_argument(
+        "--profile", choices=tuple(sorted(LOCK_PROFILES)), default="smoke"
+    )
     policy_lock = lock_commands.add_parser("policy", help="lock one named policy")
     policy_lock.add_argument("--out", required=True, help="benchmark root")
     policy_lock.add_argument("--policy", choices=tuple(POLICY_PROVIDERS), required=True)
+    policy_lock.add_argument(
+        "--profile", choices=tuple(sorted(LOCK_PROFILES)), default="smoke"
+    )
     return parser
 
 
@@ -46,8 +52,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.out,
                 args.lock_kind,
                 policy_name=getattr(args, "policy", None),
+                profile=args.profile,
             )
             print(f"lock_kind={args.lock_kind}")
+            print(f"profile={args.profile}")
             if getattr(args, "policy", None):
                 print(f"policy={args.policy}")
             print(f"lock={lock_path}")

@@ -32,32 +32,27 @@ Phản biện 30/10 chỉ ra ba rủi ro chặn câu hỏi nghiên cứu: (1) ch
 - **Sổ chi phí:** ledger bền cộng mọi lời gọi (mọi nhánh, retry, recheck, lần chạy trước restart); chặn trước khi vượt trần đã khóa. **Người dùng chốt 31/10/2026 (review P5.1 r1, finding 2):** sổ chi phí và sổ role/lock nằm ở **một đường dẫn cố định ngoài mọi benchmark root** (và ngoài mọi DB/file tool agent đọc được), dùng chung cho mọi root, mọi lần đổi code; trần 10 USD và lock calibration/test áp cho toàn benchmark.
 - **Nghiệm thu:** fingerprint input giống nhau giữa các policy và không đổi sau chạy; resume idempotent; fake provider end-to-end; truth chỉ evaluator đọc; commit trước tool giữ như P4.4b.
 
-### P5.1 round one — CLI, lock và ngân sách (quyết định người dùng 31/10/2026)
+### P5.1 — CLI, locks, ngân sách và identity
 
-Entrypoint được chốt:
+Smoke workflow ví dụ dùng state directory tạm để tránh tạo trạng thái benchmark thật:
 
 ```bash
+export PAYGUARD_BENCHMARK_STATE_DIR="$(mktemp -d)"
 python -m payguard run --profile smoke --policy rule_human --out data/p5-smoke
 python -m payguard run --profile smoke --policy rule_agent_fake --out data/p5-smoke
 ```
 
 Lệnh thứ hai tái dùng BASE đã freeze; mỗi policy có manifest và operational DB copy riêng. Evaluator report của mỗi policy được giữ dưới `base/private/reports/p5_1/<policy>/`, tránh đặt truth-derived report trong đường dẫn agent/tool. Mặc định chỉ evaluator report trên `development`. Muốn phân tích `calibration` hoặc `test`, thêm `--analysis-role calibration|test`; role ledger ghi lại tập episode và usage. `triage measure` vẫn là mode riêng.
 
-Khóa trước khi phân tích held-out role bằng:
+Khóa trước khi phân tích held-out role bằng profile tương ứng:
 
 ```bash
-python -m payguard lock prompt-rule --out data/p5-smoke
-python -m payguard lock policy --policy rule_agent_fake --out data/p5-smoke
+python -m payguard lock prompt-rule --profile smoke --out data/p5-smoke
+python -m payguard lock policy --profile smoke --policy rule_agent_fake --out data/p5-smoke
 ```
 
-`prompt-rule` là lock dùng chung; `policy` được khóa riêng theo policy. Cả hai lưu thời điểm UTC và hash hiện tại của Git HEAD/dirty flag, code, configs, prompt sources, sampling; policy lock còn gắn `policy_version` và `model_slug`. Lệnh lock từ chối khi Git working tree có thay đổi chưa commit; file Git-ignore không được Git tính là thay đổi. Marker không bị ghi đè: cùng identity thì lệnh idempotent, identity mới cần benchmark root mới. Calibration cần hash khớp prompt/rule lock; test cần hash và policy khớp policy lock. Guard chạy trước evaluator đọc truth.
+`prompt-rule` dùng chung cho các policy trong một profile; `policy` khóa riêng theo policy. Lock marker ghi thời điểm UTC và hash nội dung runtime code, configs, prompt sources và sampling; không ghim Git HEAD/dirty flag. Policy lock còn gắn `policy_version` và `model_slug`. Lệnh lock từ chối khi Git working tree có thay đổi chưa commit; file Git-ignore không được Git tính là thay đổi. Marker bất biến và idempotent khi identity khớp; identity khác không ghi đè lock, và tạo benchmark root mới cũng không reset lock. Smoke và benchmark có lock độc lập theo profile. Calibration cần prompt/rule lock; test cần policy lock; guard chạy trước evaluator đọc truth.
 
-Cost ledger, role ledger và lock markers cùng nằm trong thư mục trạng thái benchmark dùng chung, mặc định `~/.payguard-benchmark/`; cấu hình bằng `PAYGUARD_BENCHMARK_STATE_DIR`. Vị trí này độc lập benchmark root và code version, ngoài DB operational mà tool đọc. Cost ledger dùng append-only reservations/settlements cùng file lock; reservation chưa settle được tính vào ngân sách sau crash. LLM client reserve ước lượng trần input/output theo payload và sampling trước từng lần gọi, gồm retry; khi còn lại không đủ thì không gửi request. Fake provider thêm event chi phí 0. `configs/llm.yaml` giữ nguyên trần tạm $1 cho các lệnh P4; harness truyền trần benchmark $10 vào ledger và LLM client. Hai trần có phạm vi riêng, không cộng thành $11: P4 measurement/run dùng config $1; mọi policy/root/code version trong benchmark dùng chung $10. Test override thư mục state bằng biến môi trường sang `tmp_path`. File artifact và identity contract ở [data.md, mục 9](data.md#9-p51-harness-artifacts).
+Vị trí state directory, binding trong harness manifest và schema cost/role/lock ledger được định nghĩa tại [data.md §9](data.md#9-p51-harness-artifacts). Cost ledger append-only dùng reservations/settlements cùng file lock; reservation chưa settle sau crash vẫn tính vào ngân sách. LLM client reserve ước lượng trần input/output theo payload và sampling trước từng lần gọi, gồm retry; khi không đủ ngân sách thì không gửi request. Fake provider ghi chi phí 0. `configs/llm.yaml` giữ nguyên cap $1 cho P4; harness dùng cap benchmark $10 từ `configs/benchmark.yaml`, không cộng hai cap thành $11. Mọi lần reserve trong ledger phải ghi cùng cap; cap khác bị từ chối. Settlement cao hơn reservation được ghi là overrun trong ledger và policy report.
 
-### P5.1 FIX1 — identity, overrun và giới hạn chạy đồng thời
-
-Standalone `python -m triage run`/`measure` trên policy directory xác nhận hash hiện tại với `harness-manifest.json`, BASE fingerprint với `base-manifest.json` và policy identity với `run-manifest.json` trước khi chạy. Khi resume, decision rows hiện có phải giữ đúng `policy_version`; agent rows cũng phải đúng `model_slug` trong manifest. Lệch identity hoặc mixed rows thì từ chối với exit 2.
-
-Cap benchmark được cấu hình tại `configs/benchmark.yaml` với provenance `MASTER_PLAN.md`, mục 5; giá trị vẫn là 10 USD. Ledger ghi `overrun: true` khi provider báo chi phí lớn hơn reservation, và policy run report lưu cờ cùng số tổng hợp. Reservation trước call chỉ là cận trên khi giá thực tế không vượt giá đã cấu hình trong `configs/llm.yaml`; provider có thể báo chi phí cao hơn nếu định tuyến sang mức giá khác. Khi đó ledger ghi chi phí thực tế và chặn lời gọi kế tiếp nếu tổng đã vượt cap. Cost cap, role touches và immutable prompt-rule/policy locks được chia sẻ toàn cục; tạo benchmark root mới không reset chúng. Lock path lấy từ `PAYGUARD_BENCHMARK_STATE_DIR`, không từ `--out`.
-
-Harness root hiện không có process lock. Chạy tuần tự trên cùng root; không chạy đồng thời hai harness/triage process trên một root. Hành vi evaluator và standalone triage CLI được mô tả tại [evaluation.md, mục 9](evaluation.md#9-cli-cham-decisions-va-chon-cap-p45-p51) và [triage.md, mục 9](triage.md#9-cli-trong-p51-harness).
+Standalone `python -m triage run`/`measure` trên policy directory xác nhận state directory, current code/config/prompt/sampling hashes, BASE fingerprint và policy identity trước khi thao tác DB hoặc ghi output. Khi resume, decision rows hiện có phải giữ đúng `policy_version`; agent rows cũng phải đúng `model_slug` trong manifest. Lệch identity hoặc mixed rows thì từ chối với exit 2. Harness root hiện không có process lock: chạy tuần tự các lệnh trên cùng root. Chi tiết CLI evaluator và triage được mô tả tại [evaluation.md, mục 9](evaluation.md#9-cli-cham-decisions-va-chon-cap-p45-p51) và [triage.md, mục 9](triage.md#9-cli-trong-p51-harness).

@@ -33,6 +33,7 @@ POLICY_PROVIDERS = {
     "rule_agent_fake": ("fake", "fake/payguard-p4-round1"),
 }
 ROLES = frozenset({"development", "calibration", "test"})
+LOCK_PROFILES = frozenset({"smoke", "benchmark"})
 BENCHMARK_STATE_DIR_ENV = "PAYGUARD_BENCHMARK_STATE_DIR"
 
 
@@ -44,14 +45,22 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def benchmark_state_directory(benchmark_root: str | Path | None = None) -> Path:
-    """Return the one shared cost/role/lock directory, independent of run identity."""
+def benchmark_state_directory(
+    benchmark_root: str | Path | None = None,
+    *,
+    create: bool = True,
+) -> Path:
+    """Resolve the shared cost/role/lock directory, independent of run identity."""
     configured = os.environ.get(BENCHMARK_STATE_DIR_ENV)
-    state_dir = (
-        Path(configured).expanduser().resolve()
-        if configured and configured.strip()
-        else (Path.home() / ".payguard-benchmark").resolve()
-    )
+    if configured is not None:
+        candidate = Path(configured).expanduser()
+        if not configured.strip() or not candidate.is_absolute():
+            raise RunIdentityError(
+                f"{BENCHMARK_STATE_DIR_ENV} must be an absolute path when set"
+            )
+        state_dir = candidate.resolve()
+    else:
+        state_dir = (Path.home() / ".payguard-benchmark").resolve()
     if benchmark_root is not None:
         root = Path(benchmark_root).expanduser().resolve()
         try:
@@ -62,12 +71,21 @@ def benchmark_state_directory(benchmark_root: str | Path | None = None) -> Path:
             raise RunIdentityError(
                 f"shared benchmark state directory must be outside benchmark root {root}"
             )
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError as exc:
-        raise RunIdentityError(
-            f"cannot create shared benchmark state directory {state_dir}: {exc}"
-        ) from exc
+        try:
+            root.relative_to(state_dir)
+        except ValueError:
+            pass
+        else:
+            raise RunIdentityError(
+                f"benchmark root must be outside shared benchmark state directory {state_dir}"
+            )
+    if create:
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as exc:
+            raise RunIdentityError(
+                f"cannot create shared benchmark state directory {state_dir}: {exc}"
+            ) from exc
     return state_dir
 
 
@@ -108,34 +126,24 @@ def _inside(path: str, parent: str | None) -> bool:
     return bool(parent and (path == parent or path.startswith(parent.rstrip("/") + "/")))
 
 
-def _code_hash(
-    head: str,
-    dirty: bool,
-    *,
-    entries: tuple[tuple[str, str], ...],
-    ignored_output: str | None,
-) -> str:
-    diff = _git("diff", "--binary", "HEAD")
-    untracked: dict[str, str] = {}
-    for status, relative in entries:
-        if status != "??" or _inside(relative, ignored_output):
+def _runtime_code_hash(root: Path) -> str:
+    """Hash runtime Python source bytes without Git metadata or documentation."""
+    files: dict[str, str] = {}
+    for package in ("evaluation", "model", "monitoring", "payguard", "simulator", "triage"):
+        package_root = root / package
+        if not package_root.is_dir():
             continue
-        path = repository_root() / relative
-        if path.is_file():
+        for path in sorted(package_root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(root).as_posix()
             try:
-                untracked[relative] = _sha256(path.read_bytes())
+                files[relative] = _sha256(path.read_bytes())
             except OSError as exc:
-                raise RunIdentityError(f"could not hash untracked file {relative!r}") from exc
-    return _sha256(
-        _canonical(
-            {
-                "git_head": head,
-                "git_dirty": dirty,
-                "tracked_diff_sha256": _sha256(diff),
-                "untracked_file_sha256": untracked,
-            }
-        )
-    )
+                raise RunIdentityError(f"could not hash runtime source {relative!r}") from exc
+    if not files:
+        raise RunIdentityError("no runtime Python source files were found")
+    return _sha256(_canonical(files))
 
 
 def current_hashes(*, benchmark_root: str | Path | None = None) -> dict[str, Any]:
@@ -188,18 +196,80 @@ def current_hashes(*, benchmark_root: str | Path | None = None) -> dict[str, Any
     return {
         "git_head": head,
         "git_dirty": dirty,
-        "code_hash": _code_hash(
-            head,
-            dirty,
-            entries=dirty_entries,
-            ignored_output=ignored_output,
-        ),
+        "code_hash": _runtime_code_hash(root),
         "config_hash": _sha256(_canonical(config_hashes)),
         "config_hashes": config_hashes,
         "prompt_hash": _sha256(_canonical(prompt_hashes)),
         "prompt_hashes": prompt_hashes,
         "sampling_hash": sampling_hash,
     }
+
+
+def lock_identity_hashes(hashes: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep held-out locks stable across docs-only commits while hashing runtime inputs."""
+    keys = (
+        "code_hash",
+        "config_hash",
+        "config_hashes",
+        "prompt_hash",
+        "prompt_hashes",
+        "sampling_hash",
+    )
+    missing = [key for key in keys if key not in hashes]
+    if missing:
+        raise RunIdentityError(f"current identity is missing lock hashes: {missing!r}")
+    return {key: hashes[key] for key in keys}
+
+
+def _harness_profile(root: Path) -> str:
+    manifest_path = root / "harness-manifest.json"
+    if not manifest_path.is_file():
+        return "smoke"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunIdentityError(f"harness manifest is missing or invalid: {manifest_path}") from exc
+    profile = manifest.get("profile") if isinstance(manifest, dict) else None
+    if profile not in LOCK_PROFILES:
+        raise RunIdentityError(f"harness manifest has an unsupported lock profile: {profile!r}")
+    return str(profile)
+
+
+def assert_harness_state_directory(
+    benchmark_root: str | Path,
+    manifest: Mapping[str, Any] | None = None,
+) -> Path:
+    """Reject a harness root resumed with a different shared-state location."""
+    root = Path(benchmark_root).expanduser().resolve()
+    manifest_path = root / "harness-manifest.json"
+    if manifest is None:
+        try:
+            manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RunIdentityError(f"harness manifest is missing or invalid: {manifest_path}") from exc
+        if not isinstance(manifest_value, dict):
+            raise RunIdentityError(f"harness manifest must contain a JSON object: {manifest_path}")
+        manifest = manifest_value
+    state_dir = benchmark_state_directory(root, create=False)
+    recorded = manifest.get("state_dir")
+    if not isinstance(recorded, str) or not recorded:
+        raise RunIdentityError(
+            "harness manifest does not record its resolved benchmark state directory"
+        )
+    try:
+        recorded_dir = Path(recorded).expanduser()
+        if not recorded_dir.is_absolute():
+            raise ValueError("recorded path is relative")
+        recorded_dir = recorded_dir.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RunIdentityError("harness manifest has an invalid benchmark state directory") from exc
+    if recorded_dir != state_dir:
+        raise RunIdentityError(
+            "benchmark state directory mismatch: current setting resolves to "
+            f"{state_dir}, but harness-manifest.json records {recorded_dir}; "
+            "changing the state directory does not reset benchmark spend or locks"
+        )
+    return state_dir
 
 
 def policy_identity(policy_name: str) -> dict[str, Any]:
@@ -234,16 +304,24 @@ def run_fingerprint(identity: Mapping[str, Any], *, base_fingerprint: str) -> st
     return _sha256(_canonical({"identity": identity, "base_fingerprint": base_fingerprint}))
 
 
-def _lock_file(root: Path, kind: str, policy_name: str | None = None) -> Path:
-    state_dir = benchmark_state_directory(root)
+def _lock_file(
+    root: Path,
+    kind: str,
+    policy_name: str | None = None,
+    *,
+    profile: str,
+) -> Path:
+    if profile not in LOCK_PROFILES:
+        raise RunIdentityError(f"unsupported lock profile: {profile!r}")
+    state_dir = benchmark_state_directory(root, create=False)
     if kind == "prompt-rule":
         if policy_name is not None:
             raise RunIdentityError("prompt-rule lock is shared and does not take --policy")
-        return state_dir / "locks" / "prompt-rule.json"
+        return state_dir / "locks" / profile / "prompt-rule.json"
     if kind == "policy":
         if policy_name not in POLICY_PROVIDERS:
             raise RunIdentityError("policy lock requires a supported --policy")
-        return state_dir / "locks" / "policy" / f"{policy_name}.json"
+        return state_dir / "locks" / profile / "policy" / f"{policy_name}.json"
     raise RunIdentityError(f"unknown lock kind: {kind!r}")
 
 
@@ -264,8 +342,13 @@ def create_lock(
     kind: str,
     *,
     policy_name: str | None = None,
+    profile: str = "smoke",
 ) -> Path:
     root = Path(benchmark_root).expanduser().resolve()
+    state_dir = benchmark_state_directory(root, create=False)
+    harness_manifest_path = root / "harness-manifest.json"
+    if harness_manifest_path.is_file():
+        assert_harness_state_directory(root)
     dirty_entries = _dirty_entries()
     if dirty_entries:
         paths = ", ".join(path for _, path in dirty_entries[:5])
@@ -273,14 +356,15 @@ def create_lock(
             "cannot create a lock while the Git working tree has uncommitted changes"
             + (f": {paths}" if paths else "")
         )
-    hashes = current_hashes(benchmark_root=root)
+    hashes = lock_identity_hashes(current_hashes(benchmark_root=root))
     identity: dict[str, Any] = {"hashes": hashes}
     if kind == "policy":
         identity.update(policy_identity(policy_name or ""))
-    lock_path = _lock_file(root, kind, policy_name)
+    lock_path = _lock_file(root, kind, policy_name, profile=profile)
     marker = {
         "schema_version": SCHEMA_VERSION,
         "lock_kind": kind,
+        "profile": profile,
         "locked_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "identity": identity,
     }
@@ -289,12 +373,13 @@ def create_lock(
             existing = json.loads(lock_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RunIdentityError(f"existing lock marker is invalid: {lock_path}") from exc
-        if existing.get("identity") != identity:
+        if existing.get("profile") != profile or existing.get("identity") != identity:
             raise RunIdentityError(
-                f"global benchmark lock already exists with different hashes: {lock_path}; "
-                "a new benchmark root cannot reset it"
+                f"benchmark lock already exists for profile {profile!r} with different "
+                f"hashes: {lock_path}; a new benchmark root does not reset locks"
             )
         return lock_path
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     _atomic_write_json(lock_path, marker)
     return lock_path
 
@@ -317,30 +402,43 @@ def assert_role_access(
     policy_name: str | None,
 ) -> None:
     root = Path(benchmark_root).expanduser().resolve()
-    identity_hashes = current_hashes(benchmark_root=root)
+    manifest_path = root / "harness-manifest.json"
+    if manifest_path.is_file():
+        assert_harness_state_directory(root)
+    profile = _harness_profile(root)
+    identity_hashes = lock_identity_hashes(current_hashes(benchmark_root=root))
     current_policy = policy_identity(policy_name) if policy_name else None
     for role, episode_ids in role_episode_ids.items():
         if role not in ROLES or not episode_ids:
             continue
         if role == "calibration":
-            lock_path = _lock_file(root, "prompt-rule")
+            lock_path = _lock_file(root, "prompt-rule", profile=profile)
             marker = _read_lock(lock_path)
-            if marker.get("lock_kind") != "prompt-rule":
+            if marker.get("lock_kind") != "prompt-rule" or marker.get("profile") != profile:
                 raise RunIdentityError(f"wrong lock kind in {lock_path}")
             locked_identity = marker.get("identity")
             if not isinstance(locked_identity, dict) or locked_identity.get("hashes") != identity_hashes:
                 raise RunIdentityError(
                     "calibration analysis refused: current code/config/prompt/sampling hashes "
-                    "do not match locks/prompt-rule.json"
+                    f"do not match locks/{profile}/prompt-rule.json"
                 )
         elif role == "test":
             if current_policy is None:
                 raise RunIdentityError("test analysis requires a selected --policy")
-            lock_path = _lock_file(root, "policy", str(current_policy["policy_name"]))
+            lock_path = _lock_file(
+                root,
+                "policy",
+                str(current_policy["policy_name"]),
+                profile=profile,
+            )
             marker = _read_lock(lock_path)
             locked_identity = marker.get("identity")
             expected = {"hashes": identity_hashes, **current_policy}
-            if marker.get("lock_kind") != "policy" or locked_identity != expected:
+            if (
+                marker.get("lock_kind") != "policy"
+                or marker.get("profile") != profile
+                or locked_identity != expected
+            ):
                 raise RunIdentityError(
                     f"test analysis refused: current hashes/policy do not match {lock_path}"
                 )
@@ -375,6 +473,8 @@ def record_role_touches(
     usage: str,
 ) -> None:
     root = Path(benchmark_root).expanduser().resolve()
+    if (root / "harness-manifest.json").is_file():
+        assert_harness_state_directory(root)
     state_dir = benchmark_state_directory(root)
     path = state_dir / "seed-role-ledger.json"
     roles = {

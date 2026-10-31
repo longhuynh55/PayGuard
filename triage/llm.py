@@ -261,7 +261,21 @@ class LLMClient:
             data_snapshot=data_snapshot,
         )
 
+        payload = {
+            "model": self.config.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            **self.config.sampling_config,
+            "response_format": {"type": "json_object"},
+        }
+        reserved_amount = self._maximum_request_cost(payload)
         if self._spent_cost_usd >= self.config.max_total_cost_usd:
+            if self._cost_ledger is not None:
+                self._cost_ledger.record_blocked(
+                    reserved_amount,
+                    model_slug=self.config.canonical_slug,
+                    policy=self._ledger_policy,
+                    reason="in_memory_cap",
+                )
             record = self._empty_record(cache_key, started)
             return LLMResult(
                 record,
@@ -274,12 +288,6 @@ class LLMClient:
             record = self._empty_record(cache_key, started)
             return LLMResult(record, error=LLMError("missing_api_key", "OpenRouter API key is unavailable."))
 
-        payload = {
-            "model": self.config.model_id,
-            "messages": [{"role": "user", "content": prompt}],
-            **self.config.sampling_config,
-            "response_format": {"type": "json_object"},
-        }
         response: Any = None
         response_record: LLMCallRecord | None = None
         request_failure: _RequestFailure | None = None

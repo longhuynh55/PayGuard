@@ -87,6 +87,28 @@ class DurableCostLedger:
 
     def _state_locked(self) -> tuple[Decimal, Decimal, set[str], int, int]:
         events = self._events_locked()
+        recorded_cap: Decimal | None = None
+        for event in events:
+            kind = event.get("event")
+            if kind == "reserve" and "cap_usd" not in event:
+                raise CostLedgerError(
+                    "cost ledger reserve event has no cap_usd; refusing to assume a budget"
+                )
+            if kind not in {"reserve", "blocked", "fake_call"} or "cap_usd" not in event:
+                continue
+            event_cap = _money(event["cap_usd"])
+            if recorded_cap is None:
+                recorded_cap = event_cap
+            elif event_cap != recorded_cap:
+                raise CostLedgerError(
+                    "cost ledger contains events with different cap_usd values: "
+                    f"{_format_money(recorded_cap)} and {_format_money(event_cap)}"
+                )
+        if recorded_cap is not None and recorded_cap != self.cap_usd:
+            raise CostLedgerError(
+                "configured cost cap differs from the cap recorded in the durable ledger "
+                f"({_format_money(self.cap_usd)} != {_format_money(recorded_cap)} USD)"
+            )
         reservations: dict[str, Decimal] = {}
         settled: set[str] = set()
         spent = Decimal(0)
@@ -165,6 +187,7 @@ class DurableCostLedger:
                         "blocked",
                         amount_usd=_format_money(amount),
                         cap_usd=_format_money(self.cap_usd),
+                        reason="durable_cap",
                         model_slug=model_slug,
                         policy=policy,
                     )
@@ -185,6 +208,7 @@ class DurableCostLedger:
                     "reserve",
                     reservation_id=reservation_id,
                     amount_usd=_format_money(amount),
+                    cap_usd=_format_money(self.cap_usd),
                     model_slug=model_slug,
                     policy=policy,
                 )
@@ -230,8 +254,32 @@ class DurableCostLedger:
                 self._event_base(
                     "fake_call",
                     amount_usd="0.000000000000",
+                    cap_usd=_format_money(self.cap_usd),
                     model_slug=model_slug,
                     policy=policy,
+                )
+            )
+
+    def record_blocked(
+        self,
+        amount_usd: Decimal | float | int | str,
+        *,
+        model_slug: str,
+        policy: str | None,
+        reason: str,
+    ) -> None:
+        """Record a client-side cap refusal that happened before durable reserve."""
+        amount = _money(amount_usd)
+        with self._locked():
+            self._state_locked()
+            self._append_locked(
+                self._event_base(
+                    "blocked",
+                    amount_usd=_format_money(amount),
+                    cap_usd=_format_money(self.cap_usd),
+                    model_slug=model_slug,
+                    policy=policy,
+                    reason=reason,
                 )
             )
 

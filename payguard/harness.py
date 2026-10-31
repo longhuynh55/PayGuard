@@ -27,6 +27,7 @@ from payguard.identity import (
     POLICY_PROVIDERS,
     ROLES,
     RunIdentityError,
+    assert_harness_state_directory,
     assert_role_access,
     benchmark_state_directory,
     current_hashes,
@@ -98,13 +99,18 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _ensure_harness_root(root: Path, identity_hashes: Mapping[str, Any]) -> None:
+def _ensure_harness_root(
+    root: Path,
+    identity_hashes: Mapping[str, Any],
+    state_dir: Path,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "harness-manifest.json"
     if manifest_path.exists():
         manifest = _read_json(manifest_path)
         if manifest.get("schema_version") != 1 or manifest.get("profile") != PROFILE:
             raise HarnessError("existing output directory belongs to another harness/profile")
+        assert_harness_state_directory(root, manifest)
         if manifest.get("hashes") != dict(identity_hashes):
             raise RunIdentityError(
                 "harness resume refused: current code/config/prompt/sampling hashes "
@@ -121,6 +127,7 @@ def _ensure_harness_root(root: Path, identity_hashes: Mapping[str, Any]) -> None
         {
             "schema_version": 1,
             "profile": PROFILE,
+            "state_dir": str(state_dir),
             "hashes": dict(identity_hashes),
         },
     )
@@ -394,7 +401,8 @@ def _ensure_policy_manifest(
         if existing != dict(manifest):
             raise RunIdentityError(
                 f"policy resume refused: manifest mismatch in {policy_dir}; "
-                "use a new benchmark root for changed inputs or policy"
+                "use a new benchmark root for changed inputs or policy; a new root "
+                "does not reset shared benchmark locks or spend"
             )
         return
     if any(policy_dir.iterdir()):
@@ -444,6 +452,7 @@ def verify_harness_policy_run(policy_dir: str | Path) -> dict[str, Any]:
 
     hashes = current_hashes(benchmark_root=benchmark_root)
     harness_manifest = _read_json(benchmark_root / "harness-manifest.json")
+    assert_harness_state_directory(benchmark_root, harness_manifest)
     if (
         harness_manifest.get("schema_version") != 1
         or harness_manifest.get("profile") != PROFILE
@@ -477,7 +486,8 @@ def verify_harness_policy_run(policy_dir: str | Path) -> dict[str, Any]:
     if actual_manifest != expected_manifest:
         raise RunIdentityError(
             f"policy resume refused: manifest mismatch in {run_path}; "
-            "use a new benchmark root for changed inputs or policy"
+            "use a new benchmark root for changed inputs or policy; a new root "
+            "does not reset shared benchmark locks or spend"
         )
 
     operational_path = run_path / "operational" / "observations.sqlite"
@@ -661,8 +671,9 @@ def run_benchmark(
         raise HarnessError("analysis role must be development, calibration, or test")
 
     root = Path(output_dir).expanduser().resolve()
+    state_dir = benchmark_state_directory(root, create=False)
     hashes = current_hashes(benchmark_root=root)
-    _ensure_harness_root(root, hashes)
+    _ensure_harness_root(root, hashes, state_dir)
     base_dir = _ensure_generated_base(root, hashes)
     base_fingerprint, base_pipeline = _ensure_frozen_base(base_dir, hashes)
     roles = _episode_roles(base_dir / "operational" / "observations.sqlite")
