@@ -189,6 +189,20 @@ Taxonomy nguyên nhân đầy đủ: [triage.md](triage.md).
 
 Social-engineering chains chỉ được injector của template `new_fraud` sinh qua writer P1.4. Spike hộ kinh doanh chỉ được injector template `legit_business_spike` sinh; lịch sử `base` giữ hoạt động fan-in hộ kinh doanh thông thường làm đối chứng, không có chuỗi social engineering.
 
+### Báo cáo support P1 (`smoke`, `pilot`)
+
+`generate --profile <p>` ghi hai báo cáo cùng contract, tên theo profile (`<p>` là `smoke` hoặc `pilot`, `report_version = 1`):
+
+| File | Vùng | Nội dung |
+|---|---|---|
+| `reports/<p>.json` | operational | `profile`, `as_of_time`, `label_policy_version`, `model_version`, `p2_cohort_support` (fit, validation, calibration, reference_drift, monitoring_test), `operational_distributions`, `window_completeness`, `label_delay` |
+| `private/reports/<p>_truth.json` | private, chỉ evaluator/validator | `truth_bearing = true`, `truth_label_support`, `label_delay_oracle`, `incident_truth_counts_by_cause`, `p1_4_feature_diagnostics`; riêng `pilot` có thêm `role_template_support` |
+
+- **Ranh giới:** báo cáo operational không chứa khóa thuộc danh sách cấm của validator (truth, template, cause, …). Validator kiểm cả hai file có mặt, đúng `profile` và `report_version`; báo cáo của profile khác không được có trong cùng run.
+- **Held-out (`pilot`):** `p1_4_feature_diagnostics` chỉ có `base` và episode `development`. Episode `calibration` và `test` chỉ có số đếm: giao dịch, nhãn theo trạng thái, truth theo cause. Không có AUC, feature diagnostic, metric, alert hay score cho hai role này. `smoke` giữ nguyên phạm vi round 1, gồm chẩn đoán của mọi episode smoke, để báo cáo smoke không đổi.
+- **`role_template_support` (private, `pilot`):** một hàng cho mỗi cặp `(role, template)`, sắp theo role rồi template, gồm `episode_count`; `transaction_count` là giao dịch của chính episode trong cửa sổ quan sát; `label_snapshot_state_counts` là bốn trạng thái nhãn của giao dịch của chính episode tại mốc nhãn của episode (mốc = giao dịch cuối + `max(H, delay tối đa)` ngày; không tính lịch sử `base`); `reported_label_count` = `confirmed_fraud` + `confirmed_legit`; `truth_positive_count`, `truth_reported_count`; `incident_truth_counts_by_cause`. Số episode phải khớp allocation đã khóa của profile.
+- **Kiểm tra validator:** `report_truth_boundary` (có mặt, đúng contract, không rò truth); `p2_handoff_support` (positive và negative của fit, validation, calibration, và reference cohort; thiếu thì chặn bàn giao tập đó, lý do nằm trong `missing_support`, không đổi split và không dùng truth bù); với `pilot` thêm `pilot_heldout_report_contract` (phạm vi chẩn đoán và số đếm role × template).
+
 ## 5. Bảng truth sự cố
 
 Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.

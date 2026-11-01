@@ -328,6 +328,65 @@ Smoke manifest vẫn chỉ dùng `clean/data_pipeline/seasonal` cho đến P1.7 
   - **Backlog vòng 2 (không chặn, làm nếu gọn):** validate kiểm độc lập rằng `affected_transaction_ids` trong `p1.6.incident_effect.v1` thực sự mang hiệu ứng của template (ví dụ pipeline: amount nhân hệ số; spike/new_fraud: giao dịch thuộc thực thể của injector), kèm test âm sửa đồng thời truth + danh sách.
   - **Ngoài phạm vi:** ca P4.6 thứ ba (lời gọi LLM thật) do orchestrator chạy sau merge; không đổi template, seed, N7, ngưỡng monitoring.
   - **Luật test (AGENTS.md):** functional test qua CLI; test riêng lẻ khi làm, full suite một lần trước bàn giao.
+  - **Bàn giao implementer P1.8 vòng 2 (02/11/2026; Claude Haiku 5.5 max):**
+    - **Thay đổi:** `simulator/reports.py` đổi `build_smoke_reports` thành `build_profile_reports(..., profile=…)`, một hàm cho cả hai profile, không giữ alias. Với `pilot`: `p1_4_feature_diagnostics` chỉ có `base` và `development`; báo cáo private thêm `role_template_support` (28 hàng role × template, chỉ số đếm). `simulator/__main__.py` ghi `reports/<profile>.json` và `private/reports/<profile>_truth.json` cho cả hai profile. `simulator/validate.py`: `report_truth_boundary` và `p2_handoff_support` theo profile; `pilot_heldout_report_contract` (chỉ pilot) thay `pilot_support_report_deferred`. Contract ở [data.md](data.md) mục 4, "Báo cáo support P1".
+    - **Test (functional, CLI/API):** `test_pilot_support_report_limits_held_out_episodes_to_structural_counts` (pilot con 4 episode), `test_smoke_support_reports_keep_the_round_one_bytes` (SHA-256 khớp main 78f2a6e), `test_validate_rejects_missing_or_corrupt_support_report` (3 ca). Targeted: 6 pass, gồm `test_zero_report_probability_blocks_p2_handoff`. Full suite một lần: **448 passed, 1 xfailed, 0 failed** (986,75 s, exit 0). Thu thập: main 444 mục, nhánh 449 (+5 mục mới). MASTER ghi main "442 passed + 1 xfailed"; con số đó không khớp với thu thập hiện tại và cần đối chiếu.
+    - **Smoke không đổi:** fingerprint `0bf373c5…` khớp; `reports/smoke.json` và `private/reports/smoke_truth.json` byte-identical với `/tmp/p17-main-smoke` (SHA-256 `3d1703e1…a46df4`, `113f15e9…65c3c2`). `generate` và `validate` smoke 21/21 trên `/tmp/p18-smoke`. `verify_plan_claims.py`: 20 ví dụ; `check_links.py`: 0 link hỏng.
+    - **Pilot (`/tmp/p18-pilot`, chạy một lần):**
+      - Runtime: `elapsed_seconds` 6868,36 (16:41:33Z → 18:30:30Z, khoảng 114,5 phút). Sinh dữ liệu khoảng 30 phút; dựng báo cáo khoảng 79 phút. Phần lớn là `_p14_feature_diagnostics` O(N²) trên base 37.212 giao dịch và mỗi development episode khoảng 5,2k giao dịch. Ước lượng 35–45 phút trong spec không tính phần này; cần tối ưu trước khi lặp lại. Số này không phải benchmark sạch: full suite (16 phút) chạy song song trong giai đoạn sinh dữ liệu.
+      - Fingerprint: `bd46321748bd31b8b37e7f4713351c3e20c581e704f1d98b28c414d5c9a443c6`, khớp P1.7 fix 2.
+      - Kích thước: `operational/observations.sqlite` 532.578.304 byte; `private/evaluator.sqlite` 136.208.384 byte; `reports/pilot.json` 208.058 byte; `private/reports/pilot_truth.json` 114.362 byte.
+      - Validate: `generate` tự validate 22/22 PASS, gồm `pilot_heldout_report_contract` (12 episode development, 28 hàng role × template khớp allocation). `validate --run /tmp/p18-pilot` riêng: PASSED, 22 passed / 0 failed, exit 0.
+      - Kiểm báo cáo pilot thật trên bản sao nháp: gốc PASS; thiếu, hỏng, hoặc có thêm `smoke.json` đều FAIL với thông báo đúng.
+    - **Bảng support pilot (chỉ số đếm):**
+
+      | Tập P2 | positive | negative | pending (loại) | mẫu | trạng thái |
+      |---|---:|---:|---:|---:|---|
+      | fit | 93 | 14,279 | 0 | 14,372 | sufficient |
+      | validation | 16 | 1,589 | 0 | 1,605 | sufficient |
+      | calibration | 19 | 5,267 | 0 | 5,286 | sufficient; 19 < 25 → cảnh báo isotonic, fallback sigmoid |
+
+      Reference drift: 15,949 giao dịch, available. Monitoring test: 60 episode, available.
+
+      | Role | Template | Episode | Giao dịch | Nhãn fraud (state) | Nhãn legit (state) | matured_negative | pending | reported | truth positive | truth reported | truth theo cause |
+      |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+      | calibration | clean | 8 | 42,013 | 289 | 33,273 | 8,451 | 0 | 33,562 | 360 | 33,562 | — |
+      | calibration | data_pipeline | 2 | 10,469 | 69 | 8,265 | 2,135 | 0 | 8,334 | 94 | 8,334 | data_pipeline:2 |
+      | calibration | fraud_calendar | 2 | 10,624 | 86 | 8,469 | 2,069 | 0 | 8,555 | 112 | 8,555 | fraud_surge:2 |
+      | calibration | fraud_surge | 2 | 10,264 | 83 | 8,202 | 1,979 | 0 | 8,285 | 112 | 8,285 | fraud_surge:2 |
+      | calibration | legit_business_spike | 1 | 5,289 | 38 | 4,186 | 1,065 | 0 | 4,224 | 47 | 4,224 | legit_business_change:1 |
+      | calibration | new_fraud | 1 | 5,354 | 47 | 4,222 | 1,085 | 0 | 4,269 | 57 | 4,269 | new_fraud:1 |
+      | calibration | new_merchant_sparse_history | 1 | 5,302 | 33 | 4,234 | 1,035 | 0 | 4,267 | 47 | 4,267 | no_material_change:1 |
+      | calibration | seasonal | 2 | 10,409 | 76 | 8,262 | 2,071 | 0 | 8,338 | 94 | 8,338 | seasonal:2 |
+      | calibration | silent_concept_drift | 1 | 5,305 | 50 | 4,142 | 1,113 | 0 | 4,192 | 57 | 4,192 | new_fraud:1 |
+      | calibration | two_cause_fraud_seasonal | 4 | 21,108 | 181 | 16,742 | 4,185 | 0 | 16,923 | 224 | 16,923 | fraud_surge:4, seasonal:4 |
+      | development | clean | 4 | 20,975 | 151 | 16,622 | 4,202 | 0 | 16,773 | 180 | 16,773 | — |
+      | development | data_pipeline | 1 | 5,208 | 39 | 4,173 | 996 | 0 | 4,212 | 47 | 4,212 | data_pipeline:1 |
+      | development | fraud_calendar | 1 | 5,202 | 47 | 4,108 | 1,047 | 0 | 4,155 | 56 | 4,155 | fraud_surge:1 |
+      | development | fraud_surge | 1 | 5,343 | 42 | 4,242 | 1,059 | 0 | 4,284 | 56 | 4,284 | fraud_surge:1 |
+      | development | legit_business_spike | 1 | 5,146 | 35 | 4,078 | 1,033 | 0 | 4,113 | 47 | 4,113 | legit_business_change:1 |
+      | development | new_fraud | 1 | 5,266 | 52 | 4,200 | 1,014 | 0 | 4,252 | 57 | 4,252 | new_fraud:1 |
+      | development | seasonal | 1 | 5,169 | 38 | 4,128 | 1,003 | 0 | 4,166 | 47 | 4,166 | seasonal:1 |
+      | development | two_cause_fraud_seasonal | 2 | 10,500 | 87 | 8,295 | 2,118 | 0 | 8,382 | 112 | 8,382 | fraud_surge:2, seasonal:2 |
+      | test | clean | 8 | 41,696 | 290 | 33,172 | 8,234 | 0 | 33,462 | 360 | 33,462 | — |
+      | test | data_pipeline | 2 | 10,540 | 67 | 8,359 | 2,114 | 0 | 8,426 | 94 | 8,426 | data_pipeline:2 |
+      | test | fraud_calendar | 2 | 10,587 | 87 | 8,343 | 2,157 | 0 | 8,430 | 112 | 8,430 | fraud_surge:2 |
+      | test | fraud_surge | 2 | 10,519 | 93 | 8,256 | 2,170 | 0 | 8,349 | 112 | 8,349 | fraud_surge:2 |
+      | test | legit_business_spike | 1 | 5,238 | 37 | 4,184 | 1,017 | 0 | 4,221 | 47 | 4,221 | legit_business_change:1 |
+      | test | new_fraud | 1 | 5,185 | 44 | 4,128 | 1,013 | 0 | 4,172 | 57 | 4,172 | new_fraud:1 |
+      | test | new_merchant_sparse_history | 1 | 5,247 | 36 | 4,135 | 1,076 | 0 | 4,171 | 47 | 4,171 | no_material_change:1 |
+      | test | seasonal | 2 | 10,547 | 83 | 8,349 | 2,115 | 0 | 8,432 | 94 | 8,432 | seasonal:2 |
+      | test | silent_concept_drift | 1 | 5,321 | 48 | 4,196 | 1,077 | 0 | 4,244 | 57 | 4,244 | new_fraud:1 |
+      | test | two_cause_fraud_seasonal | 4 | 20,867 | 180 | 16,490 | 4,197 | 0 | 16,670 | 224 | 16,670 | fraud_surge:4, seasonal:4 |
+
+      Tổng: 12 development, 24 calibration, 24 test; 28 hàng khớp allocation đã khóa. Cột "truth theo cause" của calibration/test chỉ là số đếm, không kèm điểm hay chẩn đoán.
+    - **Quyết định để orchestrator xác nhận (không chặn bàn giao):**
+      1. Quy tắc held-out chỉ áp cho `pilot`. `smoke` vẫn có chẩn đoán cho mọi episode smoke, gồm calibration/test ep-0002…0005, vì yêu cầu báo cáo smoke không đổi byte. Muốn áp cho smoke thì phải đổi báo cáo smoke.
+      2. Calibration/test vẫn có `label_delay` và `window_completeness` (số đếm, tỉ lệ, thống kê độ trễ nhãn) vì đây là phần "nhãn trễ, độ đầy đủ cửa sổ" của support pilot. Không có AUC, feature diagnostic, score, metric hay alert cho hai role này. Nếu muốn chỉ còn số đếm thuần, phải đổi báo cáo; fingerprint không đổi.
+      3. `label_snapshot_state_counts` và `reported_label_count` chỉ tính giao dịch của chính episode. Lịch sử `base` (37,212 giao dịch) bị loại, vì `label_delay.observed` của mỗi episode chứa toàn bộ giao dịch đó.
+      4. `p2_handoff_support` của pilot chặn bàn giao khi thiếu positive/negative hoặc reference, giống smoke. Pilot hiện đủ support; calibration có 19 positive < 25 nên ghi cảnh báo isotonic và fallback sigmoid, không chặn.
+      5. Hiệu năng: `_p14_feature_diagnostics` O(N²) làm dựng báo cáo mất khoảng 79 phút. Đề xuất tối ưu bằng cửa sổ theo thời gian đã sắp xếp; phải giữ smoke byte-identical. Chưa làm trong vòng này.
+    - **Chưa làm:** backlog vòng 2 `affected_transaction_ids` trong `p1.6.incident_effect.v1` (không chặn, "làm nếu gọn"). Không đổi template, seed, N7 hay ngưỡng monitoring. Chưa commit hay push.
 
 ## 5. Lệnh mục tiêu và cách chạy theo từng mốc
 

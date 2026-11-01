@@ -22,6 +22,7 @@ from simulator.config import (
 from simulator.episodes import derive_episode_seed
 from simulator.labels import LABEL_POLICY_VERSION, snapshot_labels
 from simulator.randomness import keyed_rng
+from simulator.reports import REPORT_PROFILES
 from simulator.reproducibility import (
     RUN_FINGERPRINT_METADATA_KEY,
     canonical_episode_fingerprint,
@@ -1856,63 +1857,69 @@ def _walk_keys(value: Any):
             yield from _walk_keys(nested)
 
 
-def _validate_reports(run_dir: Path) -> str:
-    public_path = run_dir / "reports" / "smoke.json"
-    private_path = run_dir / "private" / "reports" / "smoke_truth.json"
+def _report_paths(run_dir: Path, profile: str) -> tuple[Path, Path]:
+    return (
+        run_dir / "reports" / f"{profile}.json",
+        run_dir / "private" / "reports" / f"{profile}_truth.json",
+    )
+
+
+def _validate_reports(run_dir: Path, profile: str | None) -> str:
+    if profile not in REPORT_PROFILES:
+        _fail("run metadata names no supported support-report profile")
+    public_path, private_path = _report_paths(run_dir, profile)
+    stray = [
+        str(path.relative_to(run_dir))
+        for other in REPORT_PROFILES
+        if other != profile
+        for path in _report_paths(run_dir, other)
+        if path.exists()
+    ]
+    if stray:
+        _fail(f"{profile} run must not contain other-profile support reports: {stray}")
     if not public_path.is_file() or not private_path.is_file():
-        _fail("smoke operational report or private truth report is missing")
+        _fail(f"{profile} operational report or private truth report is missing")
     try:
         public_report = json.loads(public_path.read_text(encoding="utf-8"))
         private_report = json.loads(private_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        _fail(f"smoke report is unreadable or invalid JSON: {exc}")
-    if public_report.get("profile") != "smoke" or public_report.get("report_version") != 1:
-        _fail("public smoke report has an unsupported version/profile")
+        _fail(f"{profile} report is unreadable or invalid JSON: {exc}")
+    if public_report.get("profile") != profile or public_report.get("report_version") != 1:
+        _fail(f"public {profile} report has an unsupported version/profile")
     if not {
         "as_of_time",
         "label_policy_version",
         "model_version",
     } <= set(public_report):
-        _fail("public smoke report is missing label-policy or model-version metadata")
+        _fail(f"public {profile} report is missing label-policy or model-version metadata")
     if not isinstance(public_report["label_policy_version"], str) or not public_report["label_policy_version"]:
-        _fail("public smoke report label_policy_version must be non-empty")
+        _fail(f"public {profile} report label_policy_version must be non-empty")
     if public_report["model_version"] is not None and not isinstance(
         public_report["model_version"], str
     ):
-        _fail("public smoke report model_version must be a string or null")
+        _fail(f"public {profile} report model_version must be a string or null")
     forbidden = sorted({key for key in _walk_keys(public_report) if key in _PUBLIC_FORBIDDEN_KEYS})
     if forbidden:
         _fail(f"operational report contains private truth fields: {forbidden}")
     support = public_report.get("p2_cohort_support")
     required_cohorts = {"fit", "validation", "calibration", "reference_drift", "monitoring_test"}
     if not isinstance(support, dict) or not required_cohorts <= set(support):
-        _fail("public smoke report is missing a P2 support cohort")
+        _fail(f"public {profile} report is missing a P2 support cohort")
     for name in ("fit", "validation", "calibration"):
         entry = support[name]
         if not {"positive_count", "negative_count", "missing_support", "support_status"} <= set(entry):
             _fail(f"P2 {name} support report is incomplete")
     if "operational_distributions" not in public_report or "window_completeness" not in public_report:
-        _fail("public smoke report is missing channel/time distribution or window completeness")
+        _fail(f"public {profile} report is missing channel/time distribution or window completeness")
     if not isinstance(private_report, dict) or private_report.get("truth_bearing") is not True:
         _fail("private truth report is not marked truth_bearing")
     if "truth_label_support" not in private_report or "label_delay_oracle" not in private_report:
-        _fail("private smoke report is missing truth support or oracle label-delay results")
+        _fail(f"private {profile} report is missing truth support or oracle label-delay results")
     return "operational support/distribution/window report is public-safe; truth and oracle report is private"
 
 
-def _validate_pilot_report_scope(run_dir: Path) -> str:
-    """Keep the P1.8 support report out of the P1.7 pilot generation scope."""
-    report_paths = (
-        run_dir / "reports" / "smoke.json",
-        run_dir / "private" / "reports" / "smoke_truth.json",
-    )
-    if any(path.exists() for path in report_paths):
-        _fail("pilot generation must not emit smoke-labeled support or truth reports")
-    return "P1.8 support reporting is deferred; no smoke-labeled report was emitted for pilot"
-
-
-def _validate_p2_handoff_support(run_dir: Path) -> str:
-    report_path = run_dir / "reports" / "smoke.json"
+def _validate_p2_handoff_support(run_dir: Path, profile: str) -> str:
+    report_path = _report_paths(run_dir, profile)[0]
     report = json.loads(report_path.read_text(encoding="utf-8"))
     cohorts = report["p2_cohort_support"]
     missing: list[str] = []
@@ -1938,6 +1945,71 @@ def _validate_p2_handoff_support(run_dir: Path) -> str:
     return (
         "fit, validation, calibration each contain positive and negative observed labels; "
         "reference cohort is present; isotonic shortfall is a non-blocking fallback warning"
+    )
+
+
+_ROLE_TEMPLATE_ROW_KEYS = {
+    "role",
+    "template",
+    "episode_count",
+    "transaction_count",
+    "label_snapshot_state_counts",
+    "reported_label_count",
+    "truth_positive_count",
+    "truth_reported_count",
+    "incident_truth_counts_by_cause",
+}
+
+
+def _validate_pilot_report_contract(
+    run_dir: Path,
+    operational: sqlite3.Connection,
+    metadata: dict[str, Any],
+) -> str:
+    """Pilot-only held-out rule: diagnostics stop at development; counts match the lock.
+
+    Reads only episode roles and the private report's diagnostic keys and count rows.
+    It never queries daily_metrics, alerts, incidents, or model_scores.
+    """
+    private_path = _report_paths(run_dir, "pilot")[1]
+    if not private_path.is_file():
+        _fail("pilot private truth report is missing")
+    try:
+        report = json.loads(private_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(f"pilot private truth report is unreadable or invalid JSON: {exc}")
+    roles = {row[0]: row[1] for row in operational.execute("SELECT episode_id, role FROM episodes")}
+    development = {episode_id for episode_id, role in roles.items() if role == "development"}
+    diagnostics = report.get("p1_4_feature_diagnostics")
+    if not isinstance(diagnostics, dict):
+        _fail("pilot private truth report is missing p1_4_feature_diagnostics")
+    held_out = sorted(key for key in diagnostics if roles.get(key) in {"calibration", "test"})
+    if held_out:
+        _fail(f"pilot report carries diagnostics for held-out episodes: {held_out}")
+    expected = {"base", *development}
+    if set(diagnostics) != expected:
+        _fail(
+            "pilot diagnostics must cover exactly base and development episodes "
+            f"(extra={sorted(set(diagnostics) - expected)}, "
+            f"missing={sorted(expected - set(diagnostics))})"
+        )
+    rows = report.get("role_template_support")
+    if not isinstance(rows, list) or not rows:
+        _fail("pilot private truth report is missing role_template_support")
+    observed: Counter[tuple[str, str]] = Counter()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != _ROLE_TEMPLATE_ROW_KEYS:
+            _fail("pilot role_template_support rows must contain only the structural count fields")
+        observed[(row["role"], row["template"])] += row["episode_count"]
+    episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    locked = Counter(
+        (item.role, item.template) for item in episode_config.profile("pilot").assignments
+    )
+    if observed != locked:
+        _fail("pilot role_template_support episode counts differ from the locked pilot allocation")
+    return (
+        f"pilot diagnostics cover base and {len(development)} development episodes only; "
+        f"{len(rows)} role-template count rows match the locked allocation"
     )
 
 
@@ -3028,15 +3100,28 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
             metadata = _load_run_metadata(private)
         except Exception:
             metadata = None
-        if metadata is not None and metadata.get("profile") == "pilot":
+        profile = metadata.get("profile") if metadata is not None else None
+        if profile in REPORT_PROFILES:
+            _evaluate(checks, "report_truth_boundary", lambda: _validate_reports(root, profile))
             _evaluate(
                 checks,
-                "pilot_support_report_deferred",
-                lambda: _validate_pilot_report_scope(root),
+                "p2_handoff_support",
+                lambda: _validate_p2_handoff_support(root, profile),
             )
+            if profile == "pilot" and operational is not None and metadata is not None:
+                _evaluate(
+                    checks,
+                    "pilot_heldout_report_contract",
+                    lambda: _validate_pilot_report_contract(root, operational, metadata),
+                )
         else:
-            _evaluate(checks, "report_truth_boundary", lambda: _validate_reports(root))
-            _evaluate(checks, "p2_handoff_support", lambda: _validate_p2_handoff_support(root))
+            checks.append(
+                {
+                    "name": "report_truth_boundary",
+                    "passed": False,
+                    "detail": "run metadata names no supported support-report profile",
+                }
+            )
     else:
         checks.append({"name": "private_schema", "passed": False, "detail": "private database could not be opened"})
 
