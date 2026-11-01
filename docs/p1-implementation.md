@@ -175,7 +175,7 @@ Vòng 1 xong khi P2 và P3 tối thiểu đọc được artifact smoke; trạng
 - **Hoàn tất:** bảng snapshot và báo cáo độ trễ đúng trên fixture và smoke; tách số quan sát được khỏi số do oracle evaluator biết. Không triển khai sửa nhãn/disputed thuộc phần mở rộng.
 - **Vòng 1 đã bàn giao:** `simulator/labels.py` sinh kết luận cho giao dịch nền P1.3/P1.4 bằng RNG riêng; delay đều rời rạc theo cấu hình; truth và trạng thái không báo chỉ nằm trong private `run_metadata`. Snapshot dùng `read_as_of`, trả bốn trạng thái H = 90; `label_delay_report` tách snapshot quan sát, oracle private và censoring. Label tail kết thúc sau giao dịch cuối ít nhất H (và đủ cận độ trễ cấu hình), không thêm giao dịch. Không mô phỏng feedback điều tra viên vì cần alert model P2/P3.
 
-### P1.6 — Injector, calendar và truth sự cố (`round1-done`)
+### P1.6 — Injector, calendar và truth sự cố (`done`; vòng 2 merge 01/11/2026)
 
 - **Mục tiêu:** mỗi sự cố có tác động kiểm tra được và đáp án phục vụ evaluator, không tự quyết định alert/agent phải kết luận gì.
 - **Phụ thuộc:** P1.4–P1.5.
@@ -240,6 +240,8 @@ Smoke manifest vẫn chỉ dùng `clean/data_pipeline/seasonal` cho đến P1.7 
   - **Baseline và gate:** nội dung smoke không đổi so với fix1b; canonical operational fingerprint vẫn `29a16830bcafddc49fd3572e983152f9f482f3dc8f49a00cb5a02bb54f6271ca`. Smoke có 5 episode, roles 1/2/2, `ep-0001` 0 alert; hai pipeline giữ first-jump `data_ticket`, detection recall 2/2. Validator tăng từ 19 lên **20 checks** do check episode-event window mới.
   - **Kiểm tra cuối:** full suite chạy đúng một lần: **436 passed, 1 xfailed** trong 783.32 giây. `generate` và `validate` tại `/tmp/p16-fix2-smoke` đều **20/20 passed**. `verify_plan_claims.py` xác minh 19 ví dụ; hash `review/verification_results.json` giữ `858baaf241cffb1ecbae8ae25ddd748b6ce66ac8aa2e9e156db87f091f41bd16`. `check_links.py`: 16 file, 0 link hỏng. Không commit; không triển khai N7 hay manifest/template wiring P1.7.
 
+- **Trạng thái vòng 2:** ✅ merge 01/11/2026 ([r1](../review/findings/P1.6-r2-r1.md) CHANGES_REQUIRED, fix 1 theo quyết định người dùng F1/F2; [r2](../review/findings/P1.6-r2-r2.md) CHANGES_REQUIRED F5; fix 2 ngắn người dùng duyệt, merge không review lại; 436 passed + 1 xfailed; smoke 20/20). Chuyển P1.7: nối template vào generate + enum manifest/CHECK/validator; N7 tài khoản mới hợp lệ trong episode. Ghi chú r2 không chặn: hộ kinh doanh trong dòng injector dùng supplier 100 % (nền ~84 %); nhánh fallback overlap hai nguyên nhân có thể đặt giờ ngoài phân phối card testing.
+
 ### P1.7 — Episode và manifest (`round1-done`)
 
 - **Mục tiêu:** sinh được bộ episode dùng chung cho mọi baseline, khóa vai trò trước tuning.
@@ -249,6 +251,14 @@ Smoke manifest vẫn chỉ dùng `clean/data_pipeline/seasonal` cho đến P1.7 
 - **Kiểm tra:** thêm/bỏ/reorder episode không đổi dữ liệu của episode có cùng seed/config; role và seed tái lập được; các tập tách ở cấp episode; episode hai nguyên nhân vẫn là một đơn vị chia tập; không có giao dịch từ episode khác trong truy vấn.
 - **Hoàn tất:** manifest có fingerprint và cấu hình đủ để tái tạo. P1 không dùng test để chỉnh tham số cho P2/P3/P4; xem lại test để tune khiến seed đó không còn held-out và phải sinh seed mới theo protocol.
 - **Vòng 1 đã bàn giao:** [`simulator/episodes.py`](../simulator/episodes.py) sinh một lần lịch sử base, rồi 5 episode smoke có role 1/2/2, seed riêng dẫn xuất từ root seed + `episode_id`, giao dịch 30 ngày, card testing P1.4, label P1.5 và tối đa một template P1.6. Manifest có role/seed/template, fingerprint nội dung canonical và config hash; manifest/truth/template ở private, operational `episodes` chỉ có ID + role. Smoke có clean, `data_pipeline` và `seasonal`; chưa sinh pilot 60.
+- **Nghiệm thu vòng 2 (orchestrator viết 01/11/2026, sau P1.6 vòng 2):**
+  - **Profile `pilot`** trong `configs/episodes.yaml`: 60 episode đúng bảng phân bổ [data.md](data.md) mục 4 (role 12/24/24, từng kịch bản × role đúng số). Gán template cho episode tất định và khóa trong manifest trước mọi tuning; ca hai nguyên nhân là một đơn vị chia tập. Template ngoài bảng (seasonal "trend không có trong lịch") không gán trong pilot; muốn gán → hỏi người dùng.
+  - **Seed (audit B4):** dẫn xuất seed episode có khóa profile (hoặc root seed riêng cho pilot); validator pilot kiểm seed calibration/test không giao với seed của smoke manifest. Thêm/bỏ/reorder episode không đổi dữ liệu của episode cùng seed/config.
+  - **Nối template P1.6 vào generate:** mọi template trong bảng chạy qua pipeline với seed và khóa RNG tường minh; mở rộng enum template trong manifest, CHECK private và hợp đồng template của validator ([data.md](data.md) mục private tables) trong cùng thay đổi. Merchant mới dùng `no_material_change` (`requires_intervention = 0`, `accepted_actions` rỗng — quyết định 01/11, MASTER mục 7). Dòng lịch của biến thể fraud trùng ngày lịch lấy tham số từ config seasonal, không literal. Validator khóa injector theo template manifest (SE chỉ ở `new_fraud`, spike chỉ ở `legit_business_spike`).
+  - **N7 (người dùng chốt 01/11):** mọi episode không clean có thêm vài tài khoản mới hợp lệ trong cửa sổ tương lai, đủ lịch sử để không censor metric monitoring; tham số kèm provenance. Kiểm tra: tập giao dịch có customer tạo sau T0 không còn trùng tập truth `new_fraud`.
+  - **Sinh pilot:** `generate --profile pilot` + `validate` đạt; ghi thời gian chạy và fingerprint. Chỉ đọc kết quả integrity của validator; KHÔNG xem metric/alert/score của episode calibration/test để chỉnh tham số (vi phạm → seed đó mất tư cách held-out, phải sinh seed mới). Báo cáo support đầy đủ thuộc P1.8.
+  - **Smoke:** giữ 5 episode, role 1/2/2; gate: hai pipeline first-jump → `data_ticket`, clean development 0 alert, recall không giảm; baseline cũ → mới theo mục 7.
+  - **Luật test (AGENTS.md):** functional test qua API/CLI simulator; full suite một lần trước bàn giao.
 
 ### P1.8 — CLI, validation và bàn giao P2/P3 (`round1-done`; vòng 2 chưa làm)
 
