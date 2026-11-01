@@ -118,18 +118,39 @@ templates:
   legitimate_new_account_controls:
     accounts_per_episode:
       value: 2
-      unit: accounts per non-clean episode
-      rationale: Add a small legitimate cohort so post-T0 customer creation is not unique to new_fraud.
+      unit: accounts per episode
+      rationale: Add an early and an in-window legitimate account to every episode, including clean.
       provenance:
         kind: assumption
-        reference: P1.7 N7 user decision in MASTER_PLAN.md section 7; minimal fixture count.
+        reference: P1.7 N7 user decision 01/11/2026; minimal fixture count.
     creation_offset_days:
-      value: 19
-      unit: local calendar days after T0
-      rationale: Keep controls out of earlier injected mechanism participants while preserving a full monitoring lookback.
+      value: 0
+      unit: local calendar days after T0 for the early control
+      rationale: Seeded seconds after T0 make legitimate account creation visible before the new_fraud effect window.
       provenance:
         kind: assumption
-        reference: P1.7 N7 control-account schedule.
+        reference: P1.7 N7 review r1 F1; account timestamp is seeded per episode.
+    creation_in_window_offset_days:
+      value: 9
+      unit: local calendar days after T0 for the in-window control
+      rationale: Place a legitimate account inside the new_fraud effect window and before its decision deadline.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r1 F1; new_fraud deadline is day 15.
+    creation_in_window_jitter_days:
+      value: 3
+      unit: seeded whole calendar days
+      rationale: Vary the in-window creation date while retaining at least the required seven-day history before the day-27 first payment.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r1 F1; P2.2 seven-day observation window.
+    creation_time_jitter_seconds:
+      value: 86399
+      unit: seeded seconds after local midnight
+      rationale: Ensure each control is created strictly after its selected local calendar day begins.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r1 F1; as-of comparison uses strict event time after T0.
     first_transaction_offset_days:
       value: 27
       unit: local calendar days after T0

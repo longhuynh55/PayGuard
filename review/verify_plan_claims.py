@@ -1,4 +1,4 @@
-"""Reproduce counterexamples used in archive/PLAN_REVIEW.md and docs/, using only the stdlib.
+"""Reproduce counterexamples used in archive/PLAN_REVIEW.md and docs/.
 
 These are mathematical examples, NOT tests of the absent PayGuard implementation.
 Run from the project root: python3 review/verify_plan_claims.py
@@ -11,6 +11,8 @@ import sqlite3
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import yaml
 
 
 def zero_error_bounds():
@@ -690,30 +692,35 @@ def episode_risk_and_zero_denominator():
 
 def pilot_episode_allocation_arithmetic():
     # One two-cause episode is one split unit, although it contributes two truth rows.
-    two_cause_by_role = {"development": 2, "calibration": 4, "test": 4}
-    fraud_calendar_by_role = {"development": 1, "calibration": 2, "test": 2}
-    clean_by_role = {"development": 4, "calibration": 8, "test": 8}
-    other_injected_by_role = {
-        "development": 5,
-        "calibration": 10,
-        "test": 10,
-    }
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "episodes.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    pilot = config["profiles"]["pilot"]
+    roles = ("development", "calibration", "test")
     role_totals = {
-        role: clean_by_role[role]
-        + two_cause_by_role[role]
-        + fraud_calendar_by_role[role]
-        + other_injected_by_role[role]
-        for role in clean_by_role
+        role: pilot["role_episode_counts"][role]["value"] for role in roles
     }
-    assert sum(two_cause_by_role.values()) == 10
-    assert sum(fraud_calendar_by_role.values()) == 5
-    assert role_totals == {"development": 12, "calibration": 24, "test": 24}
-    assert sum(role_totals.values()) == 60
+    matrix = {}
+    for assignment in pilot["assignments"]:
+        template = assignment["template"]
+        role = assignment["role"]
+        counts = matrix.setdefault(template, {name: 0 for name in roles})
+        counts[role] += 1
+    assert {
+        role: sum(counts[role] for counts in matrix.values()) for role in roles
+    } == role_totals
+    assert sum(role_totals.values()) == len(pilot["assignments"])
+    two_cause_by_role = matrix["two_cause_fraud_seasonal"]
+    fraud_calendar_by_role = matrix["fraud_calendar"]
+    assert sum(two_cause_by_role.values()) == sum(
+        assignment["template"] == "two_cause_fraud_seasonal"
+        for assignment in pilot["assignments"]
+    )
     return {
+        "template_episode_counts_by_role": matrix,
         "two_cause_episode_counts_by_role": two_cause_by_role,
         "fraud_calendar_episode_counts_by_role": fraud_calendar_by_role,
         "role_totals": role_totals,
-        "pilot_episode_total": sum(role_totals.values()),
+        "pilot_episode_total": len(pilot["assignments"]),
         "note": "Episode allocations are split units; two-cause episodes do not count as two episodes.",
     }
 

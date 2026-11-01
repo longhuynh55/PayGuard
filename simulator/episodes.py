@@ -143,6 +143,9 @@ def _episode_config_snapshot(
             "protocol": episode_config.protocol.model_dump(mode="json"),
             "assignment": assignment.model_dump(mode="json"),
             "template_config": template_config,
+            "n7_controls": episode_config.templates.legitimate_new_account_controls.model_dump(
+                mode="json"
+            ),
         },
         "seed_derivation": EPISODE_SEED_DERIVATION,
         "episode_seed": episode_seed,
@@ -299,15 +302,10 @@ def _inject_legitimate_new_account_controls(
     seed: int,
     transaction_random_keys: dict[str, str],
 ) -> None:
-    """Add neutral, private-tracked legitimate customers to every injected episode."""
-    if assignment.template == "clean":
-        return
+    """Add neutral, private-tracked legitimate customers to every episode."""
     controls = episode_config.templates.legitimate_new_account_controls
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     t0_date = simulator_config.timeline.t0_business_date.value
-    account_creation_at = datetime.combine(
-        t0_date + timedelta(days=controls.creation_offset_days.value), time.min, tzinfo=timezone
-    )
     first_transaction_date = t0_date + timedelta(
         days=controls.first_transaction_offset_days.value
     )
@@ -330,7 +328,58 @@ def _inject_legitimate_new_account_controls(
         row[0] for row in operational.execute("SELECT customer_id FROM customers")
     }
     account_rows: list[dict[str, object]] = []
+    new_fraud_match_timestamp: datetime | None = None
+    if assignment.template == "new_fraud":
+        mechanism_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?",
+            (f"p1.4.mechanisms.v1:{episode_id}",),
+        ).fetchone()
+        if mechanism_row is None:
+            raise ValueError("new_fraud control scheduling requires private P1.4 mechanism metadata")
+        mechanism_groups = json.loads(mechanism_row[0]).get("groups", [])
+        mule_ids = sorted(
+            group["mule_customer_id"]
+            for group in mechanism_groups
+            if group.get("mechanism") == "social_engineering"
+            and group.get("role") == "fraud"
+            and isinstance(group.get("mule_customer_id"), str)
+        )
+        if not mule_ids:
+            raise ValueError("new_fraud control scheduling requires a social-engineering mule")
+        mule_row = operational.execute(
+            "SELECT event_at FROM customers WHERE customer_id = ? AND episode_id = ?",
+            (mule_ids[0], episode_id),
+        ).fetchone()
+        if mule_row is None:
+            raise ValueError("new_fraud control scheduling cannot find its mule customer")
+        new_fraud_match_timestamp = datetime.fromisoformat(
+            mule_row["event_at"].replace("Z", "+00:00")
+        ).astimezone(timezone)
     for account_index in range(controls.accounts_per_episode.value):
+        offset_days = (
+            controls.creation_offset_days.value
+            if account_index == 0
+            else controls.creation_in_window_offset_days.value
+            + keyed_rng(
+                seed,
+                "p1.7.legitimate_new_account.creation_date",
+                episode_id,
+                account_index,
+            ).randint(0, controls.creation_in_window_jitter_days.value)
+        )
+        creation_time_seconds = keyed_rng(
+            seed,
+            "p1.7.legitimate_new_account.creation_time",
+            episode_id,
+            account_index,
+        ).randint(1, controls.creation_time_jitter_seconds.value)
+        account_creation_at = (
+            new_fraud_match_timestamp
+            if account_index == 0 and new_fraud_match_timestamp is not None
+            else datetime.combine(
+                t0_date + timedelta(days=offset_days), time.min, tzinfo=timezone
+            ) + timedelta(seconds=creation_time_seconds)
+        )
         profile_rng = keyed_rng(
             seed, "p1.7.legitimate_new_account.profile", episode_id, account_index
         )
@@ -633,16 +682,6 @@ def generate_episodes(
                 mechanisms={"ato"} if assignment.template != "clean" else set(),
                 transaction_random_keys=transaction_random_keys,
             )
-            _inject_legitimate_new_account_controls(
-                operational,
-                private,
-                simulator_config,
-                episode_config,
-                assignment,
-                episode_id=episode_id,
-                seed=episode_seed,
-                transaction_random_keys=transaction_random_keys,
-            )
             incident_summary = _inject_template(
                 operational,
                 private,
@@ -653,6 +692,16 @@ def generate_episodes(
                 episode_seed,
                 base_world,
                 transaction_random_keys,
+            )
+            _inject_legitimate_new_account_controls(
+                operational,
+                private,
+                simulator_config,
+                episode_config,
+                assignment,
+                episode_id=episode_id,
+                seed=episode_seed,
+                transaction_random_keys=transaction_random_keys,
             )
             label_summary = generate_label_events(
                 operational,

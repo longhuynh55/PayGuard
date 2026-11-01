@@ -20,9 +20,14 @@ from simulator.config import (
     load_simulator_config,
     validate_episode_config,
 )
-from simulator.episodes import derive_episode_seed, generate_episodes
+from simulator.episodes import _episode_config_snapshot, derive_episode_seed, generate_episodes
 from simulator.incidents import inject_legit_business_spike, inject_new_fraud
-from simulator.validate import validate_run
+from simulator.validate import (
+    ValidationError,
+    validate_n7_asof_customer_membership,
+    validate_pilot_heldout_seed_disjointness,
+    validate_run,
+)
 from simulator.labels import label_delay_report
 from simulator.reproducibility import (
     canonical_episode_content,
@@ -66,6 +71,117 @@ def _generate(root: Path, config: EpisodeConfig | None = None):
     )
     pair.commit()
     return pair, summary
+
+
+def _generate_profile(
+    root: Path,
+    config: EpisodeConfig,
+    profile: str,
+    simulator_config=None,
+):
+    pair = create_export_stores(root)
+    summary = generate_episodes(
+        pair.operational,
+        pair.private,
+        simulator_config or load_simulator_config(ROOT / "configs" / "simulator.yaml"),
+        config,
+        profile=profile,  # type: ignore[arg-type]
+    )
+    pair.commit()
+    return pair, summary
+
+
+def test_pilot_allocation_matrix_matches_locked_scenario_by_role_contract() -> None:
+    pilot = load_episode_config(ROOT / "configs" / "episodes.yaml").profile("pilot")
+    actual = Counter((item.template, item.role) for item in pilot.assignments)
+    expected = {
+        ("clean", "development"): 4,
+        ("clean", "calibration"): 8,
+        ("clean", "test"): 8,
+        ("two_cause_fraud_seasonal", "development"): 2,
+        ("two_cause_fraud_seasonal", "calibration"): 4,
+        ("two_cause_fraud_seasonal", "test"): 4,
+        ("fraud_calendar", "development"): 1,
+        ("fraud_calendar", "calibration"): 2,
+        ("fraud_calendar", "test"): 2,
+        ("seasonal", "development"): 1,
+        ("seasonal", "calibration"): 2,
+        ("seasonal", "test"): 2,
+        ("data_pipeline", "development"): 1,
+        ("data_pipeline", "calibration"): 2,
+        ("data_pipeline", "test"): 2,
+        ("fraud_surge", "development"): 1,
+        ("fraud_surge", "calibration"): 2,
+        ("fraud_surge", "test"): 2,
+        ("new_fraud", "development"): 1,
+        ("new_fraud", "calibration"): 1,
+        ("new_fraud", "test"): 1,
+        ("legit_business_spike", "development"): 1,
+        ("legit_business_spike", "calibration"): 1,
+        ("legit_business_spike", "test"): 1,
+        ("new_merchant_sparse_history", "calibration"): 1,
+        ("new_merchant_sparse_history", "test"): 1,
+        ("silent_concept_drift", "calibration"): 1,
+        ("silent_concept_drift", "test"): 1,
+    }
+    assert actual == expected
+    assert pilot.total_episode_count == 60
+
+
+def test_pilot_seed_v2_differs_from_smoke_and_heldout_overlap_is_rejected() -> None:
+    config = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    smoke_seeds = {
+        derive_episode_seed(config.seed.value, item.episode_id, "smoke")
+        for item in config.profile("smoke").assignments
+    }
+    pilot = config.profile("pilot")
+    assert derive_episode_seed(config.seed.value, "ep-0007", "pilot") != derive_episode_seed(
+        config.seed.value, "ep-0007", "smoke"
+    )
+    heldout_seeds = {
+        derive_episode_seed(config.seed.value, item.episode_id, "pilot")
+        for item in pilot.assignments
+        if item.role in {"calibration", "test"}
+    }
+    validate_pilot_heldout_seed_disjointness(heldout_seeds, smoke_seeds)
+    with pytest.raises(ValidationError, match="overlap the locked smoke manifest"):
+        validate_pilot_heldout_seed_disjointness(
+            heldout_seeds | {next(iter(smoke_seeds))}, smoke_seeds
+        )
+
+
+def test_n7_asof_validation_rejects_controls_with_one_shared_creation_time() -> None:
+    t0 = datetime.fromisoformat("2026-02-01T00:00:00+00:00")
+    customers = [
+        {
+            "customer_id": "mule-1",
+            "episode_id": "ep-new-fraud",
+            "event_at": "2026-02-02T00:00:00.000000Z",
+            "available_at": "2026-02-02T00:00:00.000000Z",
+        },
+        {
+            "customer_id": "control-1",
+            "episode_id": "ep-new-fraud",
+            "event_at": "2026-02-02T00:00:00.000000Z",
+            "available_at": "2026-02-02T00:00:00.000000Z",
+        },
+        {
+            "customer_id": "control-2",
+            "episode_id": "ep-new-fraud",
+            "event_at": "2026-02-02T00:00:00.000000Z",
+            "available_at": "2026-02-02T00:00:00.000000Z",
+        },
+    ]
+    with pytest.raises(ValidationError, match="must not share one creation timestamp"):
+        validate_n7_asof_customer_membership(
+            customers,
+            episode_id="ep-new-fraud",
+            t0=t0,
+            intervention_start_at=datetime.fromisoformat("2026-02-09T00:00:00+00:00"),
+            deadline_at=datetime.fromisoformat("2026-02-16T00:00:00+00:00"),
+            mule_customer_ids={"mule-1"},
+            control_customer_ids={"control-1", "control-2"},
+        )
 
 
 def test_new_fraud_pipeline_passes_random_keys_to_labels_and_standard_smoke_validates(
@@ -274,7 +390,7 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert set(account_roles) <= base_customer_ids
-        # P1.7 N7 adds only neutral account controls to non-clean smoke episodes.
+        # P1.7 N7 adds neutral account controls to every smoke episode, including clean.
         episode_customer_counts = {
             row["episode_id"]: row["count"]
             for row in pair.operational.execute(
@@ -283,14 +399,12 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert episode_customer_counts == {
+            "ep-0001": 2,
             "ep-0002": 2,
             "ep-0003": 2,
             "ep-0004": 2,
             "ep-0005": 2,
         }
-        assert not pair.operational.execute(
-            "SELECT 1 FROM customers WHERE episode_id = 'ep-0001' LIMIT 1"
-        ).fetchone()
         account_transfers = [
             dict(row)
             for row in pair.operational.execute(
@@ -751,6 +865,136 @@ def test_episode_add_remove_and_reorder_preserve_existing_data_and_roles(
         assert expanded_pair.private.execute(
             "SELECT 1 FROM episode_manifest WHERE episode_id = 'ep-0006'"
         ).fetchone()
+    finally:
+        for pair in pairs:
+            pair.close()
+
+
+def test_pilot_template_add_remove_invariance_and_n7_config_fingerprint(
+    tmp_path: Path,
+) -> None:
+    full_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    full_assignments = {
+        item.episode_id: item
+        for item in full_config.profile("pilot").assignments
+    }
+    small_assignments = [
+        full_assignments["ep-0011"],
+        full_assignments["ep-0013"],
+        full_assignments["ep-0037"],
+    ]
+    expanded_assignments = small_assignments + [full_assignments["ep-0059"]]
+    pilot_profile = full_config.profile("pilot")
+    baseline_profile = pilot_profile.model_copy(update={"assignments": small_assignments})
+    expanded_profile = pilot_profile.model_copy(update={"assignments": expanded_assignments})
+    baseline_config = full_config.model_copy(
+        update={"profiles": {**full_config.profiles, "pilot": baseline_profile}}
+    )
+    expanded_config = full_config.model_copy(
+        update={"profiles": {**full_config.profiles, "pilot": expanded_profile}}
+    )
+    controls = full_config.templates.legitimate_new_account_controls
+    changed_controls = controls.model_copy(
+        update={
+            "creation_in_window_jitter_days": controls.creation_in_window_jitter_days.model_copy(
+                update={"value": 2}
+            )
+        }
+    )
+    changed_templates = full_config.templates.model_copy(
+        update={"legitimate_new_account_controls": changed_controls}
+    )
+    changed_n7_config = baseline_config.model_copy(
+        update={"templates": changed_templates}
+    )
+    simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+    small_world = simulator_config.model_copy(
+        update={"profiles": {**simulator_config.profiles, "pilot": simulator_config.profiles["smoke"]}}
+    )
+    baseline, _ = _generate_profile(
+        tmp_path / "pilot-small", baseline_config, "pilot", small_world
+    )
+    expanded, _ = _generate_profile(
+        tmp_path / "pilot-expanded", expanded_config, "pilot", small_world
+    )
+    pairs = (baseline, expanded)
+    try:
+        selected = []
+        for pair in pairs:
+            selected.append(
+                dict(
+                    pair.private.execute(
+                        "SELECT role, seed, template, content_fingerprint, config_fingerprint "
+                        "FROM episode_manifest WHERE episode_id = 'ep-0011'"
+                    ).fetchone()
+                )
+            )
+        stored_config = json.loads(
+            baseline.private.execute(
+                "SELECT config_json FROM episode_manifest WHERE episode_id = 'ep-0011'"
+            ).fetchone()[0]
+        )
+        assert stored_config["episode_config"]["n7_controls"] == (
+            baseline_config.templates.legitimate_new_account_controls.model_dump(mode="json")
+        )
+        assert selected[0]["seed"] == selected[1]["seed"]
+        assert selected[0]["content_fingerprint"] == selected[1]["content_fingerprint"]
+        assert selected[0]["config_fingerprint"] == selected[1]["config_fingerprint"]
+        altered_snapshot = _episode_config_snapshot(
+            small_world,
+            changed_n7_config,
+            full_assignments["ep-0011"],
+            selected[0]["seed"],
+            "pilot",
+        )
+        altered_json = json.dumps(
+            altered_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        altered_fingerprint = hashlib.sha256(altered_json.encode("utf-8")).hexdigest()
+        assert selected[0]["config_fingerprint"] != altered_fingerprint
+        truth = dict(
+            baseline.private.execute(
+                "SELECT intervention_start_at, deadline_at FROM incident_truth "
+                "WHERE episode_id = 'ep-0011' AND cause = 'new_fraud'"
+            ).fetchone()
+        )
+        mechanisms = json.loads(
+            baseline.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key = ?",
+                ("p1.4.mechanisms.v1:ep-0011",),
+            ).fetchone()[0]
+        )
+        mule_ids = {
+            group["mule_customer_id"]
+            for group in mechanisms["groups"]
+            if group["mechanism"] == "social_engineering" and group["role"] == "fraud"
+        }
+        controls = json.loads(
+            baseline.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key = ?",
+                (f"{episodes_module.LEGITIMATE_NEW_ACCOUNT_METADATA_PREFIX}ep-0011",),
+            ).fetchone()[0]
+        )
+        control_ids = {account["customer_id"] for account in controls["accounts"]}
+        customer_rows = [
+            dict(row)
+            for row in baseline.operational.execute(
+                "SELECT customer_id, episode_id, event_at, available_at FROM customers "
+                "WHERE episode_id = 'ep-0011'"
+            )
+        ]
+        visible_ids = validate_n7_asof_customer_membership(
+            customer_rows,
+            episode_id="ep-0011",
+            t0=datetime.fromisoformat(T0.replace("Z", "+00:00")),
+            intervention_start_at=datetime.fromisoformat(
+                truth["intervention_start_at"].replace("Z", "+00:00")
+            ),
+            deadline_at=datetime.fromisoformat(truth["deadline_at"].replace("Z", "+00:00")),
+            mule_customer_ids=mule_ids,
+            control_customer_ids=control_ids,
+        )
+        assert visible_ids == len(mule_ids | control_ids)
     finally:
         for pair in pairs:
             pair.close()

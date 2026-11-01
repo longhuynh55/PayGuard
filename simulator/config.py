@@ -680,20 +680,33 @@ class SilentConceptDriftTemplateConfig(StrictModel):
 
 class LegitimateNewAccountControlsConfig(StrictModel):
     accounts_per_episode: ConfigValue[PositiveInt]
-    creation_offset_days: ConfigValue[PositiveInt]
+    creation_offset_days: ConfigValue[NonNegativeInt]
+    creation_in_window_offset_days: ConfigValue[PositiveInt]
+    creation_in_window_jitter_days: ConfigValue[NonNegativeInt]
+    creation_time_jitter_seconds: ConfigValue[PositiveInt]
     first_transaction_offset_days: ConfigValue[PositiveInt]
     transactions_per_account: ConfigValue[PositiveInt]
     minimum_account_age_days: ConfigValue[PositiveInt]
 
     @model_validator(mode="after")
     def account_history_is_observable(self) -> LegitimateNewAccountControlsConfig:
-        if self.first_transaction_offset_days.value - self.creation_offset_days.value < (
+        if self.accounts_per_episode.value < 2:
+            raise ValueError("N7 requires an early and an in-window legitimate control account")
+        if self.creation_in_window_offset_days.value <= self.creation_offset_days.value:
+            raise ValueError("N7 in-window account creation must follow the early control account")
+        latest_creation_offset = (
+            self.creation_in_window_offset_days.value
+            + self.creation_in_window_jitter_days.value
+        )
+        if self.first_transaction_offset_days.value - latest_creation_offset < (
             self.minimum_account_age_days.value
         ):
             raise ValueError(
                 "legitimate new-account controls must be available for their full minimum "
                 "history window before the first transaction"
             )
+        if self.creation_time_jitter_seconds.value > 86399:
+            raise ValueError("N7 creation_time_jitter_seconds must be at most 86399")
         return self
 
 
