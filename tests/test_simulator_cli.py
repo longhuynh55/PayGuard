@@ -284,6 +284,11 @@ def test_cli_recipient_signals_separate_cashout_from_business_fanin(
             simulator_config,
             episode_id=episode_id,
             incident_truth_id="truth-cli-new-fraud",
+            seed=private.execute(
+                "SELECT seed FROM episode_manifest WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()[0],
+            transaction_random_keys={},
         )
         private.commit()
         social_metadata = json.loads(
@@ -638,7 +643,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
         str(episode_config),
     )
     assert generated.returncode == 0, generated.stdout + generated.stderr
-    assert "Validation summary: 19 passed, 0 failed" in generated.stdout
+    assert "Validation summary: 20 passed, 0 failed" in generated.stdout
 
     with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
         effects = [
@@ -674,7 +679,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
 
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
-    assert "Validation summary: 19 passed, 0 failed" in validated.stdout
+    assert "Validation summary: 20 passed, 0 failed" in validated.stdout
 
 
 def test_generate_checks_episode_duration_against_selected_simulator_config(
@@ -1367,6 +1372,43 @@ def test_validate_rejects_incident_truth_shifted_outside_operational_effects(
     validation = _cli("validate", "--run", str(run_dir))
     assert validation.returncode != 0, validation.stdout + validation.stderr
     assert "FAIL incident_truth_contract" in validation.stdout
+
+
+def test_validate_rejects_transaction_events_outside_episode_window(
+    tmp_path: Path, valid_smoke_run: Path
+) -> None:
+    run_dir = tmp_path / "late_transaction_event"
+    shutil.copytree(valid_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+    config = load_simulator_config()
+    episode_start = datetime.combine(
+        config.timeline.t0_business_date.value,
+        time.min,
+        tzinfo=ZoneInfo(config.timeline.business_timezone.value),
+    ).astimezone(ZoneInfo("UTC"))
+    episode_end = (
+        episode_start + timedelta(days=config.episode.duration_days.value)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    with sqlite3.connect(database) as connection:
+        txn_id = connection.execute(
+            "SELECT txn_id FROM transactions WHERE episode_id = 'ep-0001' ORDER BY txn_id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO transaction_events "
+            "(event_id, txn_id, episode_id, event_type, event_at, available_at, amount, response_code) "
+            "VALUES (?, ?, 'ep-0001', 'authorized', ?, ?, NULL, NULL)",
+            (f"{txn_id}:late-authorized", txn_id, episode_end, episode_end),
+        )
+
+    result = validate_run(run_dir)
+    assert result["status"] == "failed"
+    incident_check = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "transaction_event_episode_window"
+    )
+    assert incident_check["passed"] is False
+    assert "event_at is outside the episode future window" in incident_check["detail"]
 
 
 def test_zero_report_probability_blocks_p2_handoff(tmp_path: Path) -> None:

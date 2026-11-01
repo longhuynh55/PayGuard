@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import simulator.episodes as episodes_module
+from simulator.__main__ import main as simulator_main
 from simulator.asof import read_as_of
 from simulator.config import (
     EpisodeConfig,
@@ -20,6 +22,7 @@ from simulator.config import (
 )
 from simulator.episodes import derive_episode_seed, generate_episodes
 from simulator.incidents import inject_legit_business_spike, inject_new_fraud
+from simulator.validate import validate_run
 from simulator.labels import label_delay_report
 from simulator.reproducibility import (
     canonical_episode_content,
@@ -63,6 +66,96 @@ def _generate(root: Path, config: EpisodeConfig | None = None):
     )
     pair.commit()
     return pair, summary
+
+
+def test_new_fraud_pipeline_passes_random_keys_to_labels_and_standard_smoke_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_inject_template = episodes_module._inject_template
+    injected: dict[str, object] = {}
+
+    def inject_social_engineering_before_labels(
+        operational,
+        private,
+        simulator_config,
+        episode_config,
+        assignment,
+        episode_id,
+        seed,
+        world,
+        transaction_random_keys,
+    ):
+        summary = original_inject_template(
+            operational,
+            private,
+            simulator_config,
+            episode_config,
+            assignment,
+            episode_id,
+            seed,
+            world,
+            transaction_random_keys,
+        )
+        if episode_id == "ep-0002":
+            injected["summary"] = inject_new_fraud(
+                operational,
+                private,
+                simulator_config,
+                episode_id=episode_id,
+                incident_truth_id="truth-pipeline-social-engineering",
+                seed=seed,
+                transaction_random_keys=transaction_random_keys,
+            )
+            injected["random_keys"] = transaction_random_keys
+        return summary
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            episodes_module, "_inject_template", inject_social_engineering_before_labels
+        )
+        pair, _ = _generate(tmp_path / "injected-label-generation")
+
+    try:
+        injected_summary = injected["summary"]
+        transaction_ids = set(injected_summary.affected_transaction_ids)
+        random_keys = injected["random_keys"]
+        assert len(transaction_ids) == 10
+        assert transaction_ids <= set(random_keys)
+        label_truth = json.loads(
+            pair.private.execute(
+                "SELECT value_json FROM run_metadata "
+                "WHERE key = 'p1.5.label_truth.v1:ep-0002'"
+            ).fetchone()[0]
+        )
+        outcomes = {
+            row["txn_id"]: row
+            for row in label_truth["transactions"]
+            if row["txn_id"] in transaction_ids
+        }
+        assert set(outcomes) == transaction_ids
+        assert all(row["true_label"] == "fraud" for row in outcomes.values())
+        expected_reported_ids = {
+            txn_id for txn_id, row in outcomes.items() if row["reported"]
+        }
+        observed_label_ids = {
+            row[0]
+            for row in pair.operational.execute(
+                "SELECT txn_id FROM label_events WHERE episode_id = 'ep-0002' "
+                "AND txn_id IN (" + ", ".join("?" for _ in transaction_ids) + ")",
+                tuple(sorted(transaction_ids)),
+            )
+        }
+        assert expected_reported_ids
+        assert observed_label_ids == expected_reported_ids
+    finally:
+        pair.close()
+
+    standard_run = tmp_path / "standard-smoke"
+    assert simulator_main(
+        ["generate", "--profile", "smoke", "--out", str(standard_run)]
+    ) == 0
+    validation = validate_run(standard_run)
+    assert validation["status"] == "passed"
 
 
 def _base_snapshot(connection: sqlite3.Connection) -> dict[str, list[dict]]:
@@ -495,6 +588,10 @@ def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
             load_simulator_config(ROOT / "configs" / "simulator.yaml"),
             episode_id="ep-0002",
             incident_truth_id="truth-p16-new-fraud",
+            seed=treated.private.execute(
+                "SELECT seed FROM episode_manifest WHERE episode_id = 'ep-0002'"
+            ).fetchone()[0],
+            transaction_random_keys={},
         )
         social_metadata = json.loads(
             treated.private.execute(
@@ -520,6 +617,10 @@ def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
             load_simulator_config(ROOT / "configs" / "simulator.yaml"),
             episode_id="ep-0004",
             incident_truth_id="truth-p16-legit-business",
+            seed=treated.private.execute(
+                "SELECT seed FROM episode_manifest WHERE episode_id = 'ep-0004'"
+            ).fetchone()[0],
+            transaction_random_keys={},
         )
 
         treated_after = {

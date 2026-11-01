@@ -381,6 +381,47 @@ def _validate_episode_manifest(
     return f"{len(non_base)} locked smoke episode roles and private manifest entries match"
 
 
+def _validate_transaction_event_episode_window(
+    operational: sqlite3.Connection,
+    metadata: dict[str, Any],
+) -> str:
+    """Require every non-base transaction event to remain inside the episode future."""
+    simulator_config = validate_simulator_config(metadata["resolved_config"]["simulator"])
+    episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
+    episode_start = datetime.combine(
+        simulator_config.timeline.t0_business_date.value,
+        time.min,
+        tzinfo=timezone,
+    ).astimezone(UTC)
+    episode_end = episode_start + timedelta(days=episode_config.protocol.duration_days.value)
+    event_count = 0
+    for event in operational.execute(
+        "SELECT event_id, episode_id, event_at, available_at FROM transaction_events "
+        "WHERE episode_id <> 'base' ORDER BY episode_id, event_at, event_id"
+    ):
+        for field in ("event_at", "available_at"):
+            try:
+                value = datetime.fromisoformat(
+                    event[field].replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except (AttributeError, TypeError, ValueError) as exc:
+                _fail(
+                    f"transaction event {event['event_id']} has invalid {field} "
+                    f"for {event['episode_id']}: {exc}"
+                )
+            if not episode_start <= value < episode_end:
+                _fail(
+                    f"transaction event {event['event_id']} {field} is outside the "
+                    f"episode future window for {event['episode_id']}"
+                )
+        event_count += 1
+    return (
+        f"{event_count} non-base transaction events have event_at and available_at "
+        "inside [T0, T0 + duration_days)"
+    )
+
+
 def _validate_incident_truth(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
@@ -2385,6 +2426,13 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))
+            _evaluate(
+                checks,
+                "transaction_event_episode_window",
+                lambda: _validate_transaction_event_episode_window(
+                    operational, _load_run_metadata(private)
+                ),
+            )
             _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(operational, private, _load_run_metadata(private)))
             _evaluate(checks, "operational_identifier_shape_contract", lambda: _validate_operational_identifier_shapes(operational, private))
             _evaluate(checks, "legitimate_new_account_control", lambda: _validate_legitimate_new_account_control(operational, private))

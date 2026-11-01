@@ -297,13 +297,6 @@ def _load_base_world_summary(
     )
 
 
-def _episode_seed(private: sqlite3.Connection, episode_id: str, fallback: int) -> int:
-    row = private.execute(
-        "SELECT seed FROM episode_manifest WHERE episode_id = ?", (episode_id,)
-    ).fetchone()
-    return fallback if row is None else row[0]
-
-
 def _append_p16_fraud_group(
     private: sqlite3.Connection,
     *,
@@ -414,7 +407,11 @@ def _insert_background_adjustment(
         transactions.adjustment_maximum_delay_hours.value * 3600,
     )
     adjustment_at = settled_at + timedelta(seconds=delay_seconds)
-    episode_end = _business_midnight(config.timeline.end_business_date_exclusive.value, config)
+    episode_end = _business_midnight(
+        config.timeline.t0_business_date.value
+        + timedelta(days=config.episode.duration_days.value),
+        config,
+    )
     if adjustment_at >= episode_end:
         return
     adjustment_amount = keyed_rng(
@@ -790,6 +787,8 @@ def inject_new_fraud(
     *,
     episode_id: str,
     incident_truth_id: str,
+    seed: int,
+    transaction_random_keys: MutableMapping[str, str],
     parent_scenario: str | None = None,
 ) -> IncidentSummary:
     """Generate a P1.4 social-engineering chain, then record private truth."""
@@ -800,7 +799,7 @@ def inject_new_fraud(
         for item in _p14_mechanism_groups(private, episode_id)
     ):
         raise ValueError("new_fraud social-engineering chain has already been generated")
-    run_seed = _episode_seed(private, episode_id, config.seed.value)
+    run_seed = seed
     world_summary = _load_base_world_summary(operational, private)
     with _paired_savepoints(operational, private):
         generate_other_fraud_mechanisms(
@@ -812,6 +811,7 @@ def inject_new_fraud(
             episode_id=episode_id,
             duration_days=config.episode.duration_days.value,
             mechanisms={"social_engineering"},
+            transaction_random_keys=transaction_random_keys,
         )
         group = next(
             (
@@ -989,8 +989,8 @@ def inject_legit_business_spike(
     *,
     episode_id: str,
     incident_truth_id: str,
-    seed: int | None = None,
-    transaction_random_keys: MutableMapping[str, str] | None = None,
+    seed: int,
+    transaction_random_keys: MutableMapping[str, str],
 ) -> IncidentSummary:
     """Generate a P1.4 household-business spike, then record benign private truth."""
     _require_episode(operational, private, episode_id)
@@ -1000,7 +1000,7 @@ def inject_legit_business_spike(
         for item in _p14_mechanism_groups(private, episode_id)
     ):
         raise ValueError("legit_business_spike chain has already been generated")
-    run_seed = _episode_seed(private, episode_id, config.seed.value) if seed is None else seed
+    run_seed = seed
     world_summary = _load_base_world_summary(operational, private)
     with _paired_savepoints(operational, private):
         generate_other_fraud_mechanisms(
