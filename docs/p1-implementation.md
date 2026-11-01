@@ -309,7 +309,7 @@ Smoke manifest vẫn chỉ dùng `clean/data_pipeline/seasonal` cho đến P1.7 
   - **Tests:** full suite chỉ chạy một lần, trước các chỉnh sửa N7 cuối: **441 passed, 1 xfailed, 1 failed, 1 error** trong 886.50 giây. Sau chỉnh sửa, targeted tests pass gồm N7 transaction negative, episode-shape negative, `new_fraud` label/validation, pilot template/fingerprint invariance, và runbook pipeline routing. Smoke metrics target vẫn báo lỗi duy nhất vì assertion cũ đòi ep-0004 = 21, trong khi kết quả hiện tại là 22; không sửa test và không chạy full suite lần hai theo giới hạn once-only. `verify_plan_claims.py` và `check_links.py` được chạy sau handoff. Không commit; không sửa MASTER_PLAN.
   - **Fix 2b (người dùng duyệt):** baseline smoke alerts `[0,3,1,21,0]` → `[0,3,1,22,0]`; fingerprint `3706257f…` → `0bf373c5…`; gate giữ nguyên.
 
-### P1.8 — CLI, validation và bàn giao P2/P3 (`round1-done`; vòng 2 đang làm)
+### P1.8 — CLI, validation và bàn giao P2/P3 (`round2-done`)
 
 - **Mục tiêu:** sinh và kiểm tra dữ liệu từ CLI, trả mã lỗi khi vi phạm hợp đồng; bàn giao đủ thông tin để P2/P3 dùng được.
 - **Phụ thuộc:** P1.1–P1.7.
@@ -387,6 +387,8 @@ Smoke manifest vẫn chỉ dùng `clean/data_pipeline/seasonal` cho đến P1.7 
       4. `p2_handoff_support` của pilot chặn bàn giao khi thiếu positive/negative hoặc reference, giống smoke. Pilot hiện đủ support; calibration có 19 positive < 25 nên ghi cảnh báo isotonic và fallback sigmoid, không chặn.
       5. Hiệu năng: `_p14_feature_diagnostics` O(N²) làm dựng báo cáo mất khoảng 79 phút. Đề xuất tối ưu bằng cửa sổ theo thời gian đã sắp xếp; phải giữ smoke byte-identical. Chưa làm trong vòng này.
     - **Chưa làm:** backlog vòng 2 `affected_transaction_ids` trong `p1.6.incident_effect.v1` (không chặn, "làm nếu gọn"). Không đổi template, seed, N7 hay ngưỡng monitoring. Chưa commit hay push.
+
+- **Trạng thái vòng 2:** ✅ merge 02/11/2026 ([r1](../review/findings/P1.8-r2-r1.md) PASS, implementer Claude Haiku 5.5 max; main 448 passed + 1 xfailed; smoke report byte-identical; pilot 22/22, fingerprint dữ liệu `bd463217…`). Pilot `/tmp/p18-pilot` có `git_commit=f6dba54` trong metadata vì sinh từ working tree chưa commit, tương ứng `b63c2bc` (F5). F1 (docs held-out hẹp hơn code) orchestrator sửa trong `data.md`. **Backlog (không chặn):** F2 validator chưa kiểm `profile`/`report_version` của báo cáo private; F3 check held-out chỉ nhìn khóa `p1_4_feature_diagnostics` (cần quét đệ quy ID calibration/test + khóa kiểu điểm, test PASS/FAIL trên subset 4 episode), `transaction_count` chưa đối chiếu DB; **F4 `_p14_feature_diagnostics` O(N²) — ~79 phút ở pilot, làm trước lần sinh pilot kế tiếp** (lọc SQL theo episode, parse timestamp một lần, duyệt theo thời gian với heap `available_at`, chỉ mục tăng dần, tái dùng lịch sử base; giữ smoke byte-identical); F5 cờ `git_dirty` trong metadata; backlog cũ `affected_transaction_ids` vẫn mở.
 
 ## 5. Lệnh mục tiêu và cách chạy theo từng mốc
 
