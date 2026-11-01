@@ -1,4 +1,4 @@
-"""CLI for generating and validating a P1 round-one smoke run."""
+"""CLI for generating and validating locked P1 smoke and pilot runs."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from simulator.storage import create_export_stores, insert_private_record, utc_t
 from simulator.validate import RUN_METADATA_KEY, validate_run
 
 
-CODE_VERSION = "p1.8-smoke-round1-v1"
+CODE_VERSION = "p1.8-smoke-pilot-round2-v1"
 SCHEMA_VERSION = 1
 
 
@@ -93,7 +93,7 @@ def _generate(args: argparse.Namespace) -> int:
             stores.private,
             simulator_config,
             episode_config,
-            profile="smoke",
+            profile=args.profile,
         )
         record_canonical_fingerprint(stores.operational, stores.private)
         fingerprint = canonical_run_fingerprint(stores.operational)
@@ -116,16 +116,17 @@ def _generate(args: argparse.Namespace) -> int:
                 },
             },
         )
-        public_report, private_report = build_smoke_reports(
-            stores.operational,
-            stores.private,
-            simulator_config,
-            episode_config,
-            model_config_path=args.model_config,
-            model_doc_path=args.model_doc,
-        )
-        _write_json(output / "reports" / "smoke.json", public_report)
-        _write_json(output / "private" / "reports" / "smoke_truth.json", private_report)
+        if args.profile == "smoke":
+            public_report, private_report = build_smoke_reports(
+                stores.operational,
+                stores.private,
+                simulator_config,
+                episode_config,
+                model_config_path=args.model_config,
+                model_doc_path=args.model_doc,
+            )
+            _write_json(output / "reports" / "smoke.json", public_report)
+            _write_json(output / "private" / "reports" / "smoke_truth.json", private_report)
 
         completed_at = datetime.now(UTC)
         runtime = {
@@ -135,7 +136,7 @@ def _generate(args: argparse.Namespace) -> int:
         }
         metadata = {
             "artifact_version": SCHEMA_VERSION,
-            "profile": "smoke",
+            "profile": args.profile,
             "resolved_config": resolved_config,
             "seed": {
                 "simulator": simulator_config.seed.value,
@@ -158,7 +159,7 @@ def _generate(args: argparse.Namespace) -> int:
         )
 
     validation = validate_run(output)
-    print(f"Generated smoke run: {output}")
+    print(f"Generated {args.profile} run: {output}")
     print(f"Canonical operational fingerprint: {fingerprint}")
     print(f"Validation: {validation['status'].upper()}")
     _print_validation(validation)
@@ -185,8 +186,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m simulator")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    generate_parser = subparsers.add_parser("generate", help="generate the locked P1 smoke profile")
-    generate_parser.add_argument("--profile", choices=("smoke",), default="smoke")
+    generate_parser = subparsers.add_parser(
+        "generate", help="generate a locked P1 smoke or pilot profile"
+    )
+    generate_parser.add_argument("--profile", choices=("smoke", "pilot"), default="smoke")
     generate_parser.add_argument("--out", required=True, help="new run directory")
     generate_parser.add_argument("--config", default="configs/simulator.yaml")
     generate_parser.add_argument("--episodes-config", default="configs/episodes.yaml")

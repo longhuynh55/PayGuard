@@ -69,6 +69,137 @@ templates:
       provenance:
         kind: assumption
         reference: P1.7 smoke seasonal template; not estimated from episode truth.
+  fraud_surge:
+    date_offset_days:
+      value: 4
+      unit: local calendar days after T0
+      rationale: Keep the known card-testing surge inside the first episode week.
+      provenance:
+        kind: assumption
+        reference: P1.7 round-two template schedule.
+  fraud_calendar:
+    date_offset_days:
+      value: 4
+      unit: local calendar days after T0
+      rationale: Align the fraud-only calendar context with the seasonal template date.
+      provenance:
+        kind: assumption
+        reference: P1.7 round-two template schedule; calendar parameters come from seasonal.
+  new_merchant_sparse_history:
+    date_offset_days:
+      value: 12
+      unit: local calendar days after T0
+      rationale: Place the sparse merchant after the shared control-account history window.
+      provenance:
+        kind: assumption
+        reference: P1.7 round-two template schedule.
+    transaction_count:
+      value: 3
+      unit: valid merchant transactions
+      rationale: Use a small sparse-merchant sample within the injector's supported range.
+      provenance:
+        kind: assumption
+        reference: P1.6 sparse-new-merchant injector bounds; P1.7 pilot fixture choice.
+  silent_concept_drift:
+    date_offset_days:
+      value: 18
+      unit: local calendar days after T0
+      rationale: Place the silent-drift sample in the latter half of the episode window.
+      provenance:
+        kind: assumption
+        reference: P1.7 round-two template schedule.
+    transaction_count:
+      value: 10
+      unit: valid transactions
+      rationale: Keep a small, fixed sample of ordinary-looking fraud transactions.
+      provenance:
+        kind: assumption
+        reference: P1.6 silent-concept-drift injector; P1.7 pilot fixture choice.
+  legitimate_new_account_controls:
+    accounts_per_episode:
+      value: 2
+      unit: accounts per episode
+      rationale: Add an early and an in-window legitimate account to every episode, including clean.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 user decision 01/11/2026; minimal fixture count.
+    additional_accounts_without_social_engineering:
+      value: 1
+      unit: ordinary accounts per episode without a social-engineering mule
+      rationale: Keep the observable post-T0 customer count equal across episodes; new_fraud already has its mule.
+      provenance:
+        kind: assumption
+        reference: P1.7 review r2 F1' episode-count parity.
+    creation_offset_days:
+      value: 0
+      unit: local calendar days after T0 for the early control
+      rationale: Seeded seconds after T0 make the early legitimate account available before the new_fraud effect window; this offset is applied in every template and is never replaced with a mule timestamp.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r2 N8; account timestamp is seeded per episode.
+    creation_in_window_offset_days:
+      value: 9
+      unit: local calendar days after T0 for the in-window control
+      rationale: Place a legitimate account inside the new_fraud effect window and before its decision deadline.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r1 F1; new_fraud deadline is day 15.
+    creation_in_window_jitter_days:
+      value: 3
+      unit: seeded whole calendar days
+      rationale: Vary the in-window creation date while retaining at least the required seven-day history before the day-27 first payment.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r1 F1; P2.2 seven-day observation window.
+    creation_time_jitter_seconds:
+      value: 86399
+      unit: seeded seconds after local midnight
+      rationale: Ensure each control is created strictly after its selected local calendar day begins.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 review r1 F1; as-of comparison uses strict event time after T0.
+    early_first_transaction_offset_days:
+      value: 15
+      unit: local calendar days after T0 for the early control
+      rationale: Provide ordinary legitimate activity by the day-15 deadline, after the seven-day feature lookback; spread first activity from the day-8 timing-matched account.
+      provenance:
+        kind: assumption
+        reference: P1.7 review r2 F1' transaction-level as-of check.
+    early_transactions_per_account:
+      value: 1
+      unit: ordinary merchant transactions per early control account
+      rationale: Provide a visible legitimate transaction before the new_fraud decision deadline.
+      provenance:
+        kind: assumption
+        reference: P1.7 review r2 F1' transaction-level as-of check.
+    first_transaction_offset_days:
+      value: 27
+      unit: local calendar days after T0
+      rationale: Start activity for the later-created account after the configured seven-day observation window.
+      provenance:
+        kind: assumption
+        reference: P2.2 customer observation flags use a seven-day history window.
+    transactions_per_account:
+      value: 3
+      unit: valid merchant transactions per in-window control account
+      rationale: Give the later-created account a few ordinary payments before the episode ends.
+      provenance:
+        kind: assumption
+        reference: P1.7 N7 control-account schedule.
+    timing_match_transactions_per_account:
+      value: 1
+      unit: ordinary merchant transactions for the timing-match account
+      rationale: Keep the first-activity schedule matched to the social-engineering mule without copying its identity or creation timestamp.
+      provenance:
+        kind: assumption
+        reference: P1.7 review r2 F1' episode-count parity.
+    minimum_account_age_days:
+      value: 7
+      unit: days before the first control transaction
+      rationale: Satisfy the longest P2.2 feature observation window before monitoring includes the transaction.
+      provenance:
+        kind: contract
+        reference: model/features.py FEATURE_LOOKBACK_DAYS; docs/evaluation.md section 2.
 
 profiles:
   smoke:
@@ -185,10 +316,70 @@ profiles:
           kind: contract
           reference: docs/evaluation.md, section 1.
     multi_cause_episode_count:
-      value: 4
+      value: 10
       unit: episodes
-      rationale: Pilot multi-cause episode count.
+      rationale: Pilot fraud-plus-seasonal two-cause episode count.
       provenance:
         kind: contract
         reference: docs/data.md, section 4.
-    assignments: []
+    assignments:
+      - {episode_id: ep-0001, role: development, template: clean}
+      - {episode_id: ep-0002, role: development, template: clean}
+      - {episode_id: ep-0003, role: development, template: clean}
+      - {episode_id: ep-0004, role: development, template: clean}
+      - {episode_id: ep-0005, role: development, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0006, role: development, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0007, role: development, template: fraud_calendar}
+      - {episode_id: ep-0008, role: development, template: seasonal}
+      - {episode_id: ep-0009, role: development, template: data_pipeline}
+      - {episode_id: ep-0010, role: development, template: fraud_surge}
+      - {episode_id: ep-0011, role: development, template: new_fraud}
+      - {episode_id: ep-0012, role: development, template: legit_business_spike}
+      - {episode_id: ep-0013, role: calibration, template: clean}
+      - {episode_id: ep-0014, role: calibration, template: clean}
+      - {episode_id: ep-0015, role: calibration, template: clean}
+      - {episode_id: ep-0016, role: calibration, template: clean}
+      - {episode_id: ep-0017, role: calibration, template: clean}
+      - {episode_id: ep-0018, role: calibration, template: clean}
+      - {episode_id: ep-0019, role: calibration, template: clean}
+      - {episode_id: ep-0020, role: calibration, template: clean}
+      - {episode_id: ep-0021, role: calibration, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0022, role: calibration, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0023, role: calibration, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0024, role: calibration, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0025, role: calibration, template: fraud_calendar}
+      - {episode_id: ep-0026, role: calibration, template: fraud_calendar}
+      - {episode_id: ep-0027, role: calibration, template: seasonal}
+      - {episode_id: ep-0028, role: calibration, template: seasonal}
+      - {episode_id: ep-0029, role: calibration, template: data_pipeline}
+      - {episode_id: ep-0030, role: calibration, template: data_pipeline}
+      - {episode_id: ep-0031, role: calibration, template: fraud_surge}
+      - {episode_id: ep-0032, role: calibration, template: fraud_surge}
+      - {episode_id: ep-0033, role: calibration, template: new_fraud}
+      - {episode_id: ep-0034, role: calibration, template: legit_business_spike}
+      - {episode_id: ep-0035, role: calibration, template: new_merchant_sparse_history}
+      - {episode_id: ep-0036, role: calibration, template: silent_concept_drift}
+      - {episode_id: ep-0037, role: test, template: clean}
+      - {episode_id: ep-0038, role: test, template: clean}
+      - {episode_id: ep-0039, role: test, template: clean}
+      - {episode_id: ep-0040, role: test, template: clean}
+      - {episode_id: ep-0041, role: test, template: clean}
+      - {episode_id: ep-0042, role: test, template: clean}
+      - {episode_id: ep-0043, role: test, template: clean}
+      - {episode_id: ep-0044, role: test, template: clean}
+      - {episode_id: ep-0045, role: test, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0046, role: test, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0047, role: test, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0048, role: test, template: two_cause_fraud_seasonal}
+      - {episode_id: ep-0049, role: test, template: fraud_calendar}
+      - {episode_id: ep-0050, role: test, template: fraud_calendar}
+      - {episode_id: ep-0051, role: test, template: seasonal}
+      - {episode_id: ep-0052, role: test, template: seasonal}
+      - {episode_id: ep-0053, role: test, template: data_pipeline}
+      - {episode_id: ep-0054, role: test, template: data_pipeline}
+      - {episode_id: ep-0055, role: test, template: fraud_surge}
+      - {episode_id: ep-0056, role: test, template: fraud_surge}
+      - {episode_id: ep-0057, role: test, template: new_fraud}
+      - {episode_id: ep-0058, role: test, template: legit_business_spike}
+      - {episode_id: ep-0059, role: test, template: new_merchant_sparse_history}
+      - {episode_id: ep-0060, role: test, template: silent_concept_drift}

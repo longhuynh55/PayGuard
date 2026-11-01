@@ -28,6 +28,7 @@ from simulator.storage import (
     utc_timestamp,
 )
 from simulator.validate import (
+    ValidationError,
     _validate_incident_truth,
     _validate_p16_fraud_groups,
     _validate_parent_scenarios,
@@ -514,6 +515,8 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
     tmp_path: Path,
 ) -> None:
     config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+    episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    seasonal_config = episode_config.templates.seasonal
     control = _make_episode_store(tmp_path / "two-cause-control", "ep-0003")
     treated = _make_episode_store(tmp_path / "two-cause-treated", "ep-0003")
     repeat = _make_episode_store(tmp_path / "two-cause-repeat", "ep-0003")
@@ -527,10 +530,17 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
             "fraud_truth_id": "truth-fraud-surge",
             "seasonal_truth_id": "truth-seasonal-component",
             "parent_scenario": "scenario-paired-1",
-            "business_date": date(2026, 2, 6),
-            "event_name": "scheduled-promotion",
-            "seasonal_additional_transaction_count": 2,
-            "seasonal_expected_relative_change": 0.5,
+            "business_date": (
+                config.timeline.t0_business_date.value
+                + timedelta(days=seasonal_config.date_offset_days.value)
+            ),
+            "event_name": seasonal_config.event_name.value,
+            "seasonal_additional_transaction_count": (
+                seasonal_config.additional_transaction_count.value
+            ),
+            "seasonal_expected_relative_change": (
+                seasonal_config.expected_relative_change.value
+            ),
             "seed": 731,
             "transaction_random_keys": transaction_random_keys,
         }
@@ -623,7 +633,6 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
             for txn_id in result.affected_transaction_ids
         )
 
-        episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
         insert_private_record(
             treated.private,
             "episode_manifest",
@@ -631,7 +640,7 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
                 "episode_id": "ep-0003",
                 "role": "calibration",
                 "seed": 731,
-                "template": "seasonal",
+                "template": "two_cause_fraud_seasonal",
                 "content_fingerprint": "0" * 64,
                 "config_fingerprint": "0" * 64,
                 "config_json": "{}",
@@ -926,6 +935,76 @@ def test_sparse_new_merchant_truth_is_independent_of_sample_size(tmp_path: Path)
         control.close()
         fraud.close()
         benign.close()
+
+
+def test_sparse_new_merchant_fraud_group_is_rejected_in_new_fraud_template(
+    tmp_path: Path,
+) -> None:
+    pair = _make_episode_store(tmp_path / "sparse-group-template-lock")
+    try:
+        _seed_empty_card_testing_truth(pair, "ep-incidents")
+        result = inject_sparse_new_merchant(
+            pair.operational,
+            pair.private,
+            load_simulator_config(ROOT / "configs" / "simulator.yaml"),
+            episode_id="ep-incidents",
+            incident_truth_id="truth-sparse-under-new-fraud",
+            truth_cause="new_fraud",
+            business_date=date(2026, 2, 8),
+            transaction_count=3,
+            seed=983,
+        )
+        truth = _truth_row(pair, "truth-sparse-under-new-fraud")
+        effect = json.loads(
+            pair.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key = ?",
+                ("p1.6.incident_effect.v1:truth-sparse-under-new-fraud",),
+            ).fetchone()[0]
+        )
+        insert_private_record(
+            pair.private,
+            "episode_manifest",
+            {
+                "episode_id": "ep-incidents",
+                "role": "development",
+                "seed": 983,
+                "template": "new_fraud",
+                "content_fingerprint": "0" * 64,
+                "config_fingerprint": "0" * 64,
+                "config_json": "{}",
+            },
+        )
+        pair.private.execute(
+            "UPDATE run_metadata SET value_json = ? WHERE key = ?",
+            (
+                json.dumps(
+                    {
+                    "algorithm": "p1.6-fraud-groups-v1",
+                    "episode_id": "ep-incidents",
+                    "seed": 983,
+                    "groups": [
+                        {
+                            "incident_truth_id": "truth-sparse-under-new-fraud",
+                            "mechanism": "sparse_new_merchant",
+                            "role": "fraud",
+                            "transaction_ids": list(result.affected_transaction_ids),
+                        }
+                    ],
+                    },
+                    separators=(",", ":"),
+                ),
+                "p1.6.fraud_groups.v1:ep-incidents",
+            ),
+        )
+        with pytest.raises(ValidationError, match="not allowed by the locked episode template"):
+            _validate_p16_fraud_groups(
+                pair.operational,
+                pair.private,
+                {"ep-incidents": [truth]},
+                {"truth-sparse-under-new-fraud": effect},
+            )
+    finally:
+        pair.close()
 
 
 def test_silent_concept_drift_uses_ordinary_rows_but_private_fraud_truth(

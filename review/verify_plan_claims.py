@@ -1,4 +1,4 @@
-"""Reproduce counterexamples used in archive/PLAN_REVIEW.md and docs/, using only the stdlib.
+"""Reproduce counterexamples used in archive/PLAN_REVIEW.md and docs/.
 
 These are mathematical examples, NOT tests of the absent PayGuard implementation.
 Run from the project root: python3 review/verify_plan_claims.py
@@ -7,6 +7,7 @@ Run from the project root: python3 review/verify_plan_claims.py
 import json
 import math
 import random
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timedelta
@@ -688,6 +689,80 @@ def episode_risk_and_zero_denominator():
     }
 
 
+def pilot_episode_allocation_arithmetic():
+    # One two-cause episode is one split unit, although it contributes two truth rows.
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "episodes.yaml"
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    in_pilot = False
+    in_role_episode_counts = False
+    in_assignments = False
+    role_totals = {}
+    assignments = []
+    current_role = None
+    for line in lines:
+        if line == "  pilot:":
+            in_pilot = True
+            continue
+        if not in_pilot:
+            continue
+        if line == "    role_episode_counts:":
+            in_role_episode_counts = True
+            continue
+        if line == "    clean_episode_counts:":
+            in_role_episode_counts = False
+            continue
+        role_match = re.fullmatch(r"      (development|calibration|test):", line)
+        if in_role_episode_counts and role_match:
+            current_role = role_match.group(1)
+            continue
+        value_match = re.fullmatch(r"        value: (\d+)", line)
+        if in_role_episode_counts and value_match and current_role is not None:
+            role_totals[current_role] = int(value_match.group(1))
+            continue
+        if line == "    assignments:":
+            in_assignments = True
+            continue
+        if in_assignments:
+            assignment_match = re.fullmatch(
+                r"      - \{episode_id: ([^,]+), role: ([^,]+), template: ([^}]+)\}",
+                line,
+            )
+            if assignment_match:
+                assignments.append(
+                    {
+                        "episode_id": assignment_match.group(1),
+                        "role": assignment_match.group(2),
+                        "template": assignment_match.group(3),
+                    }
+                )
+    if set(role_totals) != {"development", "calibration", "test"} or not assignments:
+        raise AssertionError("could not read pilot role totals and assignments using the stdlib parser")
+    roles = ("development", "calibration", "test")
+    matrix = {}
+    for assignment in assignments:
+        template = assignment["template"]
+        role = assignment["role"]
+        counts = matrix.setdefault(template, {name: 0 for name in roles})
+        counts[role] += 1
+    assert {
+        role: sum(counts[role] for counts in matrix.values()) for role in roles
+    } == role_totals
+    assert sum(role_totals.values()) == len(assignments)
+    two_cause_by_role = matrix["two_cause_fraud_seasonal"]
+    fraud_calendar_by_role = matrix["fraud_calendar"]
+    assert sum(two_cause_by_role.values()) == sum(
+        assignment["template"] == "two_cause_fraud_seasonal" for assignment in assignments
+    )
+    return {
+        "template_episode_counts_by_role": matrix,
+        "two_cause_episode_counts_by_role": two_cause_by_role,
+        "fraud_calendar_episode_counts_by_role": fraud_calendar_by_role,
+        "role_totals": role_totals,
+        "pilot_episode_total": len(assignments),
+        "note": "Episode allocations are split units; two-cause episodes do not count as two episodes.",
+    }
+
+
 def main():
     examples = [
         zero_error_bounds,
@@ -709,9 +784,10 @@ def main():
         policy_independent_risk_units,
         agent_closure_reachability,
         episode_risk_and_zero_denominator,
+        pilot_episode_allocation_arithmetic,
     ]
     results = {example.__name__: example() for example in examples}
-    results["scope"] = "19 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
+    results["scope"] = "20 illustrative calculations/counterexamples and protocol checks; not PayGuard implementation validation"
     destination = Path(__file__).with_name("verification_results.json")
     destination.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"Verified {len(examples)} illustrative examples. Results: {destination}")

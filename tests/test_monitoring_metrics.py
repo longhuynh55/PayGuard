@@ -621,13 +621,12 @@ def p37_smoke_match_context(
         for episode_id, result in alert_results.items()
     }
     print(f"P3.7 smoke alert counts: {alert_counts}")
-    # P1.6 F1 removes SE/business-spike rows from base and nonmatching templates;
-    # monitoring config is unchanged and the clean development episode stays at zero.
+    # P1.7 fix 2 (01/11, user-approved): N7 control transactions before the new_fraud deadline add one PSI alert in pipeline ep-0004; gate unchanged
     assert alert_counts == {
         "ep-0001": 0,
         "ep-0002": 3,
         "ep-0003": 1,
-        "ep-0004": 21,
+        "ep-0004": 22,
         "ep-0005": 0,
     }
 
