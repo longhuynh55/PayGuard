@@ -643,7 +643,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
         str(episode_config),
     )
     assert generated.returncode == 0, generated.stdout + generated.stderr
-    assert "Validation summary: 20 passed, 0 failed" in generated.stdout
+    assert "Validation summary: 21 passed, 0 failed" in generated.stdout
 
     with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
         effects = [
@@ -679,7 +679,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
 
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
-    assert "Validation summary: 20 passed, 0 failed" in validated.stdout
+    assert "Validation summary: 21 passed, 0 failed" in validated.stdout
 
 
 def test_generate_checks_episode_duration_against_selected_simulator_config(

@@ -571,7 +571,11 @@ PRIVATE_DDL: tuple[str, ...] = (
         episode_id TEXT NOT NULL PRIMARY KEY REFERENCES private_episodes(episode_id),
         role TEXT NOT NULL CHECK (role IN ('development', 'calibration', 'test')),
         seed INTEGER NOT NULL CHECK (typeof(seed) = 'integer' AND seed >= 0),
-        template TEXT NOT NULL CHECK (template IN ('clean', 'data_pipeline', 'seasonal')),
+        template TEXT NOT NULL CHECK (template IN (
+            'clean', 'data_pipeline', 'seasonal', 'fraud_surge', 'fraud_calendar',
+            'two_cause_fraud_seasonal', 'new_fraud', 'legit_business_spike',
+            'new_merchant_sparse_history', 'silent_concept_drift'
+        )),
         content_fingerprint TEXT NOT NULL CHECK (
             length(content_fingerprint) = 64
             AND content_fingerprint NOT GLOB '*[^0-9a-f]*'

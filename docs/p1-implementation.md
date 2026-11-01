@@ -253,12 +253,38 @@ Smoke manifest vẫn chỉ dùng `clean/data_pipeline/seasonal` cho đến P1.7 
 - **Vòng 1 đã bàn giao:** [`simulator/episodes.py`](../simulator/episodes.py) sinh một lần lịch sử base, rồi 5 episode smoke có role 1/2/2, seed riêng dẫn xuất từ root seed + `episode_id`, giao dịch 30 ngày, card testing P1.4, label P1.5 và tối đa một template P1.6. Manifest có role/seed/template, fingerprint nội dung canonical và config hash; manifest/truth/template ở private, operational `episodes` chỉ có ID + role. Smoke có clean, `data_pipeline` và `seasonal`; chưa sinh pilot 60.
 - **Nghiệm thu vòng 2 (orchestrator viết 01/11/2026, sau P1.6 vòng 2):**
   - **Profile `pilot`** trong `configs/episodes.yaml`: 60 episode đúng bảng phân bổ [data.md](data.md) mục 4 (role 12/24/24, từng kịch bản × role đúng số). Gán template cho episode tất định và khóa trong manifest trước mọi tuning; ca hai nguyên nhân là một đơn vị chia tập. Template ngoài bảng (seasonal "trend không có trong lịch") không gán trong pilot; muốn gán → hỏi người dùng.
-  - **Seed (audit B4):** dẫn xuất seed episode có khóa profile (hoặc root seed riêng cho pilot); validator pilot kiểm seed calibration/test không giao với seed của smoke manifest. Thêm/bỏ/reorder episode không đổi dữ liệu của episode cùng seed/config.
+  - **Seed (audit B4):** smoke giữ nguyên `p1.7.episode.v1(root_seed, episode_id)` để bảo toàn seed/baseline đã khóa; pilot dùng `p1.7.episode.v2(root_seed, profile, episode_id)`. Validator kiểm seed calibration/test pilot không giao với manifest smoke. Thêm/bỏ/reorder episode không đổi dữ liệu của episode cùng seed/config.
   - **Nối template P1.6 vào generate:** mọi template trong bảng chạy qua pipeline với seed và khóa RNG tường minh; mở rộng enum template trong manifest, CHECK private và hợp đồng template của validator ([data.md](data.md) mục private tables) trong cùng thay đổi. Merchant mới dùng `no_material_change` (`requires_intervention = 0`, `accepted_actions` rỗng — quyết định 01/11, MASTER mục 7). Dòng lịch của biến thể fraud trùng ngày lịch lấy tham số từ config seasonal, không literal. Validator khóa injector theo template manifest (SE chỉ ở `new_fraud`, spike chỉ ở `legit_business_spike`).
   - **N7 (người dùng chốt 01/11):** mọi episode không clean có thêm vài tài khoản mới hợp lệ trong cửa sổ tương lai, đủ lịch sử để không censor metric monitoring; tham số kèm provenance. Kiểm tra: tập giao dịch có customer tạo sau T0 không còn trùng tập truth `new_fraud`.
   - **Sinh pilot:** `generate --profile pilot` + `validate` đạt; ghi thời gian chạy và fingerprint. Chỉ đọc kết quả integrity của validator; KHÔNG xem metric/alert/score của episode calibration/test để chỉnh tham số (vi phạm → seed đó mất tư cách held-out, phải sinh seed mới). Báo cáo support đầy đủ thuộc P1.8.
   - **Smoke:** giữ 5 episode, role 1/2/2; gate: hai pipeline first-jump → `data_ticket`, clean development 0 alert, recall không giảm; baseline cũ → mới theo mục 7.
   - **Luật test (AGENTS.md):** functional test qua API/CLI simulator; full suite một lần trước bàn giao.
+
+- **Bàn giao implementer P1.7 vòng 2 (01/11/2026, tiếp tục p17b):** Hoàn tất profile pilot, manifest và validation. Runtime/config files: `configs/episodes.yaml`, `simulator/config.py`, `simulator/episodes.py`, `simulator/schema.py`, `simulator/__main__.py`, `simulator/validate.py`; contracts tại [data.md §4](data.md#4-episode--th%E1%BA%BF-gi%E1%BB%9Bi-song-song) và allocation arithmetic tại `review/verify_plan_claims.py`. Tests/docs: `tests/test_simulator_episodes.py`, `tests/test_simulator_cli.py`, `tests/test_simulator_incidents.py`, `docs/data.md`, `docs/p1-implementation.md`. Smoke giữ seed v1; pilot dùng seed v2 kèm profile. N7 controls có private metadata và mỗi account đủ ≥7 ngày trước transaction.
+
+  **Allocation đọc từ private `episode_manifest` của `/tmp/p17-pilot`:**
+
+  | Template | Dev | Cal | Test | Tổng |
+  |---|---:|---:|---:|---:|
+  | clean | 4 | 8 | 8 | 20 |
+  | two_cause_fraud_seasonal | 2 | 4 | 4 | 10 |
+  | fraud_calendar | 1 | 2 | 2 | 5 |
+  | seasonal | 1 | 2 | 2 | 5 |
+  | data_pipeline | 1 | 2 | 2 | 5 |
+  | fraud_surge | 1 | 2 | 2 | 5 |
+  | new_fraud | 1 | 1 | 1 | 3 |
+  | legit_business_spike | 1 | 1 | 1 | 3 |
+  | new_merchant_sparse_history | 0 | 1 | 1 | 2 |
+  | silent_concept_drift | 0 | 1 | 1 | 2 |
+  | **Tổng** | **12** | **24** | **24** | **60** |
+
+  **B4/N7:** pilot validator báo 48 seed calibration/test disjoint toàn bộ 5 seed smoke. N7 kiểm 40 episode non-clean, 240 privately legitimate control transactions ≥7 ngày tuổi; SQL customer-created-after-T0 trả 270 transaction so với 50 transaction trong `new_fraud` truth, hai tập khác nhau. Không đọc metric/alert/score pilot.
+
+  **Smoke baseline:** N7-off isolation (runtime hook chỉ ở `/tmp`) khớp fingerprint legacy `29a16830bcafddc49fd3572e983152f9f482f3dc8f49a00cb5a02bb54f6271ca`; N7-on là `c2db2990c54c53eb17f1afa27f511d1a5b34e3aa534ebb590fe33d018484482d`. Cả hai có alert `[0,3,1,21,0]`, incidents `[0,2,1,2,0]`, recall `2/2`, và đúng hai pipeline `data_ticket`: `(ep-0002, incident-67c06d4b51c5196eb2894cd0)`, `(ep-0004, incident-367c348143656924203a5bc3)`. N7-on smoke có 24 control transaction; gate không đổi.
+
+  **Pilot:** `generate --profile pilot` hoàn tất trong 2516.68 giây, fingerprint `fb1c529493cc5a075da571c6c00fcefc2e33f86193c18605994193efc9352b63`; generate validator và lệnh validate riêng đều 20/20. Smoke `/tmp/p17-smoke` generate/validate đều 21/21, fingerprint N7-on như trên.
+
+  **Test/kiểm tra cuối:** full suite duy nhất đã chạy một lần: ban đầu 431 passed, 1 xfailed, 5 failed; hai lỗi là expected check-count cũ (20 thay vì 21), ba lỗi do template validator áp vào fixture không có manifest hoặc fixture khai báo seasonal thay vì two-cause. Sửa theo đúng hợp đồng, không nới gate; chạy lại 5 targeted instances, cả 5 passed. Không chạy full suite lần hai theo giới hạn once-only. `verify_plan_claims.py`: 20 ví dụ; `review/verification_results.json` được khôi phục về SHA-256 `858baaf241cffb1ecbae8ae25ddd748b6ce66ac8aa2e9e156db87f091f41bd16`. `check_links.py`: 16 files, 0 broken. Không commit; MASTER_PLAN vẫn do orchestrator cập nhật sau merge. Open item: full suite chưa chạy lại sau các targeted fixes.
 
 ### P1.8 — CLI, validation và bàn giao P2/P3 (`round1-done`; vòng 2 chưa làm)
 

@@ -21,6 +21,18 @@ PositiveFloat = Annotated[float, Field(gt=0.0)]
 MVP_MONEY_UNIT = "integer VND"
 ProfileName = Literal["smoke", "pilot"]
 EpisodeRole = Literal["development", "calibration", "test"]
+EpisodeTemplateName = Literal[
+    "clean",
+    "data_pipeline",
+    "seasonal",
+    "fraud_surge",
+    "fraud_calendar",
+    "two_cause_fraud_seasonal",
+    "new_fraud",
+    "legit_business_spike",
+    "new_merchant_sparse_history",
+    "silent_concept_drift",
+]
 
 
 class ConfigValidationError(ValueError):
@@ -638,7 +650,7 @@ class EpisodeProtocol(StrictModel):
 class EpisodeAssignment(StrictModel):
     episode_id: str = Field(pattern=r"^ep-[0-9]{4}$")
     role: EpisodeRole
-    template: Literal["clean", "data_pipeline", "seasonal"]
+    template: EpisodeTemplateName
 
 
 class DataPipelineTemplateConfig(StrictModel):
@@ -652,9 +664,47 @@ class SeasonalTemplateConfig(StrictModel):
     expected_relative_change: ConfigValue[PositiveFloat]
 
 
+class DateOffsetTemplateConfig(StrictModel):
+    date_offset_days: ConfigValue[PositiveInt]
+
+
+class SparseMerchantTemplateConfig(StrictModel):
+    date_offset_days: ConfigValue[PositiveInt]
+    transaction_count: ConfigValue[Annotated[int, Field(ge=2, le=5)]]
+
+
+class SilentConceptDriftTemplateConfig(StrictModel):
+    date_offset_days: ConfigValue[PositiveInt]
+    transaction_count: ConfigValue[PositiveInt]
+
+
+class LegitimateNewAccountControlsConfig(StrictModel):
+    accounts_per_episode: ConfigValue[PositiveInt]
+    creation_offset_days: ConfigValue[PositiveInt]
+    first_transaction_offset_days: ConfigValue[PositiveInt]
+    transactions_per_account: ConfigValue[PositiveInt]
+    minimum_account_age_days: ConfigValue[PositiveInt]
+
+    @model_validator(mode="after")
+    def account_history_is_observable(self) -> LegitimateNewAccountControlsConfig:
+        if self.first_transaction_offset_days.value - self.creation_offset_days.value < (
+            self.minimum_account_age_days.value
+        ):
+            raise ValueError(
+                "legitimate new-account controls must be available for their full minimum "
+                "history window before the first transaction"
+            )
+        return self
+
+
 class EpisodeTemplateConfig(StrictModel):
     data_pipeline: DataPipelineTemplateConfig
     seasonal: SeasonalTemplateConfig
+    fraud_surge: DateOffsetTemplateConfig
+    fraud_calendar: DateOffsetTemplateConfig
+    new_merchant_sparse_history: SparseMerchantTemplateConfig
+    silent_concept_drift: SilentConceptDriftTemplateConfig
+    legitimate_new_account_controls: LegitimateNewAccountControlsConfig
 
 
 class EpisodeProfile(StrictModel):
@@ -684,6 +734,12 @@ class EpisodeProfile(StrictModel):
             raise ValueError("episode assignment IDs must be unique within a profile")
         if self.assignments and len(self.assignments) != total:
             raise ValueError("episode assignment count must match role_episode_counts")
+        if self.assignments:
+            assigned_roles = {role: 0 for role in ("development", "calibration", "test")}
+            for assignment in self.assignments:
+                assigned_roles[assignment.role] += 1
+            if assigned_roles != episode_counts:
+                raise ValueError("episode assignments must match role_episode_counts")
         return self
 
     @property
@@ -710,8 +766,36 @@ class EpisodeConfig(StrictModel):
             raise ValueError("pilot role counts must match the locked 12/24/24 episode manifest")
         if {role: value.value for role, value in pilot.clean_episode_counts.items()} != expected_pilot_clean_counts:
             raise ValueError("pilot clean role counts must match the locked 4/8/8 allocation")
-        if pilot.multi_cause_episode_count.value != 4:
-            raise ValueError("pilot must contain the four locked multi-cause episodes")
+        if not pilot.assignments:
+            raise ValueError("pilot profile must declare its locked episode assignments")
+        expected_template_role_counts = {
+            "clean": {"development": 4, "calibration": 8, "test": 8},
+            "two_cause_fraud_seasonal": {"development": 2, "calibration": 4, "test": 4},
+            "fraud_calendar": {"development": 1, "calibration": 2, "test": 2},
+            "seasonal": {"development": 1, "calibration": 2, "test": 2},
+            "data_pipeline": {"development": 1, "calibration": 2, "test": 2},
+            "fraud_surge": {"development": 1, "calibration": 2, "test": 2},
+            "new_fraud": {"development": 1, "calibration": 1, "test": 1},
+            "legit_business_spike": {"development": 1, "calibration": 1, "test": 1},
+            "new_merchant_sparse_history": {"development": 0, "calibration": 1, "test": 1},
+            "silent_concept_drift": {"development": 0, "calibration": 1, "test": 1},
+        }
+        actual_template_role_counts = {
+            template: {role: 0 for role in ("development", "calibration", "test")}
+            for template in expected_template_role_counts
+        }
+        for assignment in pilot.assignments:
+            if assignment.template not in actual_template_role_counts:
+                raise ValueError(
+                    f"pilot template {assignment.template!r} is outside the locked allocation"
+                )
+            actual_template_role_counts[assignment.template][assignment.role] += 1
+        if actual_template_role_counts != expected_template_role_counts:
+            raise ValueError(
+                "pilot template-by-role assignments must match the locked docs/data.md section 4 table"
+            )
+        if pilot.multi_cause_episode_count.value != 10:
+            raise ValueError("pilot must contain ten locked fraud-plus-seasonal episodes")
         if pilot.total_episode_count != 60:
             raise ValueError("pilot must remain the locked 60-episode profile")
 
@@ -737,6 +821,19 @@ class EpisodeConfig(StrictModel):
             raise ValueError("round-one smoke episodes support at most one incident each")
         if self.templates.seasonal.date_offset_days.value >= self.protocol.duration_days.value:
             raise ValueError("seasonal date_offset_days must fall inside an episode")
+        for name in ("fraud_surge", "fraud_calendar"):
+            if getattr(self.templates, name).date_offset_days.value >= self.protocol.duration_days.value:
+                raise ValueError(f"templates.{name}.date_offset_days must fall inside an episode")
+        if self.templates.new_merchant_sparse_history.date_offset_days.value >= self.protocol.duration_days.value:
+            raise ValueError("new merchant date_offset_days must fall inside an episode")
+        if self.templates.silent_concept_drift.date_offset_days.value >= self.protocol.duration_days.value:
+            raise ValueError("silent concept-drift date_offset_days must fall inside an episode")
+        if (
+            self.templates.legitimate_new_account_controls.first_transaction_offset_days.value
+            + self.templates.legitimate_new_account_controls.transactions_per_account.value
+            > self.protocol.duration_days.value
+        ):
+            raise ValueError("legitimate new-account transactions must fit inside an episode")
         templates = {assignment.template for assignment in smoke.assignments}
         if not {"clean", "data_pipeline", "seasonal"} <= templates:
             raise ValueError("round-one smoke must include clean, data_pipeline, and seasonal episodes")

@@ -274,14 +274,23 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert set(account_roles) <= base_customer_ids
-        # Smoke has no new_fraud template assignment until P1.7 extends the manifest;
-        # episode-local mule customers are checked on the injected new_fraud fixture below.
-        assert {
-            row[0]
+        # P1.7 N7 adds only neutral account controls to non-clean smoke episodes.
+        episode_customer_counts = {
+            row["episode_id"]: row["count"]
             for row in pair.operational.execute(
-                "SELECT DISTINCT episode_id FROM customers"
+                "SELECT episode_id, COUNT(*) AS count FROM customers "
+                "WHERE episode_id <> 'base' GROUP BY episode_id"
             )
-        } == {"base"}
+        }
+        assert episode_customer_counts == {
+            "ep-0002": 2,
+            "ep-0003": 2,
+            "ep-0004": 2,
+            "ep-0005": 2,
+        }
+        assert not pair.operational.execute(
+            "SELECT 1 FROM customers WHERE episode_id = 'ep-0001' LIMIT 1"
+        ).fetchone()
         account_transfers = [
             dict(row)
             for row in pair.operational.execute(
@@ -388,7 +397,9 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
 
         episode_config = load_episode_config(ROOT / "configs" / "episodes.yaml")
         for episode_id, row in manifest.items():
-            assert row["seed"] == derive_episode_seed(episode_config.seed.value, episode_id)
+            assert row["seed"] == derive_episode_seed(
+                episode_config.seed.value, episode_id, "smoke"
+            )
             assert len(row["content_fingerprint"]) == 64
             assert len(row["config_fingerprint"]) == 64
             config_json = json.loads(row["config_json"])

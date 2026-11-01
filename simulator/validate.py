@@ -1,4 +1,4 @@
-"""Validate P1 smoke run contracts without suppressing any violations."""
+"""Validate P1 smoke and pilot contracts without suppressing violations."""
 
 from __future__ import annotations
 
@@ -261,8 +261,11 @@ def _validate_metadata(
     missing = sorted(expected - set(metadata))
     if missing:
         _fail(f"run metadata is missing fields: {missing}")
-    if metadata["artifact_version"] != SCHEMA_VERSION or metadata["profile"] != "smoke":
-        _fail("run metadata artifact version/profile is not P1.8 smoke v1")
+    if metadata["artifact_version"] != SCHEMA_VERSION or metadata["profile"] not in {
+        "smoke",
+        "pilot",
+    }:
+        _fail("run metadata artifact version/profile is not a supported P1.8 profile")
     versions = metadata["versions"]
     if not isinstance(versions, dict) or versions.get("schema") != SCHEMA_VERSION:
         _fail("run metadata schema version is missing or unsupported")
@@ -354,13 +357,16 @@ def _validate_episode_manifest(
     if set(non_base) != private_episode_ids or set(non_base) != set(manifest):
         _fail("operational episodes, private episode registry, and manifest IDs differ")
     episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    profile = metadata["profile"]
     assignments = {
         item.episode_id: item
-        for item in episode_config.profile("smoke").assignments
+        for item in episode_config.profile(profile).assignments
     }
     expected_roles = {episode_id: item.role for episode_id, item in assignments.items()}
     if non_base != expected_roles:
-        _fail("operational episode roles differ from the locked private smoke assignments")
+        _fail(
+            f"operational episode roles differ from the locked private {profile} assignments"
+        )
     for episode_id, role in non_base.items():
         entry = manifest[episode_id]
         assignment = assignments[episode_id]
@@ -368,8 +374,10 @@ def _validate_episode_manifest(
             _fail(f"episode role differs between operational and private manifest: {episode_id}")
         if entry["template"] != assignment.template:
             _fail(f"episode template differs from its locked private assignment: {episode_id}")
-        if entry["seed"] != derive_episode_seed(episode_config.seed.value, episode_id):
-            _fail(f"episode seed differs from its root seed and ID: {episode_id}")
+        if entry["seed"] != derive_episode_seed(
+            episode_config.seed.value, episode_id, profile
+        ):
+            _fail(f"episode seed differs from its root seed, profile, and ID: {episode_id}")
         config_text = entry["config_json"]
         if _canonical_json_hash(json.loads(config_text)) != entry["config_fingerprint"]:
             _fail(f"episode config fingerprint mismatch: {episode_id}")
@@ -378,7 +386,33 @@ def _validate_episode_manifest(
         )
         if fingerprint != entry["content_fingerprint"]:
             _fail(f"episode content fingerprint mismatch: {episode_id}")
-    return f"{len(non_base)} locked smoke episode roles and private manifest entries match"
+    role_counts = {
+        role: sum(value == role for value in non_base.values())
+        for role in ("development", "calibration", "test")
+    }
+    if profile == "pilot":
+        smoke_seeds = {
+            derive_episode_seed(episode_config.seed.value, item.episode_id, "smoke")
+            for item in episode_config.profile("smoke").assignments
+        }
+        held_out_seeds = {
+            entry["seed"]
+            for entry in manifest.values()
+            if entry["role"] in {"calibration", "test"}
+        }
+        if smoke_seeds & held_out_seeds:
+            _fail("pilot calibration/test seeds overlap the locked smoke manifest seeds")
+        return (
+            f"{len(non_base)} locked pilot assignments match the manifest; role counts "
+            f"development={role_counts['development']}, calibration={role_counts['calibration']}, "
+            f"test={role_counts['test']}; {len(held_out_seeds)} calibration/test seeds are "
+            f"disjoint from all {len(smoke_seeds)} smoke manifest seeds"
+        )
+    return (
+        f"{len(non_base)} locked smoke assignments match the manifest; role counts "
+        f"development={role_counts['development']}, calibration={role_counts['calibration']}, "
+        f"test={role_counts['test']}"
+    )
 
 
 def _validate_transaction_event_episode_window(
@@ -437,9 +471,10 @@ def _validate_incident_truth(
         tzinfo=timezone,
     ).astimezone(UTC)
     episode_end = episode_start + timedelta(days=episode_config.protocol.duration_days.value)
+    profile = metadata.get("profile", "smoke")
     assignments = {
         assignment.episode_id: assignment
-        for assignment in episode_config.profile("smoke").assignments
+        for assignment in episode_config.profile(profile).assignments
     }
     manifest = {
         row["episode_id"]: dict(row)
@@ -547,79 +582,104 @@ def _validate_incident_truth(
     for episode_id, manifest_entry in manifest.items():
         assignment = assignments.get(episode_id)
         if assignment is None:
-            _fail(f"private manifest episode {episode_id} is absent from locked smoke config")
+            _fail(
+                f"private manifest episode {episode_id} is absent from locked {profile} config"
+            )
         template = manifest_entry["template"]
         truth_rows = truth_by_episode[episode_id]
-        if template == "clean":
-            if truth_rows:
-                _fail(f"clean episode {episode_id} must not have incident truth")
-            continue
-        if template not in {"data_pipeline", "seasonal"}:
-            _fail(f"unsupported round-one incident template in manifest: {template!r}")
         causes = sorted(truth["cause"] for truth in truth_rows)
-        if template == "data_pipeline" and causes != ["data_pipeline"]:
-            _fail(f"data_pipeline manifest episode {episode_id} requires one pipeline truth")
-        if template == "seasonal" and causes not in (
-            ["seasonal"],
-            ["fraud_surge", "seasonal"],
-        ):
+        template_causes = {
+            "clean": [],
+            "data_pipeline": ["data_pipeline"],
+            "seasonal": ["seasonal"],
+            "fraud_surge": ["fraud_surge"],
+            "fraud_calendar": ["fraud_surge"],
+            "two_cause_fraud_seasonal": ["fraud_surge", "seasonal"],
+            "new_fraud": ["new_fraud"],
+            "legit_business_spike": ["legit_business_change"],
+            "new_merchant_sparse_history": ["no_material_change"],
+            "silent_concept_drift": ["new_fraud"],
+        }
+        if template not in template_causes:
+            _fail(f"unsupported episode template in private manifest: {template!r}")
+        expected_causes = template_causes[template]
+        if causes != expected_causes:
             _fail(
-                f"seasonal manifest episode {episode_id} requires seasonal truth, optionally "
-                "paired with one fraud_surge truth"
+                f"{template} manifest episode {episode_id} has truths {causes}, "
+                f"expected {expected_causes}"
             )
-        if template == "seasonal" and len(truth_rows) == 2:
-            parents = {truth["parent_scenario"] for truth in truth_rows}
-            if len(parents) != 1 or None in parents:
-                _fail(
-                    f"two-cause episode {episode_id} truths must share a non-null parent_scenario"
-                )
-            calendar_rows = [
-                dict(row)
-                for row in operational.execute(
-                    "SELECT business_date, expected_effect_json FROM business_calendar "
-                    "WHERE episode_id = ? ORDER BY business_date, calendar_event_id",
-                    (episode_id,),
-                )
-            ]
-            if len(calendar_rows) != 1:
-                _fail(
-                    f"two-cause episode {episode_id} must publish exactly the seasonal "
-                    "business-calendar component"
-                )
-            seasonal_truth = next(truth for truth in truth_rows if truth["cause"] == "seasonal")
-            seasonal_ids = effect_manifests[seasonal_truth["incident_truth_id"]][
+
+        calendar_rows = [
+            dict(row)
+            for row in operational.execute(
+                "SELECT event_at, available_at, business_date, event_name, lag_days, "
+                "expected_effect_json, scope_json FROM business_calendar "
+                "WHERE episode_id = ? ORDER BY business_date, calendar_event_id",
+                (episode_id,),
+            )
+        ]
+        calendar_expected = template in {
+            "seasonal",
+            "fraud_calendar",
+            "two_cause_fraud_seasonal",
+        }
+        if len(calendar_rows) != int(calendar_expected):
+            _fail(
+                f"{template} manifest episode {episode_id} must publish "
+                f"{int(calendar_expected)} business-calendar row(s)"
+            )
+        if calendar_expected:
+            calendar_row = calendar_rows[0]
+            if template == "fraud_calendar":
+                calendar_truth = truth_rows[0]
+            else:
+                calendar_truth = next(truth for truth in truth_rows if truth["cause"] == "seasonal")
+            calendar_ids = effect_manifests[calendar_truth["incident_truth_id"]][
                 "affected_transaction_ids"
             ]
-            seasonal_placeholders = ", ".join("?" for _ in seasonal_ids)
-            seasonal_dates = {
+            calendar_placeholders = ", ".join("?" for _ in calendar_ids)
+            transaction_dates = {
                 datetime.fromisoformat(row[0].replace("Z", "+00:00"))
                 .astimezone(timezone)
                 .date()
                 .isoformat()
                 for row in operational.execute(
                     "SELECT event_at FROM transactions "
-                    f"WHERE txn_id IN ({seasonal_placeholders})",
-                    tuple(seasonal_ids),
+                    f"WHERE txn_id IN ({calendar_placeholders})",
+                    tuple(calendar_ids),
                 )
             }
             try:
-                calendar_effect = json.loads(calendar_rows[0]["expected_effect_json"])
-                seasonal_change = calendar_effect["txn_count"]["relative_change"]
+                calendar_effect = json.loads(calendar_row["expected_effect_json"])
+                calendar_scope = json.loads(calendar_row["scope_json"])
+                calendar_change = calendar_effect["txn_count"]["relative_change"]
+                calendar_aggregation = calendar_effect["txn_count"]["aggregation"]
             except (KeyError, TypeError, json.JSONDecodeError) as exc:
-                _fail(
-                    f"two-cause episode {episode_id} calendar does not declare the seasonal "
-                    f"txn_count effect: {exc}"
-                )
+                _fail(f"calendar row for {episode_id} is malformed: {exc}")
+            expected_change = episode_config.templates.seasonal.expected_relative_change.value
+            expected_scope = {"channel": [simulator_config.transactions.channel.value]}
             if (
-                len(seasonal_dates) != 1
-                or calendar_rows[0]["business_date"] not in seasonal_dates
-                or isinstance(seasonal_change, bool)
-                or not isinstance(seasonal_change, (int, float))
-                or seasonal_change <= 0
+                len(transaction_dates) != 1
+                or calendar_row["business_date"] not in transaction_dates
+                or calendar_row["event_name"] != episode_config.templates.seasonal.event_name.value
+                or calendar_row["lag_days"] != 0
+                or calendar_row["event_at"] != calendar_row["available_at"]
+                or calendar_aggregation != "sum"
+                or isinstance(calendar_change, bool)
+                or not isinstance(calendar_change, (int, float))
+                or calendar_change != expected_change
+                or calendar_scope != expected_scope
             ):
                 _fail(
-                    f"two-cause episode {episode_id} calendar must declare only the "
-                    "positive seasonal txn_count component"
+                    f"{template} calendar for {episode_id} must match the seasonal config "
+                    "without adding a seasonal truth component"
+                )
+
+        if template == "two_cause_fraud_seasonal":
+            parents = {truth["parent_scenario"] for truth in truth_rows}
+            if len(parents) != 1 or None in parents:
+                _fail(
+                    f"two-cause episode {episode_id} truths must share a non-null parent_scenario"
                 )
         for truth in truth_rows:
             expected = expected_contracts.get(truth["cause"])
@@ -873,6 +933,10 @@ def _validate_p16_fraud_groups(
         for rows in truth_by_episode.values()
         for truth in rows
     }
+    templates = {
+        row["episode_id"]: row["template"]
+        for row in private.execute("SELECT episode_id, template FROM episode_manifest")
+    }
     seen_transaction_ids: set[str] = set()
     for row in private.execute(
         "SELECT key, value_json FROM run_metadata "
@@ -923,6 +987,17 @@ def _validate_p16_fraud_groups(
             }.get(mechanism)
             if expected_truth_mechanism is None or truth["mechanism"] != expected_truth_mechanism:
                 _fail(f"P1.6 fraud group mechanism does not match incident truth {truth_id!r}")
+            allowed_templates = {
+                "fraud_surge": {"fraud_surge", "fraud_calendar", "two_cause_fraud_seasonal"},
+                "silent_concept_drift": {"silent_concept_drift"},
+                "sparse_new_merchant": {"new_fraud"},
+            }[mechanism]
+            locked_template = templates.get(episode_id)
+            if locked_template is not None and locked_template not in allowed_templates:
+                _fail(
+                    f"P1.6 fraud mechanism {mechanism!r} is not allowed by the locked "
+                    f"episode template for {episode_id}"
+                )
             if any(item in seen_transaction_ids for item in transaction_ids):
                 _fail(f"P1.6 fraud transaction appears in more than one fraud group: {truth_id!r}")
             seen_transaction_ids.update(transaction_ids)
@@ -1794,6 +1869,17 @@ def _validate_reports(run_dir: Path) -> str:
     return "operational support/distribution/window report is public-safe; truth and oracle report is private"
 
 
+def _validate_pilot_report_scope(run_dir: Path) -> str:
+    """Keep the P1.8 support report out of the P1.7 pilot generation scope."""
+    report_paths = (
+        run_dir / "reports" / "smoke.json",
+        run_dir / "private" / "reports" / "smoke_truth.json",
+    )
+    if any(path.exists() for path in report_paths):
+        _fail("pilot generation must not emit smoke-labeled support or truth reports")
+    return "P1.8 support reporting is deferred; no smoke-labeled report was emitted for pilot"
+
+
 def _validate_p2_handoff_support(run_dir: Path) -> str:
     report_path = run_dir / "reports" / "smoke.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -2054,6 +2140,10 @@ def _validate_p14_mechanism_chains(
                 _fail("P1.4 collusion must remain in shared pre-drift history")
             if mechanism in {"social_engineering", "legit_business_spike"} and episode_id == "base":
                 _fail(f"P1.4 {mechanism} must be generated only by its P1.6 template injector")
+            if mechanism == "social_engineering" and templates.get(episode_id) != "new_fraud":
+                _fail("P1.4 social engineering is only allowed in the new_fraud template")
+            if mechanism == "legit_business_spike" and templates.get(episode_id) != "legit_business_spike":
+                _fail("P1.4 business spikes are only allowed in their matching template")
             if mechanism == "household_business_activity" and episode_id != "base":
                 _fail("P1.4 ordinary household-business activity must remain in base history")
             txn_ids = [
@@ -2381,6 +2471,206 @@ def _validate_legitimate_new_account_control(
     )
 
 
+def _validate_n7_new_account_controls(
+    operational: sqlite3.Connection,
+    private: sqlite3.Connection,
+    metadata: dict[str, Any],
+) -> str:
+    """Check post-T0 legitimate customers and that they break the N7 SQL shortcut."""
+    simulator_config = validate_simulator_config(metadata["resolved_config"]["simulator"])
+    episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    profile = metadata["profile"]
+    assignments = {
+        item.episode_id: item for item in episode_config.profile(profile).assignments
+    }
+    nonclean_ids = {
+        episode_id
+        for episode_id, assignment in assignments.items()
+        if assignment.template != "clean"
+    }
+    controls = episode_config.templates.legitimate_new_account_controls
+    t0 = T0_UTC_TEXT
+    duration = timedelta(days=episode_config.protocol.duration_days.value)
+    timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
+    episode_start = datetime.combine(
+        simulator_config.timeline.t0_business_date.value,
+        time.min,
+        tzinfo=timezone,
+    ).astimezone(UTC)
+    episode_end = episode_start + duration
+    metadata_rows = private.execute(
+        "SELECT key, value_json FROM run_metadata WHERE substr(key, 1, ?) = ?",
+        (
+            len("p1.7.legitimate_new_accounts.v1:"),
+            "p1.7.legitimate_new_accounts.v1:",
+        ),
+    ).fetchall()
+    control_metadata = {row["key"].split(":", 1)[1]: json.loads(row["value_json"]) for row in metadata_rows}
+    if set(control_metadata) != nonclean_ids:
+        _fail(
+            "N7 private control metadata must exist for every non-clean episode and no clean episode"
+        )
+
+    label_truth: dict[str, dict[str, dict[str, Any]]] = {}
+    for episode_id in assignments:
+        key = (
+            "p1.5.label_truth.v1"
+            if episode_id == "base"
+            else f"p1.5.label_truth.v1:{episode_id}"
+        )
+        label_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        if label_row is None:
+            _fail(f"private label truth is missing for N7 episode {episode_id}")
+        label_truth[episode_id] = {
+            item["txn_id"]: item
+            for item in json.loads(label_row[0]).get("transactions", [])
+        }
+
+    control_transaction_ids: set[str] = set()
+    for episode_id in sorted(nonclean_ids):
+        value = control_metadata[episode_id]
+        manifest_seed = private.execute(
+            "SELECT seed FROM episode_manifest WHERE episode_id = ?", (episode_id,)
+        ).fetchone()[0]
+        accounts = value.get("accounts") if isinstance(value, dict) else None
+        if (
+            not isinstance(value, dict)
+            or value.get("algorithm") != "p1.7-legitimate-new-account-controls-v1"
+            or value.get("episode_id") != episode_id
+            or value.get("seed") != manifest_seed
+            or not isinstance(accounts, list)
+            or len(accounts) != controls.accounts_per_episode.value
+        ):
+            _fail(f"N7 private control metadata is malformed for {episode_id}")
+        account_ids: set[str] = set()
+        episode_transaction_ids: set[str] = set()
+        for account in accounts:
+            customer_id = account.get("customer_id") if isinstance(account, dict) else None
+            txn_ids = account.get("transaction_ids") if isinstance(account, dict) else None
+            if (
+                not isinstance(customer_id, str)
+                or account.get("role") != "individual"
+                or customer_id in account_ids
+                or not isinstance(txn_ids, list)
+                or len(txn_ids) != controls.transactions_per_account.value
+                or any(not isinstance(txn_id, str) or not txn_id for txn_id in txn_ids)
+                or len(txn_ids) != len(set(txn_ids))
+            ):
+                _fail(f"N7 account membership is malformed for {episode_id}")
+            account_ids.add(customer_id)
+            if episode_transaction_ids & set(txn_ids):
+                _fail(f"N7 account transactions overlap for {episode_id}")
+            episode_transaction_ids.update(txn_ids)
+
+            customer = operational.execute(
+                "SELECT episode_id, event_at, available_at FROM customers WHERE customer_id = ?",
+                (customer_id,),
+            ).fetchone()
+            if customer is None or customer["episode_id"] != episode_id:
+                _fail(f"N7 customer {customer_id} is missing or belongs to another episode")
+            customer_created = datetime.fromisoformat(
+                customer["event_at"].replace("Z", "+00:00")
+            ).astimezone(UTC)
+            customer_available = datetime.fromisoformat(
+                customer["available_at"].replace("Z", "+00:00")
+            ).astimezone(UTC)
+            if not episode_start <= customer_created < episode_end or customer_available != customer_created:
+                _fail(f"N7 customer {customer_id} is not available inside its episode future")
+
+            actual_rows = {
+                row["txn_id"]: dict(row)
+                for row in operational.execute(
+                    "SELECT txn_id, episode_id, customer_id, merchant_id, recipient_customer_id, "
+                    "created_at, available_at, channel FROM transactions "
+                    f"WHERE txn_id IN ({', '.join('?' for _ in txn_ids)})",
+                    tuple(txn_ids),
+                )
+            }
+            if set(actual_rows) != set(txn_ids):
+                _fail(f"N7 transaction references are missing for {episode_id}")
+            for transaction in actual_rows.values():
+                created_at = datetime.fromisoformat(
+                    transaction["created_at"].replace("Z", "+00:00")
+                ).astimezone(UTC)
+                if (
+                    transaction["episode_id"] != episode_id
+                    or transaction["customer_id"] != customer_id
+                    or transaction["merchant_id"] is None
+                    or transaction["recipient_customer_id"] is not None
+                    or not episode_start <= created_at < episode_end
+                    or transaction["available_at"] > transaction["created_at"]
+                    or created_at - customer_available
+                    < timedelta(days=controls.minimum_account_age_days.value)
+                ):
+                    _fail(
+                        f"N7 transaction for {customer_id} is not an ordinary, observable "
+                        "same-episode merchant payment"
+                    )
+                outcome = label_truth[episode_id].get(transaction["txn_id"])
+                if outcome is None or outcome.get("true_label") != "legit":
+                    _fail(f"N7 control transaction {transaction['txn_id']} is not privately legit")
+            if any(txn_id in control_transaction_ids for txn_id in txn_ids):
+                _fail("N7 transaction IDs must be unique across episodes")
+            control_transaction_ids.update(txn_ids)
+
+    post_t0_customer_transactions: dict[str, set[str]] = {
+        episode_id: set() for episode_id in assignments
+    }
+    for row in operational.execute(
+        "SELECT DISTINCT t.episode_id, t.txn_id FROM transactions AS t "
+        "JOIN customers AS c ON c.customer_id = t.customer_id "
+        "OR c.customer_id = t.recipient_customer_id "
+        "WHERE t.episode_id <> 'base' AND c.episode_id = t.episode_id "
+        "AND c.event_at >= ? AND c.available_at <= t.event_at "
+        "AND t.available_at <= t.event_at ORDER BY t.episode_id, t.txn_id",
+        (t0,),
+    ):
+        post_t0_customer_transactions[row["episode_id"]].add(row["txn_id"])
+
+    new_fraud_truth_transactions: dict[str, set[str]] = {
+        episode_id: set() for episode_id in assignments
+    }
+    for row in private.execute(
+        "SELECT incident_truth_id, episode_id FROM incident_truth WHERE cause = 'new_fraud'"
+    ):
+        effect = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?",
+            (f"p1.6.incident_effect.v1:{row['incident_truth_id']}",),
+        ).fetchone()
+        if effect is None:
+            _fail(f"new_fraud truth effect references are missing for {row['incident_truth_id']}")
+        ids = json.loads(effect[0]).get("affected_transaction_ids", [])
+        new_fraud_truth_transactions[row["episode_id"]].update(ids)
+
+    for episode_id, assignment in assignments.items():
+        if assignment.template == "clean":
+            if post_t0_customer_transactions[episode_id]:
+                _fail(f"clean episode {episode_id} unexpectedly has post-T0 customer transactions")
+            continue
+        if not post_t0_customer_transactions[episode_id]:
+            _fail(f"non-clean episode {episode_id} has no transaction linked to a post-T0 customer")
+        if (
+            post_t0_customer_transactions[episode_id]
+            == new_fraud_truth_transactions[episode_id]
+        ):
+            _fail(
+                f"N7 post-T0 customer transaction set still equals new_fraud truth in {episode_id}"
+            )
+
+    all_post_t0 = set().union(*post_t0_customer_transactions.values())
+    all_new_fraud = set().union(*new_fraud_truth_transactions.values())
+    if all_post_t0 == all_new_fraud:
+        _fail("N7 post-T0 customer SQL still equals the new_fraud truth set")
+    return (
+        f"{len(nonclean_ids)} non-clean episodes contain {len(control_transaction_ids)} "
+        f"privately legitimate control transactions with >= {controls.minimum_account_age_days.value} "
+        f"days account history; post-T0 customer-linked SQL returns {len(all_post_t0)} "
+        f"transactions versus {len(all_new_fraud)} new_fraud truth transactions (sets differ)"
+    )
+
+
 def validate_run(run_dir: str | Path) -> dict[str, Any]:
     """Validate one generated run and record the result in its private metadata."""
     root = Path(run_dir).expanduser().resolve()
@@ -2436,6 +2726,13 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
             _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(operational, private, _load_run_metadata(private)))
             _evaluate(checks, "operational_identifier_shape_contract", lambda: _validate_operational_identifier_shapes(operational, private))
             _evaluate(checks, "legitimate_new_account_control", lambda: _validate_legitimate_new_account_control(operational, private))
+            _evaluate(
+                checks,
+                "n7_episode_new_account_controls",
+                lambda: _validate_n7_new_account_controls(
+                    operational, private, _load_run_metadata(private)
+                ),
+            )
             _evaluate(checks, "p1_4_fraud_mechanism_chains", lambda: _validate_p14_mechanism_chains(operational, private))
             _evaluate(checks, "private_label_truth_matches_observed_labels", lambda: _validate_private_label_truth(operational, private))
             _evaluate(checks, "pending_is_not_negative", lambda: _validate_pending(private, _load_run_metadata(private), operational))
@@ -2452,8 +2749,15 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
             metadata = _load_run_metadata(private)
         except Exception:
             metadata = None
-        _evaluate(checks, "report_truth_boundary", lambda: _validate_reports(root))
-        _evaluate(checks, "p2_handoff_support", lambda: _validate_p2_handoff_support(root))
+        if metadata is not None and metadata.get("profile") == "pilot":
+            _evaluate(
+                checks,
+                "pilot_support_report_deferred",
+                lambda: _validate_pilot_report_scope(root),
+            )
+        else:
+            _evaluate(checks, "report_truth_boundary", lambda: _validate_reports(root))
+            _evaluate(checks, "p2_handoff_support", lambda: _validate_p2_handoff_support(root))
     else:
         checks.append({"name": "private_schema", "passed": False, "detail": "private database could not be opened"})
 
