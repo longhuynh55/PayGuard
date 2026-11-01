@@ -63,6 +63,43 @@ def _jittered_local_time(
     )
 
 
+def social_engineering_customer_schedule(
+    config: SimulatorConfig,
+    seed: int,
+    episode_id: str,
+    campaign_date: date,
+    group_index: int,
+) -> tuple[datetime, datetime]:
+    """Return the deterministic mule creation and first-receipt times for one group."""
+    social = config.fraud.social_engineering
+    timezone = ZoneInfo(config.timeline.business_timezone.value)
+    base = datetime.combine(
+        campaign_date, time(social.start_hour_local.value), tzinfo=timezone
+    )
+    starts = _jittered_local_time(
+        config,
+        seed,
+        "social_engineering.start_time",
+        episode_id,
+        campaign_date.isoformat(),
+        group_index,
+        base=base,
+    )
+    creation_rng = keyed_rng(
+        seed,
+        "p1.fraud.timing.social_engineering.mule_creation",
+        episode_id,
+        campaign_date.isoformat(),
+        group_index,
+    )
+    created_at = starts - timedelta(
+        days=social.new_account_warmup_days.value,
+        minutes=creation_rng.randint(1, config.fraud.timing_jitter.mule_creation_jitter_minutes.value),
+        seconds=creation_rng.randint(1, config.fraud.timing_jitter.maximum_second_offset.value),
+    )
+    return created_at, starts
+
+
 def _jittered_local_time_before(
     config: SimulatorConfig,
     seed: int,
@@ -879,19 +916,11 @@ def generate_other_fraud_mechanisms(
             "SELECT 1 FROM customers WHERE customer_id = ?", (customer_id,)
         ).fetchone():
             raise ValueError("P1.4 generated customer ID collision")
-        jitter = config.fraud.timing_jitter
-        creation_rng = keyed_rng(
-            seed,
-            "p1.fraud.timing.social_engineering.mule_creation",
-            *scope,
-            day.isoformat(),
-            group_index,
+        account_start, scheduled_receipt_at = social_engineering_customer_schedule(
+            config, seed, episode_id, day, group_index
         )
-        account_start = first_receipt_at - timedelta(
-            days=warmup_days,
-            minutes=creation_rng.randint(1, jitter.mule_creation_jitter_minutes.value),
-            seconds=creation_rng.randint(1, jitter.maximum_second_offset.value),
-        )
+        if scheduled_receipt_at != first_receipt_at or warmup_days != config.fraud.social_engineering.new_account_warmup_days.value:
+            raise ValueError("social-engineering mule schedule does not match its configured campaign")
         profile_rng = keyed_rng(
             seed, "p1.fraud.social_engineering.new_account_profile", *scope, group_index
         )
@@ -1120,19 +1149,20 @@ def generate_other_fraud_mechanisms(
             ):
                 if fan_in < 2:
                     continue
-                starts = _jittered_local_time(
-                    config,
-                    seed,
-                    (
-                        "social_engineering.start_time"
-                        if social_enabled
-                        else f"{business_mechanism}.start_time"
-                    ),
-                    *scope,
-                    campaign_date.isoformat(),
-                    group_index,
-                    base=local_start(campaign_date, social.start_hour_local.value),
-                )
+                if social_enabled:
+                    _, starts = social_engineering_customer_schedule(
+                        config, seed, episode_id, campaign_date, group_index
+                    )
+                else:
+                    starts = _jittered_local_time(
+                        config,
+                        seed,
+                        f"{business_mechanism}.start_time",
+                        *scope,
+                        campaign_date.isoformat(),
+                        group_index,
+                        base=local_start(campaign_date, social.start_hour_local.value),
+                    )
                 control_at = starts + campaign_span + timedelta(hours=2)
                 control_at_text = control_at.astimezone(ZoneInfo("UTC")).isoformat(timespec="microseconds").replace("+00:00", "Z")
                 prior_start_text = (control_at - timedelta(days=7)).astimezone(ZoneInfo("UTC")).isoformat(timespec="microseconds").replace("+00:00", "Z")

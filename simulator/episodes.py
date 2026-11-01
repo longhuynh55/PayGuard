@@ -15,6 +15,7 @@ from simulator.fraud import (
     FraudSummary,
     generate_card_testing,
     generate_other_fraud_mechanisms,
+    social_engineering_customer_schedule,
 )
 from simulator.identifiers import customer_id as generate_customer_id
 from simulator.identifiers import transaction_id
@@ -306,9 +307,19 @@ def _inject_legitimate_new_account_controls(
     controls = episode_config.templates.legitimate_new_account_controls
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     t0_date = simulator_config.timeline.t0_business_date.value
-    first_transaction_date = t0_date + timedelta(
-        days=controls.first_transaction_offset_days.value
+    has_social_engineering_mule = assignment.template == "new_fraud"
+    matching_account_count = (
+        0
+        if has_social_engineering_mule
+        else controls.additional_accounts_without_social_engineering.value
     )
+    matching_customer_schedule = None
+    if matching_account_count:
+        social = simulator_config.fraud.social_engineering
+        matching_campaign_date = t0_date + timedelta(days=social.start_offset_days.value)
+        matching_customer_schedule = social_engineering_customer_schedule(
+            simulator_config, seed, episode_id, matching_campaign_date, 0
+        )
     profile_rows = [
         dict(row)
         for row in operational.execute(
@@ -328,58 +339,38 @@ def _inject_legitimate_new_account_controls(
         row[0] for row in operational.execute("SELECT customer_id FROM customers")
     }
     account_rows: list[dict[str, object]] = []
-    new_fraud_match_timestamp: datetime | None = None
-    if assignment.template == "new_fraud":
-        mechanism_row = private.execute(
-            "SELECT value_json FROM run_metadata WHERE key = ?",
-            (f"p1.4.mechanisms.v1:{episode_id}",),
-        ).fetchone()
-        if mechanism_row is None:
-            raise ValueError("new_fraud control scheduling requires private P1.4 mechanism metadata")
-        mechanism_groups = json.loads(mechanism_row[0]).get("groups", [])
-        mule_ids = sorted(
-            group["mule_customer_id"]
-            for group in mechanism_groups
-            if group.get("mechanism") == "social_engineering"
-            and group.get("role") == "fraud"
-            and isinstance(group.get("mule_customer_id"), str)
-        )
-        if not mule_ids:
-            raise ValueError("new_fraud control scheduling requires a social-engineering mule")
-        mule_row = operational.execute(
-            "SELECT event_at FROM customers WHERE customer_id = ? AND episode_id = ?",
-            (mule_ids[0], episode_id),
-        ).fetchone()
-        if mule_row is None:
-            raise ValueError("new_fraud control scheduling cannot find its mule customer")
-        new_fraud_match_timestamp = datetime.fromisoformat(
-            mule_row["event_at"].replace("Z", "+00:00")
-        ).astimezone(timezone)
-    for account_index in range(controls.accounts_per_episode.value):
-        offset_days = (
-            controls.creation_offset_days.value
-            if account_index == 0
-            else controls.creation_in_window_offset_days.value
-            + keyed_rng(
+    account_count = controls.accounts_per_episode.value + matching_account_count
+    for account_index in range(account_count):
+        is_matching_account = account_index >= controls.accounts_per_episode.value
+        if is_matching_account:
+            assert matching_customer_schedule is not None
+            account_creation_at, matching_first_transaction_at = matching_customer_schedule
+            purpose = "timing_match"
+            transaction_count = controls.timing_match_transactions_per_account.value
+        else:
+            if account_index == 0:
+                purpose = "early_control"
+                transaction_count = controls.early_transactions_per_account.value
+                offset_days = controls.creation_offset_days.value
+            else:
+                purpose = "in_window_control"
+                transaction_count = controls.transactions_per_account.value
+                offset_days = controls.creation_in_window_offset_days.value + keyed_rng(
+                    seed,
+                    "p1.7.legitimate_new_account.creation_date",
+                    episode_id,
+                    account_index,
+                ).randint(0, controls.creation_in_window_jitter_days.value)
+            creation_time_seconds = keyed_rng(
                 seed,
-                "p1.7.legitimate_new_account.creation_date",
+                "p1.7.legitimate_new_account.creation_time",
                 episode_id,
                 account_index,
-            ).randint(0, controls.creation_in_window_jitter_days.value)
-        )
-        creation_time_seconds = keyed_rng(
-            seed,
-            "p1.7.legitimate_new_account.creation_time",
-            episode_id,
-            account_index,
-        ).randint(1, controls.creation_time_jitter_seconds.value)
-        account_creation_at = (
-            new_fraud_match_timestamp
-            if account_index == 0 and new_fraud_match_timestamp is not None
-            else datetime.combine(
+            ).randint(1, controls.creation_time_jitter_seconds.value)
+            account_creation_at = datetime.combine(
                 t0_date + timedelta(days=offset_days), time.min, tzinfo=timezone
             ) + timedelta(seconds=creation_time_seconds)
-        )
+            matching_first_transaction_at = None
         profile_rng = keyed_rng(
             seed, "p1.7.legitimate_new_account.profile", episode_id, account_index
         )
@@ -405,7 +396,7 @@ def _inject_legitimate_new_account_controls(
             },
         )
         transaction_ids: list[str] = []
-        for transaction_index in range(controls.transactions_per_account.value):
+        for transaction_index in range(transaction_count):
             field_rng = keyed_rng(
                 seed,
                 "p1.7.legitimate_new_account.transaction_fields",
@@ -414,12 +405,25 @@ def _inject_legitimate_new_account_controls(
                 transaction_index,
             )
             hour_weights = simulator_config.transactions.hourly_transaction_weights.value[:22]
-            hour = field_rng.choices(range(22), weights=hour_weights, k=1)[0]
-            created_at = datetime.combine(
-                first_transaction_date + timedelta(days=transaction_index),
-                time(hour, field_rng.randrange(60), field_rng.randint(1, 59)),
-                tzinfo=timezone,
+            hour = (
+                0
+                if account_index == 0
+                else field_rng.choices(range(22), weights=hour_weights, k=1)[0]
             )
+            if is_matching_account:
+                assert matching_first_transaction_at is not None
+                created_at = matching_first_transaction_at + timedelta(days=transaction_index)
+            else:
+                first_transaction_offset = (
+                    controls.early_first_transaction_offset_days.value
+                    if account_index == 0
+                    else controls.first_transaction_offset_days.value
+                )
+                created_at = datetime.combine(
+                    t0_date + timedelta(days=first_transaction_offset + transaction_index),
+                    time(hour, field_rng.randrange(60), field_rng.randint(1, 59)),
+                    tzinfo=timezone,
+                )
             if created_at - account_creation_at < timedelta(
                 days=controls.minimum_account_age_days.value
             ):
@@ -510,6 +514,7 @@ def _inject_legitimate_new_account_controls(
             {
                 "customer_id": customer,
                 "role": "individual",
+                "purpose": purpose,
                 "created_at": utc_timestamp(account_creation_at),
                 "transaction_ids": transaction_ids,
             }
@@ -520,7 +525,7 @@ def _inject_legitimate_new_account_controls(
         {
             "key": f"{LEGITIMATE_NEW_ACCOUNT_METADATA_PREFIX}{episode_id}",
             "value_json": {
-                "algorithm": "p1.7-legitimate-new-account-controls-v1",
+                "algorithm": "p1.7-legitimate-new-account-controls-v2",
                 "episode_id": episode_id,
                 "seed": seed,
                 "accounts": account_rows,
@@ -693,6 +698,8 @@ def generate_episodes(
                 base_world,
                 transaction_random_keys,
             )
+            # Preserve the P1.6 effect scope. N7 activity is legitimate data
+            # arriving after the template event, not part of its injected rows.
             _inject_legitimate_new_account_controls(
                 operational,
                 private,

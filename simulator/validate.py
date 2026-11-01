@@ -7,6 +7,7 @@ import json
 import math
 import re
 import sqlite3
+from collections import Counter
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -2565,19 +2566,77 @@ def validate_n7_asof_customer_membership(
     if not any(start <= created_at <= deadline for created_at in control_times):
         _fail("N7 requires a legitimate customer created inside the new_fraud deadline window")
 
-    timestamps = {created_at for created_at, _ in visible_rows.values()}
-    for cutoff in timestamps:
-        selected_by_operator = {
-            "=": {item for item, (created_at, _) in visible_rows.items() if created_at == cutoff},
-            "!=": {item for item, (created_at, _) in visible_rows.items() if created_at != cutoff},
-            "<": {item for item, (created_at, _) in visible_rows.items() if created_at < cutoff},
-            "<=": {item for item, (created_at, _) in visible_rows.items() if created_at <= cutoff},
-            ">": {item for item, (created_at, _) in visible_rows.items() if created_at > cutoff},
-            ">=": {item for item, (created_at, _) in visible_rows.items() if created_at >= cutoff},
-        }
-        if any(selected == mule_customer_ids for selected in selected_by_operator.values()):
-            _fail("a single customer creation timestamp filter isolates new_fraud mule truth")
     return len(visible_ids)
+
+
+def validate_n7_asof_transaction_membership(
+    transaction_rows: list[dict[str, Any]],
+    *,
+    episode_id: str,
+    deadline_at: datetime,
+    post_t0_customer_ids: set[str],
+    affected_transaction_ids: set[str],
+) -> int:
+    """Require deadline-visible activity around new customers to hide truth membership."""
+    if not post_t0_customer_ids or not affected_transaction_ids:
+        _fail("N7 transaction as-of check requires post-T0 customers and new_fraud truth")
+    deadline = deadline_at.astimezone(UTC)
+    visible_transaction_ids: set[str] = set()
+    for row in transaction_rows:
+        if row.get("episode_id") != episode_id:
+            continue
+        txn_id = row.get("txn_id")
+        try:
+            available_at = datetime.fromisoformat(
+                row["available_at"].replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            _fail(f"N7 transaction as-of timestamp is invalid: {exc}")
+        if (
+            available_at <= deadline
+            and (
+                row.get("customer_id") in post_t0_customer_ids
+                or row.get("recipient_customer_id") in post_t0_customer_ids
+            )
+        ):
+            if not isinstance(txn_id, str) or not txn_id:
+                _fail("N7 transaction as-of row is missing its transaction ID")
+            visible_transaction_ids.add(txn_id)
+    if not affected_transaction_ids <= visible_transaction_ids:
+        _fail("new_fraud truth transactions are not all visible through post-T0 customers by deadline")
+    if not affected_transaction_ids < visible_transaction_ids:
+        _fail(
+            "N7 deadline-visible transactions touching post-T0 customers must be a strict "
+            "superset of new_fraud truth transactions"
+        )
+    return len(visible_transaction_ids)
+
+
+def validate_n7_episode_customer_shape(
+    episode_shapes: dict[str, tuple[int, int, tuple[int, ...]]],
+    *,
+    expected_customer_count: int,
+    expected_first_transaction_offsets: tuple[int, ...],
+) -> str:
+    """Check customer counts, timestamp ties, and first activity are template-independent."""
+    if not episode_shapes:
+        _fail("N7 episode customer-shape check requires assigned episodes")
+    expected_signature = (
+        expected_customer_count,
+        0,
+        tuple(sorted(expected_first_transaction_offsets)),
+    )
+    for episode_id, signature in episode_shapes.items():
+        if signature != expected_signature:
+            _fail(
+                f"N7 post-T0 customer shape for {episode_id} depends on its template or "
+                "does not match the locked count/timing distribution"
+            )
+    return (
+        f"{len(episode_shapes)} episodes share {expected_customer_count} post-T0 customers, "
+        "no shared creation timestamps, and first-transaction offsets "
+        f"{list(expected_signature[2])}"
+    )
 
 
 def _validate_n7_new_account_controls(
@@ -2635,36 +2694,58 @@ def _validate_n7_new_account_controls(
 
     control_transaction_ids: set[str] = set()
     control_customer_ids_by_episode: dict[str, set[str]] = {}
+    episode_customer_shapes: dict[str, tuple[int, int, tuple[int, ...]]] = {}
+    t0_date = simulator_config.timeline.t0_business_date.value
     for episode_id in sorted(episode_ids):
         value = control_metadata[episode_id]
         manifest_seed = private.execute(
             "SELECT seed FROM episode_manifest WHERE episode_id = ?", (episode_id,)
         ).fetchone()[0]
         accounts = value.get("accounts") if isinstance(value, dict) else None
+        assignment = assignments[episode_id]
+        matching_account_count = (
+            0
+            if assignment.template == "new_fraud"
+            else controls.additional_accounts_without_social_engineering.value
+        )
+        expected_account_count = controls.accounts_per_episode.value + matching_account_count
         if (
             not isinstance(value, dict)
-            or value.get("algorithm") != "p1.7-legitimate-new-account-controls-v1"
+            or value.get("algorithm") != "p1.7-legitimate-new-account-controls-v2"
             or value.get("episode_id") != episode_id
             or value.get("seed") != manifest_seed
             or not isinstance(accounts, list)
-            or len(accounts) != controls.accounts_per_episode.value
+            or len(accounts) != expected_account_count
         ):
             _fail(f"N7 private control metadata is malformed for {episode_id}")
         account_ids: set[str] = set()
         episode_transaction_ids: set[str] = set()
+        purpose_counts: Counter[str] = Counter()
         for account in accounts:
             customer_id = account.get("customer_id") if isinstance(account, dict) else None
             txn_ids = account.get("transaction_ids") if isinstance(account, dict) else None
+            purpose = account.get("purpose") if isinstance(account, dict) else None
+            expected_transaction_count = (
+                {
+                    "early_control": controls.early_transactions_per_account.value,
+                    "in_window_control": controls.transactions_per_account.value,
+                    "timing_match": controls.timing_match_transactions_per_account.value,
+                }.get(purpose)
+                if isinstance(purpose, str)
+                else None
+            )
             if (
                 not isinstance(customer_id, str)
                 or account.get("role") != "individual"
+                or purpose not in {"early_control", "in_window_control", "timing_match"}
                 or customer_id in account_ids
                 or not isinstance(txn_ids, list)
-                or len(txn_ids) != controls.transactions_per_account.value
+                or len(txn_ids) != expected_transaction_count
                 or any(not isinstance(txn_id, str) or not txn_id for txn_id in txn_ids)
                 or len(txn_ids) != len(set(txn_ids))
             ):
                 _fail(f"N7 account membership is malformed for {episode_id}")
+            purpose_counts[purpose] += 1
             account_ids.add(customer_id)
             if episode_transaction_ids & set(txn_ids):
                 _fail(f"N7 account transactions overlap for {episode_id}")
@@ -2725,14 +2806,52 @@ def _validate_n7_new_account_controls(
             control_transaction_ids.update(txn_ids)
         control_customer_ids_by_episode[episode_id] = account_ids
 
+        expected_purpose_counts = Counter(
+            {
+                "early_control": 1,
+                "in_window_control": controls.accounts_per_episode.value - 1,
+                **({"timing_match": 1} if matching_account_count else {}),
+            }
+        )
+        if purpose_counts != expected_purpose_counts:
+            _fail(f"N7 account purposes do not match the template-independent customer shape for {episode_id}")
+
+        local_customers = [
+            dict(row)
+            for row in operational.execute(
+                "SELECT customer_id, event_at FROM customers "
+                "WHERE episode_id = ? AND event_at > ?",
+                (episode_id, t0),
+            )
+        ]
+        first_transaction_offsets: list[int] = []
+        creation_timestamp_counts: Counter[str] = Counter()
+        for customer in local_customers:
+            creation_timestamp_counts[customer["event_at"]] += 1
+            first_txn = operational.execute(
+                "SELECT MIN(created_at) FROM transactions WHERE episode_id = ? "
+                "AND (customer_id = ? OR recipient_customer_id = ?)",
+                (episode_id, customer["customer_id"], customer["customer_id"]),
+            ).fetchone()[0]
+            if first_txn is None:
+                _fail(f"P1.7 post-T0 customer {customer['customer_id']} has no first transaction")
+            first_date = datetime.fromisoformat(first_txn.replace("Z", "+00:00")).astimezone(timezone).date()
+            first_transaction_offsets.append((first_date - t0_date).days)
+        episode_customer_shapes[episode_id] = (
+            len(local_customers),
+            sum(count > 1 for count in creation_timestamp_counts.values()),
+            tuple(sorted(first_transaction_offsets)),
+        )
+
     asof_visible_customer_count = 0
+    asof_visible_transaction_count = 0
     new_fraud_episode_count = 0
     for episode_id, assignment in assignments.items():
         if assignment.template != "new_fraud":
             continue
         new_fraud_episode_count += 1
         truth_rows = private.execute(
-            "SELECT intervention_start_at, deadline_at FROM incident_truth "
+            "SELECT incident_truth_id, intervention_start_at, deadline_at FROM incident_truth "
             "WHERE episode_id = ? AND cause = 'new_fraud'",
             (episode_id,),
         ).fetchall()
@@ -2762,10 +2881,11 @@ def _validate_n7_new_account_controls(
             )
         ]
         truth_row = truth_rows[0]
+        t0_datetime = datetime.fromisoformat(t0.replace("Z", "+00:00"))
         asof_visible_customer_count += validate_n7_asof_customer_membership(
             customers,
             episode_id=episode_id,
-            t0=datetime.fromisoformat(t0.replace("Z", "+00:00")),
+            t0=t0_datetime,
             intervention_start_at=datetime.fromisoformat(
                 truth_row["intervention_start_at"].replace("Z", "+00:00")
             ),
@@ -2773,12 +2893,60 @@ def _validate_n7_new_account_controls(
             mule_customer_ids=mule_customer_ids,
             control_customer_ids=control_customer_ids_by_episode[episode_id],
         )
+        deadline_at = datetime.fromisoformat(truth_row["deadline_at"].replace("Z", "+00:00"))
+        visible_post_t0_customer_ids = {
+            row["customer_id"]
+            for row in operational.execute(
+                "SELECT customer_id FROM customers WHERE episode_id = ? "
+                "AND event_at > ? AND available_at <= ?",
+                (episode_id, t0, truth_row["deadline_at"]),
+            )
+        }
+        effect_row = private.execute(
+            "SELECT value_json FROM run_metadata WHERE key = ?",
+            (f"p1.6.incident_effect.v1:{truth_row['incident_truth_id']}",),
+        ).fetchone()
+        if effect_row is None:
+            _fail(f"new_fraud effect references are missing for {episode_id}")
+        affected_transaction_ids = set(json.loads(effect_row[0]).get("affected_transaction_ids", []))
+        transaction_rows = [
+            dict(row)
+            for row in operational.execute(
+                "SELECT txn_id, episode_id, customer_id, recipient_customer_id, available_at "
+                "FROM transactions WHERE episode_id = ?",
+                (episode_id,),
+            )
+        ]
+        asof_visible_transaction_count += validate_n7_asof_transaction_membership(
+            transaction_rows,
+            episode_id=episode_id,
+            deadline_at=deadline_at,
+            post_t0_customer_ids=visible_post_t0_customer_ids,
+            affected_transaction_ids=affected_transaction_ids,
+        )
+
+    expected_first_transaction_offsets = tuple(
+        sorted(
+            [
+                controls.early_first_transaction_offset_days.value,
+                controls.first_transaction_offset_days.value,
+                simulator_config.fraud.social_engineering.start_offset_days.value,
+            ]
+        )
+    )
+    customer_shape_summary = validate_n7_episode_customer_shape(
+        episode_customer_shapes,
+        expected_customer_count=controls.accounts_per_episode.value + 1,
+        expected_first_transaction_offsets=expected_first_transaction_offsets,
+    )
     return (
         f"all {len(episode_ids)} assigned episodes, including clean, contain "
         f"{len(control_transaction_ids)} "
         f"privately legitimate control transactions with >= {controls.minimum_account_age_days.value} "
         f"days account history; {new_fraud_episode_count} new_fraud as-of checks return "
-        f"{asof_visible_customer_count} visible customer rows, strict supersets of their mule truth"
+        f"{asof_visible_customer_count} visible customer rows and "
+        f"{asof_visible_transaction_count} visible transactions, strict supersets of their truth; "
+        f"{customer_shape_summary}"
     )
 
 

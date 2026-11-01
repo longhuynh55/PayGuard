@@ -25,6 +25,8 @@ from simulator.incidents import inject_legit_business_spike, inject_new_fraud
 from simulator.validate import (
     ValidationError,
     validate_n7_asof_customer_membership,
+    validate_n7_asof_transaction_membership,
+    validate_n7_episode_customer_shape,
     validate_pilot_heldout_seed_disjointness,
     validate_run,
 )
@@ -181,6 +183,59 @@ def test_n7_asof_validation_rejects_controls_with_one_shared_creation_time() -> 
             deadline_at=datetime.fromisoformat("2026-02-16T00:00:00+00:00"),
             mule_customer_ids={"mule-1"},
             control_customer_ids={"control-1", "control-2"},
+        )
+
+
+def test_n7_asof_transaction_validation_rejects_truth_only_shortcut() -> None:
+    deadline = datetime.fromisoformat("2026-02-16T00:00:00+00:00")
+    affected_ids = {f"fraud-{index}" for index in range(10)}
+    rows = [
+        {
+            "txn_id": txn_id,
+            "episode_id": "ep-new-fraud",
+            "customer_id": "mule-1",
+            "recipient_customer_id": None,
+            "available_at": "2026-02-10T00:00:00.000000Z",
+        }
+        for txn_id in sorted(affected_ids)
+    ]
+    with pytest.raises(ValidationError, match="strict superset"):
+        validate_n7_asof_transaction_membership(
+            rows,
+            episode_id="ep-new-fraud",
+            deadline_at=deadline,
+            post_t0_customer_ids={"mule-1"},
+            affected_transaction_ids=affected_ids,
+        )
+
+    rows.append(
+        {
+            "txn_id": "legitimate-control-1",
+            "episode_id": "ep-new-fraud",
+            "customer_id": "control-1",
+            "recipient_customer_id": None,
+            "available_at": "2026-02-10T00:00:00.000000Z",
+        }
+    )
+    assert validate_n7_asof_transaction_membership(
+        rows,
+        episode_id="ep-new-fraud",
+        deadline_at=deadline,
+        post_t0_customer_ids={"mule-1", "control-1"},
+        affected_transaction_ids=affected_ids,
+    ) == 11
+
+
+def test_n7_episode_customer_shape_rejects_fix1_template_count_shortcut() -> None:
+    fix1_shapes = {
+        "ep-new-fraud": (3, 1, (8, 27, 27)),
+        "ep-clean": (2, 0, (27, 27)),
+    }
+    with pytest.raises(ValidationError, match="depends on its template"):
+        validate_n7_episode_customer_shape(
+            fix1_shapes,
+            expected_customer_count=3,
+            expected_first_transaction_offsets=(8, 8, 27),
         )
 
 
@@ -390,7 +445,7 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert set(account_roles) <= base_customer_ids
-        # P1.7 N7 adds neutral account controls to every smoke episode, including clean.
+        # P1.7 gives each episode the same observable post-T0 customer count.
         episode_customer_counts = {
             row["episode_id"]: row["count"]
             for row in pair.operational.execute(
@@ -399,11 +454,11 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert episode_customer_counts == {
-            "ep-0001": 2,
-            "ep-0002": 2,
-            "ep-0003": 2,
-            "ep-0004": 2,
-            "ep-0005": 2,
+            "ep-0001": 3,
+            "ep-0002": 3,
+            "ep-0003": 3,
+            "ep-0004": 3,
+            "ep-0005": 3,
         }
         account_transfers = [
             dict(row)

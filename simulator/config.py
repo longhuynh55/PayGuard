@@ -680,24 +680,40 @@ class SilentConceptDriftTemplateConfig(StrictModel):
 
 class LegitimateNewAccountControlsConfig(StrictModel):
     accounts_per_episode: ConfigValue[PositiveInt]
+    additional_accounts_without_social_engineering: ConfigValue[PositiveInt]
     creation_offset_days: ConfigValue[NonNegativeInt]
     creation_in_window_offset_days: ConfigValue[PositiveInt]
     creation_in_window_jitter_days: ConfigValue[NonNegativeInt]
     creation_time_jitter_seconds: ConfigValue[PositiveInt]
+    early_first_transaction_offset_days: ConfigValue[PositiveInt]
+    early_transactions_per_account: ConfigValue[PositiveInt]
     first_transaction_offset_days: ConfigValue[PositiveInt]
     transactions_per_account: ConfigValue[PositiveInt]
+    timing_match_transactions_per_account: ConfigValue[PositiveInt]
     minimum_account_age_days: ConfigValue[PositiveInt]
 
     @model_validator(mode="after")
     def account_history_is_observable(self) -> LegitimateNewAccountControlsConfig:
         if self.accounts_per_episode.value < 2:
             raise ValueError("N7 requires an early and an in-window legitimate control account")
+        if self.additional_accounts_without_social_engineering.value != 1:
+            raise ValueError(
+                "N7 episode customer-count parity requires one additional ordinary account "
+                "when no social-engineering mule is generated"
+            )
         if self.creation_in_window_offset_days.value <= self.creation_offset_days.value:
             raise ValueError("N7 in-window account creation must follow the early control account")
         latest_creation_offset = (
             self.creation_in_window_offset_days.value
             + self.creation_in_window_jitter_days.value
         )
+        if self.early_first_transaction_offset_days.value - self.creation_offset_days.value < (
+            self.minimum_account_age_days.value
+        ):
+            raise ValueError(
+                "early legitimate new-account transactions must start after the full minimum "
+                "history window"
+            )
         if self.first_transaction_offset_days.value - latest_creation_offset < (
             self.minimum_account_age_days.value
         ):
@@ -707,6 +723,10 @@ class LegitimateNewAccountControlsConfig(StrictModel):
             )
         if self.creation_time_jitter_seconds.value > 86399:
             raise ValueError("N7 creation_time_jitter_seconds must be at most 86399")
+        if self.early_first_transaction_offset_days.value >= self.first_transaction_offset_days.value:
+            raise ValueError(
+                "N7 early account activity must precede the later account transaction schedule"
+            )
         return self
 
 
@@ -842,8 +862,12 @@ class EpisodeConfig(StrictModel):
         if self.templates.silent_concept_drift.date_offset_days.value >= self.protocol.duration_days.value:
             raise ValueError("silent concept-drift date_offset_days must fall inside an episode")
         if (
-            self.templates.legitimate_new_account_controls.first_transaction_offset_days.value
-            + self.templates.legitimate_new_account_controls.transactions_per_account.value
+            max(
+                self.templates.legitimate_new_account_controls.early_first_transaction_offset_days.value
+                + self.templates.legitimate_new_account_controls.early_transactions_per_account.value,
+                self.templates.legitimate_new_account_controls.first_transaction_offset_days.value
+                + self.templates.legitimate_new_account_controls.transactions_per_account.value,
+            )
             > self.protocol.duration_days.value
         ):
             raise ValueError("legitimate new-account transactions must fit inside an episode")
@@ -899,6 +923,15 @@ def validate_episode_duration_match(
             "simulator episode.duration_days "
             f"({public_duration}) must match episodes protocol.duration_days "
             f"({protocol_duration})"
+        )
+    controls = episode_config.templates.legitimate_new_account_controls
+    if (
+        simulator_config.fraud.social_engineering.start_offset_days.value
+        + controls.timing_match_transactions_per_account.value
+        > protocol_duration
+    ):
+        raise ConfigValidationError(
+            "N7 timing-match account transactions must fit inside the episode duration"
         )
 
 
