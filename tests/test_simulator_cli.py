@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -219,10 +220,45 @@ def test_cli_recipient_signals_separate_cashout_from_business_fanin(
             assert diagnostic["id_format_artifacts"]["transaction_format_class_auc"] == 0.5
             assert diagnostic["id_format_artifacts"]["customer_format_class_auc"] == 0.5
             assert diagnostic["auc_by_feature"]["recipient_account_age_days"] is not None
+            assert "created_at_second_zero" in diagnostic["auc_by_feature"]
             contrast = diagnostic["by_mechanism"][
                 "social_engineering_vs_legit_business_spike"
             ]
             assert "recipient_account_age_days" in contrast["auc_by_feature"]
+        base_timing = diagnostics["base"]["fixed_delay_artifacts"]
+        for mechanism in ("collusion", "social_engineering"):
+            artifact = base_timing[mechanism]
+            assert artifact["paired_cashout_count"] > 0
+            assert artifact["exact_configured_delay_count"] == 0
+            assert len(artifact["distinct_delay_seconds"]) > 1
+        p14_transaction_ids: set[str] = set()
+        with sqlite3.connect(valid_smoke_run / "private" / "evaluator.sqlite") as private:
+            for (value_json,) in private.execute(
+                "SELECT value_json FROM run_metadata "
+                "WHERE key = 'p1.4.mechanisms.v1' OR key LIKE 'p1.4.mechanisms.v1:%'"
+            ):
+                groups = json.loads(value_json)["groups"]
+                for group in groups:
+                    for field in (
+                        "transaction_ids",
+                        "incoming_transaction_ids",
+                        "outgoing_transaction_ids",
+                    ):
+                        p14_transaction_ids.update(group.get(field, []))
+        with sqlite3.connect(valid_smoke_run / "operational" / "observations.sqlite") as operational:
+            generated_timestamps = {
+                txn_id: created_at
+                for txn_id, created_at in operational.execute(
+                    "SELECT txn_id, created_at FROM transactions "
+                    f"WHERE txn_id IN ({', '.join('?' for _ in p14_transaction_ids)})",
+                    tuple(sorted(p14_transaction_ids)),
+                )
+            }
+        assert set(generated_timestamps) == p14_transaction_ids
+        assert all(
+            datetime.fromisoformat(value.replace("Z", "+00:00")).second != 0
+            for value in generated_timestamps.values()
+        )
 
 
 @pytest.fixture(scope="module")
@@ -356,6 +392,20 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     assert validated.returncode == 0, validated.stdout + validated.stderr
     assert "Validation summary:" in validated.stdout
     assert "report/delay draws reproduce from private stable keys" in validated.stdout
+    shape_check = next(
+        check
+        for check in validate_run(run_dir)["checks"]
+        if check["name"] == "operational_identifier_shape_contract"
+    )
+    assert shape_check["passed"] is True
+    affected_ids: set[str] = set()
+    with sqlite3.connect(private_path) as private:
+        for (value_json,) in private.execute(
+            "SELECT value_json FROM run_metadata WHERE key LIKE 'p1.6.incident_effect.v1:%'"
+        ):
+            affected_ids.update(json.loads(value_json)["affected_transaction_ids"])
+    assert affected_ids
+    assert all(re.fullmatch(r"txn-[0-9a-f]{64}", txn_id) for txn_id in affected_ids)
 
 
 @pytest.mark.parametrize(

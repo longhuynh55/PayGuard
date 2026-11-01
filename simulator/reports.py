@@ -323,6 +323,39 @@ def _p14_feature_diagnostics(
             social_transaction_ids.update(transaction_ids)
         elif mechanism == "legit_business_spike":
             control_transaction_ids.update(transaction_ids)
+    transactions_by_id = {row["txn_id"]: row for row in all_rows}
+    configured_cashout_delay = {
+        "collusion": config.fraud.collusion.cashout_delay_minutes.value,
+        "social_engineering": config.fraud.social_engineering.cashout_delay_minutes.value,
+    }
+    fixed_delay_artifacts: dict[str, dict[str, Any]] = {}
+    for mechanism in ("collusion", "social_engineering"):
+        delays_seconds: list[int] = []
+        for group in mechanism_groups:
+            if group.get("mechanism") != mechanism:
+                continue
+            incoming_ids = group.get("incoming_transaction_ids", [])
+            outgoing_ids = group.get("outgoing_transaction_ids", [])
+            for incoming_id, outgoing_id in zip(incoming_ids, outgoing_ids):
+                incoming = transactions_by_id.get(incoming_id)
+                outgoing = transactions_by_id.get(outgoing_id)
+                if incoming is None or outgoing is None:
+                    continue
+                delay = _parse_timestamp(outgoing["created_at"]) - _parse_timestamp(
+                    incoming["created_at"]
+                )
+                delays_seconds.append(int(delay.total_seconds()))
+        exact_seconds = configured_cashout_delay[mechanism] * 60
+        fixed_delay_artifacts[mechanism] = {
+            "configured_delay_minutes": configured_cashout_delay[mechanism],
+            "paired_cashout_count": len(delays_seconds),
+            "exact_configured_delay_count": sum(
+                delay == exact_seconds for delay in delays_seconds
+            ),
+            "distinct_delay_seconds": sorted(set(delays_seconds)),
+            "minimum_delay_seconds": min(delays_seconds) if delays_seconds else None,
+            "maximum_delay_seconds": max(delays_seconds) if delays_seconds else None,
+        }
     feature_scores: dict[str, list[float]] = {
         "new_device_to_sender": [],
         "first_transfer_to_counterparty": [],
@@ -335,6 +368,7 @@ def _p14_feature_diagnostics(
         "transaction_id_hash_format": [],
         "customer_id_six_digit_format": [],
         "amount_near_10m_vnd": [],
+        "created_at_second_zero": [],
     }
     target_labels: list[int] = []
     features_by_id: dict[str, dict[str, float]] = {}
@@ -440,6 +474,7 @@ def _p14_feature_diagnostics(
             "amount_near_10m_vnd": float(
                 type(amount) is int and near_min <= amount <= near_max
             ),
+            "created_at_second_zero": float(current_at.second == 0),
         }
         features_by_id[target["txn_id"]] = values
         for name, value in values.items():
@@ -466,6 +501,10 @@ def _p14_feature_diagnostics(
         "amount_near_10m_vnd": (
             "Non-card-testing fraud amounts are sampled from the configured "
             f"{near_min:,}–{near_max:,} VND band."
+        ),
+        "created_at_second_zero": (
+            "The diagnostic checks whether transaction creation time has a zero second; "
+            "P1.4 mechanism streams now use namespaced minute/second jitter."
         ),
     }
     social_ids = [txn_id for txn_id in social_transaction_ids if txn_id in features_by_id]
@@ -505,6 +544,7 @@ def _p14_feature_diagnostics(
             for name, auc in strong.items()
         },
         "mechanism_transaction_counts": dict(sorted(mechanism_transaction_counts.items())),
+        "fixed_delay_artifacts": fixed_delay_artifacts,
         "by_mechanism": {
             "social_engineering_vs_legit_business_spike": {
                 "fraud_transaction_count": len(social_ids),

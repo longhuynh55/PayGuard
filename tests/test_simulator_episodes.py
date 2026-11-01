@@ -19,6 +19,7 @@ from simulator.config import (
     validate_episode_config,
 )
 from simulator.episodes import derive_episode_seed, generate_episodes
+from simulator.incidents import inject_legit_business_spike, inject_new_fraud
 from simulator.labels import label_delay_report
 from simulator.reproducibility import (
     canonical_episode_content,
@@ -445,6 +446,79 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
         )
     finally:
         pair.close()
+
+
+def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
+    tmp_path: Path,
+) -> None:
+    control, _ = _generate(tmp_path / "p16-template-control")
+    treated, _ = _generate(tmp_path / "p16-template-treated")
+    try:
+        control_content = {
+            table: [dict(row) for row in control.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
+            for table in list_operational_schema(control.operational)
+        }
+        treated_before = {
+            table: [dict(row) for row in treated.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
+            for table in list_operational_schema(treated.operational)
+        }
+        assert control_content == treated_before
+
+        social = inject_new_fraud(
+            treated.operational,
+            treated.private,
+            load_simulator_config(ROOT / "configs" / "simulator.yaml"),
+            episode_id="ep-0002",
+            incident_truth_id="truth-p16-new-fraud",
+        )
+        business = inject_legit_business_spike(
+            treated.operational,
+            treated.private,
+            load_simulator_config(ROOT / "configs" / "simulator.yaml"),
+            episode_id="ep-0004",
+            incident_truth_id="truth-p16-legit-business",
+        )
+
+        treated_after = {
+            table: [dict(row) for row in treated.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
+            for table in list_operational_schema(treated.operational)
+        }
+        assert treated_after == control_content
+        social_truth = dict(
+            treated.private.execute(
+                "SELECT * FROM incident_truth WHERE incident_truth_id = ?",
+                ("truth-p16-new-fraud",),
+            ).fetchone()
+        )
+        business_truth = dict(
+            treated.private.execute(
+                "SELECT * FROM incident_truth WHERE incident_truth_id = ?",
+                ("truth-p16-legit-business",),
+            ).fetchone()
+        )
+        assert social_truth["cause"] == "new_fraud"
+        assert social_truth["requires_intervention"] == 1
+        assert social_truth["rule_covered"] == 0
+        assert json.loads(social_truth["accepted_actions_json"]) == [
+            "human_review",
+            "fraud_ops",
+        ]
+        assert social_truth["effect_available_at"] == social.effect_available_at
+        assert business_truth["cause"] == "legit_business_change"
+        assert business_truth["requires_intervention"] == 0
+        assert business_truth["rule_covered"] == 1
+        assert json.loads(business_truth["accepted_actions_json"]) == []
+        assert business_truth["effect_available_at"] == business.effect_available_at
+        assert social.affected_transaction_ids and business.affected_transaction_ids
+        assert "incident_truth" not in list_operational_schema(treated.operational)
+        assert all(
+            not {"cause", "mechanism", "accepted_actions_json"} & set(columns)
+            for table, columns in list_operational_schema(treated.operational).items()
+            if table != "decisions"
+        )
+    finally:
+        control.close()
+        treated.close()
 
 
 def test_episode_add_remove_and_reorder_preserve_existing_data_and_roles(

@@ -398,11 +398,19 @@ class SocialEngineeringConfig(StrictModel):
         return self
 
 
+class FraudTimingJitterConfig(StrictModel):
+    maximum_minute_offset: ConfigValue[Annotated[int, Field(ge=1, le=59)]]
+    maximum_second_offset: ConfigValue[Annotated[int, Field(ge=1, le=59)]]
+    cashout_delay_jitter_minutes: ConfigValue[NonNegativeInt]
+    mule_creation_jitter_minutes: ConfigValue[PositiveInt]
+
+
 class FraudConfig(StrictModel):
     card_testing: CardTestingConfig
     ato: ATOConfig
     collusion: CollusionConfig
     social_engineering: SocialEngineeringConfig
+    timing_jitter: FraudTimingJitterConfig
     near_threshold_minimum_amount: ConfigValue[PositiveInt]
     near_threshold_maximum_amount: ConfigValue[PositiveInt]
 
@@ -517,6 +525,7 @@ class SimulatorConfig(StrictModel):
         if max(fraud_end_seconds, control_end_seconds) >= 24 * 60 * 60:
             raise ValueError("fraud.card_testing lifecycle must finish before the next business date")
         social = self.fraud.social_engineering
+        timing_jitter = self.fraud.timing_jitter
         if social.business_control_maximum_amount.value > self.transactions.maximum_amount.value:
             raise ValueError("fraud.social_engineering control amounts must be within the transaction amount range")
         if (
@@ -536,6 +545,31 @@ class SimulatorConfig(StrictModel):
             raise ValueError("fraud.social_engineering cash-out must follow incoming settlement")
         if social.cashout_delay_minutes.value >= self.world.internal_mule_outbound_window_hours.value * 60:
             raise ValueError("fraud social-engineering cash-out must fit the mule outbound window")
+        if (
+            social.cashout_delay_minutes.value
+            + timing_jitter.cashout_delay_jitter_minutes.value
+            >= self.world.internal_mule_outbound_window_hours.value * 60
+        ):
+            raise ValueError(
+                "fraud social-engineering cash-out after timing jitter must fit the mule outbound window"
+            )
+        minimum_cashout_delay = (
+            min(
+                self.fraud.collusion.cashout_delay_minutes.value,
+                social.cashout_delay_minutes.value,
+            )
+            - timing_jitter.cashout_delay_jitter_minutes.value
+        )
+        if minimum_cashout_delay * 60 <= lifecycle_delay_seconds:
+            raise ValueError(
+                "fraud cash-out delay after timing jitter must follow incoming settlement"
+            )
+        if timing_jitter.mule_creation_jitter_minutes.value >= (
+            social.start_offset_days.value - social.new_account_warmup_days.value
+        ) * 24 * 60:
+            raise ValueError(
+                "fraud timing jitter must keep the social-engineering mule's history window inside the episode"
+            )
         ato = self.fraud.ato
         if (
             ato.start_offset_days.value

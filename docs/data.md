@@ -174,7 +174,7 @@ Sinh sự kiện nhãn tới ít nhất `last_transaction_at + H` để đánh g
 | Hộ kinh doanh nổ đơn hợp lệ (`legit_business_spike`) | `legit_business_change` | Chẩn đoán benign; không có runbook benign áp dụng thì chuyển người theo giới hạn MVP ở [triage.md](triage.md) |
 | Card testing / ATO tăng đột biến (kiểu đã có trong train) | `fraud_surge` | Báo fraud ops |
 | `amount` nhân 100 hoặc NULL hàng loạt từ một ngày | `data_pipeline` | Báo đội data |
-| Merchant mới, ít giao dịch | Truth độc lập với cỡ mẫu | Recheck/chuyển người; có fraud thật thì vẫn chấm theo truth fraud |
+| Merchant mới, ít giao dịch | `new_fraud` hoặc `no_material_change`, được chọn độc lập với cỡ mẫu | Recheck/chuyển người; có fraud thật thì vẫn chấm theo truth fraud |
 | Social engineering | `new_fraud` | Chuyển người + đề xuất retrain |
 | Fraud mới + mùa vụ cùng lúc | Hai nguyên nhân | Chuyển người |
 | Kẻ gian bắt chước hành vi bình thường | Concept drift "im lặng" | Kiểm tra agent có phát hiện không (ca khó) |
@@ -205,6 +205,8 @@ Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.
 | `data_pipeline` | `data_ticket`, `human_review` | |
 | Benign (`seasonal`, `legit_business_change`, `no_material_change`) | — | Không cần can thiệp; đóng đúng tính benign automation |
 | Hai nguyên nhân | Mỗi sự cố thành phần theo bảng trên | `human_review` thỏa cả hai |
+
+Injector merchant mới ít giao dịch nhận `truth_cause` tường minh (`new_fraud` hoặc `no_material_change`); số giao dịch không dùng để suy ra nguyên nhân. Cả hai nhánh hiện có `rule_covered = 0` vì nhóm merchant mới không có episode development để viết rule/ngưỡng. Mapping episode vẫn được P1.7 khóa trong manifest.
 
 D là giả định nghiệp vụ khai báo trước, không tune. Cách evaluator dùng các cột này: [evaluation.md](evaluation.md).
 

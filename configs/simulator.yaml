@@ -556,6 +556,36 @@ fraud:
         kind: assumption
         reference: P1.4 benign control assumption; no business amount distribution is claimed.
 
+  timing_jitter:
+    maximum_minute_offset:
+      value: 59
+      unit: minutes within the scheduled local start hour
+      rationale: Spread generated ATO, collusion, social-engineering, and business-control transaction starts across the configured hour.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical time-of-day estimate.
+    maximum_second_offset:
+      value: 59
+      unit: seconds within the generated minute
+      rationale: Avoid fixed second-zero timestamps for generated incident transactions.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical time-of-day estimate.
+    cashout_delay_jitter_minutes:
+      value: 5
+      unit: absolute minutes around the configured cash-out delay
+      rationale: Vary each paired cash-out delay while keeping it after settlement and within the mule capability window.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical latency estimate.
+    mule_creation_jitter_minutes:
+      value: 59
+      unit: additional minutes before the configured mule history window
+      rationale: Avoid a fixed mule-creation clock time while preserving at least the full configured seven-day history.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical account-creation estimate.
+
 label_reporting:
   maturity_horizon_days:
     value: 90
