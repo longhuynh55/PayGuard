@@ -75,6 +75,8 @@ Các bảng sau chỉ tạo trong database private; không có trong danh sách/
 | `run_metadata` | `key TEXT`, `value_json TEXT` | PK `key NOT NULL`; `value_json` là JSON hợp lệ. Seed/config/version generator nằm ở đây, không operational. |
 | `incident_truth` | `incident_truth_id TEXT`, `episode_id TEXT`, `cause TEXT`, `requires_intervention INTEGER`, `mechanism TEXT`, `rule_covered INTEGER`, `affected_entities_json TEXT`, `affected_segments_json TEXT`, `affected_features_json TEXT`, `effect_start_at TEXT`, `effect_end_at TEXT NULL`, `effect_available_at TEXT`, `intervention_start_at TEXT`, `deadline_at TEXT`, `accepted_actions_json TEXT`, `parent_scenario TEXT NULL` | PK `incident_truth_id NOT NULL`; FK episode tới `private_episodes.episode_id`; `requires_intervention` và `rule_covered` là boolean 0/1; các cột `_json` là JSON (ba trường phạm vi là array, `accepted_actions` là array); thời gian theo UTC. `parent_scenario` là ID nhóm cha, NULL nếu không có. |
 
+Enum template trong `episode_manifest` hiện giữ CHECK smoke vòng 1 (`clean`, `data_pipeline`, `seasonal`). Việc mở rộng enum/CHECK riêng cho template pilot mới là phạm vi P1.7; P1.6 vòng 2 chỉ cung cấp injector và validator thành phần.
+
 P1.3 lưu account profile tại `run_metadata` key `p1.3.account_profiles.v1`: object gồm `account_roles` (customer ID → role), `familiar_payees` (customer ID → customer ID array), `supplier_merchants` (customer ID → merchant ID array), và `internal_mule_outbound_window_hours`. Key này chỉ ở private; transaction row không mang account role. P1.4 lưu cohort ID tại `p1.4.legitimate_new_accounts.v1` cùng mechanism, group, participant và quan hệ transaction trong private `run_metadata`. Khóa RNG gốc cho quyết định báo nhãn và độ trễ được lưu theo từng transaction trong private `p1.5.label_truth.v1`; validator có thể phát lại quyết định này ở tiến trình riêng. Với `data_pipeline`, metadata private `p1.6.incident_effect.v1:<incident_truth_id>` cũng lưu `pre_injection_amount_by_txn_id` cho đúng các transaction trong `affected_transaction_ids`; validator dùng amount gốc này để kiểm tra hiệu ứng injector và adjustment event sau khi operational amount bị nhân hoặc đặt NULL. Giá trị này không được chép vào operational.
 
 Recipient signals and their as-of contract are described in [§1, Simulator nền](#1-simulator-n%E1%BB%81n). This section defines schema and private metadata only.
@@ -174,12 +176,14 @@ Sinh sự kiện nhãn tới ít nhất `last_transaction_at + H` để đánh g
 | Hộ kinh doanh nổ đơn hợp lệ (`legit_business_spike`) | `legit_business_change` | Chẩn đoán benign; không có runbook benign áp dụng thì chuyển người theo giới hạn MVP ở [triage.md](triage.md) |
 | Card testing / ATO tăng đột biến (kiểu đã có trong train) | `fraud_surge` | Báo fraud ops |
 | `amount` nhân 100 hoặc NULL hàng loạt từ một ngày | `data_pipeline` | Báo đội data |
-| Merchant mới, ít giao dịch | `new_fraud` hoặc `no_material_change`, được chọn độc lập với cỡ mẫu | Recheck/chuyển người; có fraud thật thì vẫn chấm theo truth fraud |
-| Social engineering | `new_fraud` | Chuyển người + đề xuất retrain |
-| Fraud mới + mùa vụ cùng lúc | Hai nguyên nhân | Chuyển người |
-| Kẻ gian bắt chước hành vi bình thường | Concept drift "im lặng" | Kiểm tra agent có phát hiện không (ca khó) |
+| Merchant mới, ít giao dịch | `no_material_change` trong pilot; injector vẫn giữ nhánh `new_fraud` ngoài pilot | Recheck/chuyển người; pilot benign có `requires_intervention = 0`, `accepted_actions = []` |
+| Social engineering | `new_fraud`, mechanism `social_engineering` | Chuyển người + đề xuất retrain |
+| Fraud mới + mùa vụ cùng lúc | Hai truth `fraud_surge` + `seasonal` cùng `parent_scenario` | Chuyển người |
+| Kẻ gian bắt chước hành vi bình thường | Cause `new_fraud`, mechanism `silent_concept_drift` | Kiểm tra agent có phát hiện không (ca khó) |
 
 Taxonomy nguyên nhân đầy đủ: [triage.md](triage.md).
+
+Social-engineering chains chỉ được injector của template `new_fraud` sinh qua writer P1.4. Spike hộ kinh doanh chỉ được injector template `legit_business_spike` sinh; lịch sử `base` giữ hoạt động fan-in hộ kinh doanh thông thường làm đối chứng, không có chuỗi social engineering.
 
 ## 5. Bảng truth sự cố
 
@@ -206,7 +210,11 @@ Injector ghi ngay khi chèn sự cố; chỉ evaluator đọc.
 | Benign (`seasonal`, `legit_business_change`, `no_material_change`) | — | Không cần can thiệp; đóng đúng tính benign automation |
 | Hai nguyên nhân | Mỗi sự cố thành phần theo bảng trên | `human_review` thỏa cả hai |
 
-Injector merchant mới ít giao dịch nhận `truth_cause` tường minh (`new_fraud` hoặc `no_material_change`); số giao dịch không dùng để suy ra nguyên nhân. Cả hai nhánh hiện có `rule_covered = 0` vì nhóm merchant mới không có episode development để viết rule/ngưỡng. Mapping episode vẫn được P1.7 khóa trong manifest.
+Injector merchant mới ít giao dịch nhận `truth_cause` tường minh (`new_fraud` hoặc `no_material_change`); số giao dịch không dùng để suy ra nguyên nhân. Theo quyết định người dùng 01/11/2026 tại [MASTER_PLAN.md](../MASTER_PLAN.md) mục 7, pilot dùng `no_material_change` với `requires_intervention = 0`, `accepted_actions = []`; nhánh `new_fraud` được giữ nhưng không dùng trong pilot. Cả hai nhánh có `rule_covered = 0` vì nhóm merchant mới không có episode development để viết rule/ngưỡng.
+
+Truth `legit_business_change` có `rule_covered = 0`: triage MVP không có runbook cho trường hợp này ([triage.md](triage.md) §1, §3). `silent_concept_drift` luôn mang cause `new_fraud` và mechanism `silent_concept_drift`. Cặp hai nguyên nhân được hỗ trợ là một truth `fraud_surge` và một truth `seasonal` cùng `parent_scenario`, với hai cửa sổ hiệu ứng giao nhau.
+
+Seasonal, silent-drift và sparse-merchant rows lấy merchant theo `supplier_merchants` khi customer là household business và supplier hiện hữu phù hợp. Sparse-merchant cố ý dùng customer cá nhân để merchant mới không phá quan hệ supplier đã biết. Giao dịch injector đủ điều kiện được lấy mẫu refund/reversal theo đúng xác suất lifecycle nền tại `configs/simulator.yaml`.
 
 D là giả định nghiệp vụ khai báo trước, không tune. Cách evaluator dùng các cột này: [evaluation.md](evaluation.md).
 

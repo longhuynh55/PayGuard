@@ -497,7 +497,7 @@ def _validate_incident_truth(
         "legit_business_change": {
             "cause": "legit_business_change",
             "requires_intervention": 0,
-            "rule_covered": 1,
+            "rule_covered": 0,
             "mechanisms": {"legit_business_spike"},
             "accepted_actions": set(),
         },
@@ -775,7 +775,7 @@ def _validate_incident_truth(
 def _validate_parent_scenarios(
     truth_by_episode: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """Require every non-null parent scenario to bind multiple truths in one episode."""
+    """Require parent components to be the supported overlapping pair in one episode."""
     parents: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for episode_id, truth_rows in truth_by_episode.items():
         for truth in truth_rows:
@@ -798,6 +798,25 @@ def _validate_parent_scenarios(
             _fail(
                 f"parent scenario {parent!r} in episode {episode_id} must pair one fraud_surge "
                 "and one seasonal truth"
+            )
+        intervals: list[tuple[datetime, datetime]] = []
+        for truth in members:
+            try:
+                start = datetime.fromisoformat(truth["effect_start_at"].replace("Z", "+00:00"))
+                end_value = truth.get("effect_end_at") or truth["effect_start_at"]
+                end = datetime.fromisoformat(end_value.replace("Z", "+00:00"))
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                _fail(
+                    f"parent scenario {parent!r} in episode {episode_id} has invalid effect interval: {exc}"
+                )
+            if start.tzinfo is None or end.tzinfo is None or end < start:
+                _fail(
+                    f"parent scenario {parent!r} in episode {episode_id} has invalid effect interval"
+                )
+            intervals.append((start, end))
+        if max(interval[0] for interval in intervals) > min(interval[1] for interval in intervals):
+            _fail(
+                f"parent scenario {parent!r} in episode {episode_id} component effect windows must overlap"
             )
 
 
@@ -1978,13 +1997,24 @@ def _validate_p14_mechanism_chains(
             if not isinstance(group, dict) or group.get("role") not in {"fraud", "benign_control"}:
                 _fail(f"P1.4 mechanism group has no private role for {episode_id}")
             mechanism = group.get("mechanism")
-            if mechanism not in {"ato", "collusion", "social_engineering", "legit_business_spike"}:
+            if mechanism not in {
+                "ato",
+                "collusion",
+                "social_engineering",
+                "legit_business_spike",
+                "household_business_activity",
+            }:
                 _fail(f"P1.4 mechanism group has an unsupported type for {episode_id}")
-            expected_role = "benign_control" if mechanism == "legit_business_spike" else "fraud"
+            business_mechanisms = {"legit_business_spike", "household_business_activity"}
+            expected_role = "benign_control" if mechanism in business_mechanisms else "fraud"
             if group["role"] != expected_role:
                 _fail(f"P1.4 {mechanism} group has an inconsistent private role")
             if mechanism == "collusion" and episode_id != "base":
                 _fail("P1.4 collusion must remain in shared pre-drift history")
+            if mechanism in {"social_engineering", "legit_business_spike"} and episode_id == "base":
+                _fail(f"P1.4 {mechanism} must be generated only by its P1.6 template injector")
+            if mechanism == "household_business_activity" and episode_id != "base":
+                _fail("P1.4 ordinary household-business activity must remain in base history")
             txn_ids = [
                 txn_id
                 for field in ("transaction_ids", "incoming_transaction_ids", "outgoing_transaction_ids")
@@ -2003,7 +2033,7 @@ def _validate_p14_mechanism_chains(
                 ).astimezone(UTC) >= drift_start:
                     _fail("P1.4 collusion transaction is on or after the drift point")
                 amount = pre_injection_amounts.get(txn_id, transaction["amount"])
-                if mechanism == "legit_business_spike":
+                if mechanism in business_mechanisms:
                     amount_in_range = type(amount) is int and control_min <= amount <= control_max
                 else:
                     amount_in_range = type(amount) is int and near_min <= amount <= near_max
@@ -2125,7 +2155,7 @@ def _validate_p14_mechanism_chains(
                             "P1.4 social-engineering mule lacks the configured as-of history "
                             "before receipt"
                         )
-            if mechanism == "legit_business_spike":
+            if mechanism in business_mechanisms:
                 recipient_id = group.get("recipient_customer_id")
                 control_rows = [group_rows[item] for item in group.get("transaction_ids", [])]
                 expected_senders = group.get("sender_customer_ids")

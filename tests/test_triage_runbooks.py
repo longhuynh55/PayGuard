@@ -844,7 +844,9 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         ),
         key=lambda row: (row["episode_id"], row["event_at"], row["incident_id"]),
     )
-    pipeline_decisions = []
+    pipeline_decisions_by_episode: dict[str, dict[str, tuple[str, str, str]]] = {
+        episode_id: {} for episode_id in pipeline_ids
+    }
     jump_decisions_by_episode = {episode_id: [] for episode_id in pipeline_ids}
     jump_day = simulator_config.timeline.t0_business_date.value + timedelta(
         days=PIPELINE_START_OFFSET_DAYS
@@ -857,7 +859,13 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         )
         unit_check = checks["unit_or_null_change"]
         decision = _gate(incident, checks, as_of_time=incident_as_of)
-        pipeline_decisions.append(decision)
+        pipeline_decisions_by_episode[incident["episode_id"]][
+            incident["incident_id"]
+        ] = (
+            decision["action"],
+            decision["evidence_status"],
+            decision["reason"],
+        )
 
         source_window = unit_check["details"].get("incident_metric_window", {})
         window_start_raw = source_window.get("window_start")
@@ -915,9 +923,31 @@ def test_smoke_pipeline_incidents_route_and_clean_or_seasonal_do_not_match(
         first_jump_decisions.append(first_jump_decision)
 
     assert len(first_jump_decisions) == len(pipeline_ids) == 2
-    # P1.4 episode data consolidates the jump windows into one incident per
-    # pipeline episode; each still follows the BACKLOG-5 gate.
-    assert len(pipeline_decisions) == 2
+    # F1 removes 15 SE/business-spike transactions from each pipeline effect scope.
+    # The changed scope yields a second ep-0002 amount incident; preserve its
+    # BACKLOG-5 human-review outcome and the first-jump data-ticket outcomes.
+    expected_pipeline_amount_decisions = {
+        "ep-0002": {
+            "incident-67c06d4b51c5196eb2894cd0": (
+                "data_ticket",
+                "sufficient",
+                "The unit_or_null_change routing checklist passed.",
+            ),
+            "incident-e2e5c62596ba75eca194ffad": (
+                "human_review",
+                "insufficient",
+                "data_ticket requires a passing unit_or_null_change checklist.",
+            ),
+        },
+        "ep-0004": {
+            "incident-367c348143656924203a5bc3": (
+                "data_ticket",
+                "sufficient",
+                "The unit_or_null_change routing checklist passed.",
+            ),
+        },
+    }
+    assert pipeline_decisions_by_episode == expected_pipeline_amount_decisions
     for incident in latest_by_id.values():
         if incident["episode_id"] not in non_pipeline_ids:
             continue

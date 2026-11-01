@@ -403,6 +403,9 @@ class FraudTimingJitterConfig(StrictModel):
     maximum_second_offset: ConfigValue[Annotated[int, Field(ge=1, le=59)]]
     cashout_delay_jitter_minutes: ConfigValue[NonNegativeInt]
     mule_creation_jitter_minutes: ConfigValue[PositiveInt]
+    card_testing_start_hour_jitter: ConfigValue[Annotated[int, Field(ge=0, le=12)]]
+    card_testing_spacing_jitter_seconds: ConfigValue[NonNegativeInt]
+    card_testing_followup_jitter_seconds: ConfigValue[NonNegativeInt]
 
 
 class FraudConfig(StrictModel):
@@ -505,19 +508,46 @@ class SimulatorConfig(StrictModel):
             self.timeline.t0_business_date.value - self.timeline.start_business_date.value
         ).days:
             raise ValueError("fraud.card_testing campaign interval must allow a pre-T0 campaign")
+        card_jitter = self.fraud.timing_jitter
+        spacing_seconds = (
+            card_testing.window_minutes.value * 60 // card_testing.attempts_per_card.value
+        )
+        spacing_jitter_seconds = card_jitter.card_testing_spacing_jitter_seconds.value
+        if (
+            spacing_seconds <= spacing_jitter_seconds
+            or (card_testing.attempts_per_card.value - 1)
+            * (spacing_seconds + spacing_jitter_seconds)
+            >= card_testing.window_minutes.value * 60
+        ):
+            raise ValueError("fraud.card_testing spacing jitter must keep attempts inside its configured window")
+        if (
+            card_testing.followup_delay_seconds.value
+            <= card_jitter.card_testing_followup_jitter_seconds.value
+        ):
+            raise ValueError("fraud.card_testing follow-up jitter must keep a positive post-window delay")
+        start_hour_jitter = card_jitter.card_testing_start_hour_jitter.value
+        if (
+            card_testing.start_hour_local.value < start_hour_jitter
+            or card_testing.start_hour_local.value
+            + math.ceil(card_testing.benign_control_delay_minutes.value / 60)
+            + start_hour_jitter
+            >= 24
+        ):
+            raise ValueError("fraud.card_testing start-hour jitter must keep both groups on the same business date")
         attempt_window_seconds = card_testing.window_minutes.value * 60
         lifecycle_delay_seconds = (
             self.transactions.authorization_delay_seconds.value
             + self.transactions.settlement_delay_minutes.value * 60
         )
         fraud_end_seconds = (
-            card_testing.start_hour_local.value * 60 * 60
+            (card_testing.start_hour_local.value + start_hour_jitter) * 60 * 60
             + attempt_window_seconds
             + card_testing.followup_delay_seconds.value
+            + card_jitter.card_testing_followup_jitter_seconds.value
             + lifecycle_delay_seconds
         )
         control_end_seconds = (
-            card_testing.start_hour_local.value * 60 * 60
+            (card_testing.start_hour_local.value + start_hour_jitter) * 60 * 60
             + card_testing.benign_control_delay_minutes.value * 60
             + attempt_window_seconds
             + lifecycle_delay_seconds

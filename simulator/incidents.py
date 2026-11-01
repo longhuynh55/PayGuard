@@ -12,10 +12,12 @@ from typing import Any, Iterator, Literal, MutableMapping
 from zoneinfo import ZoneInfo
 
 from simulator.config import SimulatorConfig
+from simulator.fraud import generate_other_fraud_mechanisms, sample_card_testing_timing
 from simulator.identifiers import transaction_id
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record, utc_timestamp
 from simulator.transactions import card_token_for_customer, device_id_for_transaction
+from simulator.world import WorldSummary
 
 
 PIPELINE_START_OFFSET_DAYS = 1
@@ -246,6 +248,62 @@ def _p14_group_transaction_ids(group: dict[str, Any]) -> list[str]:
     return sorted(set(transaction_ids))
 
 
+def _load_private_account_profiles(private: sqlite3.Connection) -> dict[str, Any]:
+    row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = 'p1.3.account_profiles.v1'"
+    ).fetchone()
+    if row is None:
+        return {}
+    try:
+        metadata = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("private P1.3 account profiles are invalid JSON") from exc
+    if (
+        not isinstance(metadata, dict)
+        or not isinstance(metadata.get("account_roles"), dict)
+        or not isinstance(metadata.get("familiar_payees"), dict)
+        or not isinstance(metadata.get("supplier_merchants"), dict)
+        or type(metadata.get("internal_mule_outbound_window_hours")) is not int
+    ):
+        raise ValueError("private P1.3 account profiles are malformed")
+    return metadata
+
+
+def _load_base_world_summary(
+    operational: sqlite3.Connection, private: sqlite3.Connection
+) -> WorldSummary:
+    metadata = _load_private_account_profiles(private)
+    if not metadata:
+        raise ValueError("P1.6 P1.4-backed injection requires private P1.3 account profiles")
+    customer_ids = tuple(
+        row[0]
+        for row in operational.execute(
+            "SELECT customer_id FROM customers WHERE episode_id = 'base' ORDER BY customer_id"
+        )
+    )
+    merchant_ids = tuple(
+        row[0]
+        for row in operational.execute(
+            "SELECT merchant_id FROM merchants WHERE episode_id = 'base' ORDER BY merchant_id"
+        )
+    )
+    return WorldSummary(
+        customer_ids=customer_ids,
+        merchant_ids=merchant_ids,
+        account_roles=dict(metadata["account_roles"]),
+        familiar_payees={key: tuple(value) for key, value in metadata["familiar_payees"].items()},
+        supplier_merchants={key: tuple(value) for key, value in metadata["supplier_merchants"].items()},
+        internal_mule_outbound_window_hours=metadata["internal_mule_outbound_window_hours"],
+    )
+
+
+def _episode_seed(private: sqlite3.Connection, episode_id: str, fallback: int) -> int:
+    row = private.execute(
+        "SELECT seed FROM episode_manifest WHERE episode_id = ?", (episode_id,)
+    ).fetchone()
+    return fallback if row is None else row[0]
+
+
 def _append_p16_fraud_group(
     private: sqlite3.Connection,
     *,
@@ -325,6 +383,57 @@ def _write_business_calendar_context(
         },
     )
     return calendar_event_id
+
+
+def _insert_background_adjustment(
+    operational: sqlite3.Connection,
+    config: SimulatorConfig,
+    *,
+    seed: int,
+    episode_id: str,
+    txn_id: str,
+    random_key: str,
+    amount: int,
+    approved: bool,
+    settled_at: datetime,
+) -> None:
+    if not approved:
+        return
+    draw = keyed_rng(seed, "p1.transactions.adjustment_type", episode_id, random_key).random()
+    transactions = config.transactions
+    if draw < transactions.refund_probability.value:
+        event_type = "refunded"
+    elif draw < transactions.refund_probability.value + transactions.reversal_probability.value:
+        event_type = "reversed"
+    else:
+        return
+    delay_seconds = keyed_rng(
+        seed, "p1.transactions.adjustment_time", episode_id, random_key
+    ).randint(
+        transactions.adjustment_minimum_delay_minutes.value * 60,
+        transactions.adjustment_maximum_delay_hours.value * 3600,
+    )
+    adjustment_at = settled_at + timedelta(seconds=delay_seconds)
+    episode_end = _business_midnight(config.timeline.end_business_date_exclusive.value, config)
+    if adjustment_at >= episode_end:
+        return
+    adjustment_amount = keyed_rng(
+        seed, "p1.transactions.adjustment_amount", episode_id, random_key
+    ).randint(1, amount)
+    insert_operational_record(
+        operational,
+        "transaction_events",
+        {
+            "event_id": f"{txn_id}:{event_type}",
+            "txn_id": txn_id,
+            "episode_id": episode_id,
+            "event_type": event_type,
+            "event_at": adjustment_at,
+            "available_at": adjustment_at,
+            "amount": adjustment_amount,
+            "response_code": None,
+        },
+    )
 
 
 def _insert_generated_transaction(
@@ -415,6 +524,17 @@ def _insert_generated_transaction(
                 "response_code": None,
             },
         )
+        _insert_background_adjustment(
+            operational,
+            config,
+            seed=seed,
+            episode_id=episode_id,
+            txn_id=txn_id,
+            random_key=random_key,
+            amount=amount,
+            approved=True,
+            settled_at=settled_at,
+        )
     return dict(
         operational.execute(
             "SELECT txn_id, episode_id, event_at, available_at, customer_id, merchant_id, "
@@ -460,6 +580,8 @@ def inject_fraud_surge(
     transaction_random_keys: MutableMapping[str, str] | None = None,
     parent_scenario: str | None = None,
     calendar_event_name: str | None = None,
+    calendar_channel: str | None = None,
+    calendar_expected_relative_change: float | None = None,
     overlap_start_at: datetime | None = None,
 ) -> IncidentSummary:
     """Inject one new, known card-testing burst with an optional public calendar date."""
@@ -474,18 +596,32 @@ def inject_fraud_surge(
         not isinstance(calendar_event_name, str) or not calendar_event_name.strip()
     ):
         raise ValueError("calendar_event_name must be non-empty when a calendar date is published")
+    if calendar_event_name is not None:
+        if calendar_channel not in config.transactions.channel_weights.value:
+            raise ValueError("calendar_channel must be a configured transaction channel")
+        if (
+            isinstance(calendar_expected_relative_change, bool)
+            or not isinstance(calendar_expected_relative_change, (int, float))
+            or not math.isfinite(calendar_expected_relative_change)
+            or calendar_expected_relative_change <= 0
+        ):
+            raise ValueError("calendar expected relative change must be finite and positive")
 
     run_seed = config.seed.value if seed is None else seed
+    mechanism = config.fraud.card_testing
     if overlap_start_at is None:
-        start_at = _business_midnight(business_date, config) + timedelta(
-            hours=config.fraud.card_testing.start_hour_local.value
+        local_start = datetime.combine(
+            business_date,
+            time(mechanism.start_hour_local.value),
+            tzinfo=ZoneInfo(config.timeline.business_timezone.value),
         )
-        start_rng = keyed_rng(
-            run_seed, "p1.6.fraud_surge.start_time", episode_id, incident_truth_id
-        )
-        start_at += timedelta(
-            minutes=start_rng.randint(0, config.fraud.timing_jitter.maximum_minute_offset.value),
-            seconds=start_rng.randint(1, config.fraud.timing_jitter.maximum_second_offset.value),
+        start_at, spacing_intervals, followup_delay_seconds = sample_card_testing_timing(
+            config,
+            seed=run_seed,
+            namespace="fraud_surge",
+            keys=(episode_id, incident_truth_id),
+            base_start=local_start,
+            attempts_per_card=mechanism.attempts_per_card.value,
         )
     else:
         if (
@@ -499,6 +635,14 @@ def inject_fraud_surge(
             ZoneInfo(config.timeline.business_timezone.value)
         ).date() != business_date:
             raise ValueError("overlap_start_at must fall on the requested business date")
+        _, spacing_intervals, followup_delay_seconds = sample_card_testing_timing(
+            config,
+            seed=run_seed,
+            namespace="fraud_surge",
+            keys=(episode_id, incident_truth_id),
+            base_start=start_at,
+            attempts_per_card=config.fraud.card_testing.attempts_per_card.value,
+        )
     start_text = utc_timestamp(start_at)
     customers, merchants = _episode_business_customers_and_merchants(
         operational, episode_id, start_text
@@ -509,12 +653,10 @@ def inject_fraud_surge(
     merchant_id = keyed_rng(
         run_seed, "p1.6.fraud_surge.merchant", episode_id, incident_truth_id
     ).choice(merchants)
-    mechanism = config.fraud.card_testing
     attempt_count = mechanism.attempts_per_card.value
-    attempt_spacing_seconds = max(
-        1,
-        mechanism.window_minutes.value * 60 // attempt_count,
-    )
+    attempt_offsets = [0]
+    for spacing in spacing_intervals:
+        attempt_offsets.append(attempt_offsets[-1] + spacing)
     affected_rows: list[dict[str, Any]] = []
     calendar_event_id: str | None = None
     with _paired_savepoints(operational, private):
@@ -549,7 +691,7 @@ def inject_fraud_surge(
                     merchant_id=merchant_id,
                     channel="card",
                     amount=amount,
-                    created_at=start_at + timedelta(seconds=index * attempt_spacing_seconds),
+                    created_at=start_at + timedelta(seconds=attempt_offsets[index]),
                     approved=approved,
                     transaction_random_keys=transaction_random_keys,
                 )
@@ -557,7 +699,7 @@ def inject_fraud_surge(
         followup_index = attempt_count
         followup_at = start_at + timedelta(
             minutes=mechanism.window_minutes.value,
-            seconds=mechanism.followup_delay_seconds.value,
+            seconds=followup_delay_seconds,
         )
         followup_amount = keyed_rng(
             run_seed,
@@ -608,8 +750,8 @@ def inject_fraud_surge(
                 episode_id=episode_id,
                 business_date=business_date,
                 event_name=calendar_event_name,
-                channel="card",
-                expected_relative_change=0.0,
+                channel=calendar_channel,
+                expected_relative_change=calendar_expected_relative_change,
                 seed=run_seed,
                 event_key=incident_truth_id,
             )
@@ -650,21 +792,38 @@ def inject_new_fraud(
     incident_truth_id: str,
     parent_scenario: str | None = None,
 ) -> IncidentSummary:
-    """Record unknown social-engineering truth against its private P1.4 chain."""
+    """Generate a P1.4 social-engineering chain, then record private truth."""
     _require_episode(operational, private, episode_id)
     _check_truth_id(incident_truth_id)
-    group = next(
-        (
-            item
-            for item in _p14_mechanism_groups(private, episode_id)
-            if item.get("mechanism") == "social_engineering" and item.get("role") == "fraud"
-        ),
-        None,
-    )
-    if group is None:
-        raise ValueError("new_fraud requires a P1.4 social-engineering group in this episode")
-    transaction_ids = _p14_group_transaction_ids(group)
+    if any(
+        item.get("mechanism") == "social_engineering"
+        for item in _p14_mechanism_groups(private, episode_id)
+    ):
+        raise ValueError("new_fraud social-engineering chain has already been generated")
+    run_seed = _episode_seed(private, episode_id, config.seed.value)
+    world_summary = _load_base_world_summary(operational, private)
     with _paired_savepoints(operational, private):
+        generate_other_fraud_mechanisms(
+            operational,
+            private,
+            config,
+            world_summary,
+            seed=run_seed,
+            episode_id=episode_id,
+            duration_days=config.episode.duration_days.value,
+            mechanisms={"social_engineering"},
+        )
+        group = next(
+            (
+                item
+                for item in _p14_mechanism_groups(private, episode_id)
+                if item.get("mechanism") == "social_engineering" and item.get("role") == "fraud"
+            ),
+            None,
+        )
+        if group is None:
+            raise ValueError("P1.4 writer did not generate a social-engineering group")
+        transaction_ids = _p14_group_transaction_ids(group)
         effect_available_at = _write_truth_for_transactions(
             operational,
             private,
@@ -715,6 +874,9 @@ def inject_silent_concept_drift(
     ):
         raise ValueError("transaction_count must be a positive integer")
     run_seed = config.seed.value if seed is None else seed
+    account_profiles = _load_private_account_profiles(private)
+    account_roles = account_profiles.get("account_roles", {})
+    supplier_merchants = account_profiles.get("supplier_merchants", {})
     business_midnight = _business_midnight(business_date, config)
     available_text = utc_timestamp(business_midnight)
     customers, merchants = _episode_business_customers_and_merchants(
@@ -750,6 +912,15 @@ def inject_silent_concept_drift(
                 minutes=time_rng.randint(0, config.fraud.timing_jitter.maximum_minute_offset.value),
                 seconds=time_rng.randint(1, config.fraud.timing_jitter.maximum_second_offset.value),
             )
+            customer_id = choice_rng.choice(customers)
+            available_merchants = merchants
+            if account_roles.get(customer_id) == "household_business":
+                suppliers = set(supplier_merchants.get(customer_id, []))
+                available_merchants = [item for item in merchants if item in suppliers]
+                if not available_merchants:
+                    raise ValueError(
+                        f"silent-drift household {customer_id} has no available supplier merchant"
+                    )
             rows.append(
                 _insert_generated_transaction(
                     operational,
@@ -759,8 +930,8 @@ def inject_silent_concept_drift(
                     incident_truth_id=incident_truth_id,
                     namespace="silent_concept_drift",
                     index=index,
-                    customer_id=choice_rng.choice(customers),
-                    merchant_id=choice_rng.choice(merchants),
+                    customer_id=customer_id,
+                    merchant_id=choice_rng.choice(available_merchants),
                     channel=channel,
                     amount=choice_rng.randint(
                         config.transactions.minimum_amount.value,
@@ -818,23 +989,43 @@ def inject_legit_business_spike(
     *,
     episode_id: str,
     incident_truth_id: str,
+    seed: int | None = None,
+    transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> IncidentSummary:
-    """Record benign P1.4 household-business fan-in as a private incident truth."""
+    """Generate a P1.4 household-business spike, then record benign private truth."""
     _require_episode(operational, private, episode_id)
     _check_truth_id(incident_truth_id)
-    group = next(
-        (
-            item
-            for item in _p14_mechanism_groups(private, episode_id)
-            if item.get("mechanism") == "legit_business_spike"
-            and item.get("role") == "benign_control"
-        ),
-        None,
-    )
-    if group is None:
-        raise ValueError("legit_business_spike requires a P1.4 business-control group")
-    transaction_ids = _p14_group_transaction_ids(group)
+    if any(
+        item.get("mechanism") == "legit_business_spike"
+        for item in _p14_mechanism_groups(private, episode_id)
+    ):
+        raise ValueError("legit_business_spike chain has already been generated")
+    run_seed = _episode_seed(private, episode_id, config.seed.value) if seed is None else seed
+    world_summary = _load_base_world_summary(operational, private)
     with _paired_savepoints(operational, private):
+        generate_other_fraud_mechanisms(
+            operational,
+            private,
+            config,
+            world_summary,
+            seed=run_seed,
+            episode_id=episode_id,
+            duration_days=config.episode.duration_days.value,
+            mechanisms={"legit_business_spike"},
+            transaction_random_keys=transaction_random_keys,
+        )
+        group = next(
+            (
+                item
+                for item in _p14_mechanism_groups(private, episode_id)
+                if item.get("mechanism") == "legit_business_spike"
+                and item.get("role") == "benign_control"
+            ),
+            None,
+        )
+        if group is None:
+            raise ValueError("P1.4 writer did not generate a business-control group")
+        transaction_ids = _p14_group_transaction_ids(group)
         effect_available_at = _write_truth_for_transactions(
             operational,
             private,
@@ -843,7 +1034,7 @@ def inject_legit_business_spike(
             cause="legit_business_change",
             requires_intervention=False,
             mechanism="legit_business_spike",
-            rule_covered=True,
+            rule_covered=False,
             affected_features=["txn_count"],
             transaction_ids=transaction_ids,
             accepted_actions=[],
@@ -893,6 +1084,11 @@ def inject_sparse_new_merchant(
     )
     if not customers or not source_merchant_ids:
         raise ValueError("sparse new-merchant scenario requires available customers and merchants")
+    account_roles = _load_private_account_profiles(private).get("account_roles", {})
+    individual_customers = [
+        customer_id for customer_id in customers if account_roles.get(customer_id) == "individual"
+    ]
+    customer_candidates = individual_customers or customers
 
     existing_merchant_ids = {
         row[0] for row in operational.execute("SELECT merchant_id FROM merchants")
@@ -1000,7 +1196,7 @@ def inject_sparse_new_merchant(
                     incident_truth_id=incident_truth_id,
                     namespace="sparse_new_merchant",
                     index=index,
-                    customer_id=field_rng.choice(customers),
+                    customer_id=field_rng.choice(customer_candidates),
                     merchant_id=merchant_id,
                     channel=field_rng.choices(
                         channels, weights=channel_weight_values, k=1
@@ -1090,7 +1286,9 @@ def inject_fraud_surge_on_calendar_date(
     episode_id: str,
     incident_truth_id: str,
     business_date: date,
-    event_name: str = "Synthetic scheduled business date",
+    event_name: str = "Synthetic promotion event",
+    channel: str | None = None,
+    expected_relative_change: float = 5.0,
     seed: int | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> IncidentSummary:
@@ -1105,6 +1303,8 @@ def inject_fraud_surge_on_calendar_date(
         seed=seed,
         transaction_random_keys=transaction_random_keys,
         calendar_event_name=event_name,
+        calendar_channel=channel or config.transactions.channel.value,
+        calendar_expected_relative_change=expected_relative_change,
     )
 
 
@@ -1159,16 +1359,36 @@ def inject_two_cause_fraud_seasonal(
         ]
         seasonal_start = min(seasonal_event_times)
         seasonal_end = max(seasonal_event_times)
-        overlap_rng = keyed_rng(
-            config.seed.value if seed is None else seed,
-            "p1.6.fraud_seasonal.overlap_start",
-            episode_id,
-            parent_scenario,
+        overlap_seed = config.seed.value if seed is None else seed
+        local_start = datetime.combine(
+            business_date,
+            time(config.fraud.card_testing.start_hour_local.value),
+            tzinfo=ZoneInfo(config.timeline.business_timezone.value),
         )
-        overlap_seconds = int((seasonal_end - seasonal_start).total_seconds())
-        overlap_start_at = seasonal_start + timedelta(
-            seconds=overlap_rng.randint(0, max(0, overlap_seconds))
+        sampled_start, _, sampled_followup_delay = sample_card_testing_timing(
+            config,
+            seed=overlap_seed,
+            namespace="fraud_surge",
+            keys=(episode_id, fraud_truth_id),
+            base_start=local_start,
+            attempts_per_card=config.fraud.card_testing.attempts_per_card.value,
         )
+        fraud_end = sampled_start + timedelta(
+            minutes=config.fraud.card_testing.window_minutes.value,
+            seconds=sampled_followup_delay,
+        )
+        if sampled_start > seasonal_end or seasonal_start > fraud_end:
+            overlap_seconds = int((seasonal_end - seasonal_start).total_seconds())
+            fallback_rng = keyed_rng(
+                overlap_seed,
+                "p1.6.fraud_seasonal.overlap_fallback",
+                episode_id,
+                parent_scenario,
+            )
+            sampled_start = seasonal_start + timedelta(
+                seconds=fallback_rng.randint(0, max(0, overlap_seconds))
+            )
+        overlap_start_at = sampled_start
         fraud = inject_fraud_surge(
             operational,
             private,
@@ -1368,6 +1588,9 @@ def inject_seasonal(
         raise ValueError("seasonal event must fall within the configured timeline")
 
     run_seed = config.seed.value if seed is None else seed
+    account_profiles = _load_private_account_profiles(private)
+    account_roles = account_profiles.get("account_roles", {})
+    supplier_merchants = account_profiles.get("supplier_merchants", {})
     traffic_rng = keyed_rng(
         run_seed, "p1.incidents.seasonal.traffic", episode_id, incident_truth_id,
         business_date.isoformat(),
@@ -1408,6 +1631,7 @@ def inject_seasonal(
     ).fetchall()
     if not customers or not merchants:
         raise ValueError("seasonal event requires available episode or base customers and merchants")
+    merchant_ids = [row[0] for row in merchants]
 
     inserted_rows: list[sqlite3.Row] = []
     calendar_id_value = identity_rng.getrandbits(128)
@@ -1426,7 +1650,15 @@ def inject_seasonal(
             ).replace(tzinfo=ZoneInfo(config.timeline.business_timezone.value))
             created_at = local_time.astimezone(UTC)
             customer_id = traffic_rng.choice(customers)[0]
-            merchant_id = traffic_rng.choice(merchants)[0]
+            available_merchants = merchant_ids
+            if account_roles.get(customer_id) == "household_business":
+                suppliers = set(supplier_merchants.get(customer_id, []))
+                available_merchants = [item for item in merchant_ids if item in suppliers]
+                if not available_merchants:
+                    raise ValueError(
+                        f"seasonal household {customer_id} has no available supplier merchant"
+                    )
+            merchant_id = traffic_rng.choice(available_merchants)
             amount = traffic_rng.randint(
                 config.transactions.minimum_amount.value,
                 config.transactions.maximum_amount.value,
@@ -1496,6 +1728,17 @@ def inject_seasonal(
                     "available_at": settled_at,
                     "response_code": None,
                 },
+            )
+            _insert_background_adjustment(
+                operational,
+                config,
+                seed=run_seed,
+                episode_id=episode_id,
+                txn_id=txn_id,
+                random_key=legacy_random_key,
+                amount=amount,
+                approved=True,
+                settled_at=settled_at,
             )
             inserted_rows.append(
                 operational.execute(

@@ -233,6 +233,7 @@ def generate_episodes(
             base_world,
             seed=simulator_config.seed.value,
             episode_id="base",
+            mechanisms={"ato", "collusion", "household_business_activity"},
             transaction_random_keys=transaction_random_keys,
         )
         base_labels = generate_label_events(
@@ -293,6 +294,7 @@ def generate_episodes(
                 episode_id=episode_id,
                 duration_days=duration_days,
                 include_episode_mechanisms=assignment.template != "clean",
+                mechanisms={"ato"} if assignment.template != "clean" else set(),
                 transaction_random_keys=transaction_random_keys,
             )
             incident_summary = _inject_template(

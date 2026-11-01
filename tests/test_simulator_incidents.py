@@ -678,6 +678,27 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
         repeat.close()
 
 
+def test_parent_scenario_rejects_nonoverlapping_effect_windows() -> None:
+    truths = [
+        {
+            "incident_truth_id": "truth-seasonal-nonoverlap",
+            "cause": "seasonal",
+            "parent_scenario": "parent-nonoverlap",
+            "effect_start_at": "2026-02-06T00:49:11.000000Z",
+            "effect_end_at": "2026-02-06T06:07:12.000000Z",
+        },
+        {
+            "incident_truth_id": "truth-fraud-nonoverlap",
+            "cause": "fraud_surge",
+            "parent_scenario": "parent-nonoverlap",
+            "effect_start_at": "2026-02-06T16:40:01.000000Z",
+            "effect_end_at": "2026-02-06T16:51:02.000000Z",
+        },
+    ]
+    with pytest.raises(ValueError, match="effect windows must overlap"):
+        _validate_parent_scenarios({"ep-0003": truths})
+
+
 def test_single_fraud_surge_can_land_on_a_public_calendar_date(
     tmp_path: Path,
 ) -> None:
@@ -685,12 +706,18 @@ def test_single_fraud_surge_can_land_on_a_public_calendar_date(
     control = _make_episode_store(tmp_path / "calendar-fraud-control")
     treated = _make_episode_store(tmp_path / "calendar-fraud-treated")
     repeat = _make_episode_store(tmp_path / "calendar-fraud-repeat")
+    seasonal = _make_episode_store(tmp_path / "calendar-fraud-seasonal")
     try:
+        seasonal_template = load_episode_config(
+            ROOT / "configs" / "episodes.yaml"
+        ).templates.seasonal
         call_args = {
             "episode_id": "ep-incidents",
             "incident_truth_id": "truth-calendar-fraud",
             "business_date": date(2026, 2, 8),
-            "event_name": "synthetic-calendar-context",
+            "event_name": seasonal_template.event_name.value,
+            "channel": config.transactions.channel.value,
+            "expected_relative_change": seasonal_template.expected_relative_change.value,
             "seed": 902,
         }
         result = inject_fraud_surge_on_calendar_date(
@@ -701,21 +728,42 @@ def test_single_fraud_surge_can_land_on_a_public_calendar_date(
         )
         assert result == repeat_result
         assert _operational_content(treated) == _operational_content(repeat)
+        inject_seasonal(
+            seasonal.operational,
+            seasonal.private,
+            config,
+            episode_id="ep-incidents",
+            incident_truth_id="truth-seasonal-calendar-format",
+            business_date=call_args["business_date"],
+            event_name=seasonal_template.event_name.value,
+            additional_transaction_count=seasonal_template.additional_transaction_count.value,
+            expected_relative_change=seasonal_template.expected_relative_change.value,
+            seed=903,
+        )
         truth_rows = treated.private.execute(
             "SELECT cause, parent_scenario FROM incident_truth WHERE episode_id = 'ep-incidents'"
         ).fetchall()
         assert [tuple(row) for row in truth_rows] == [("fraud_surge", None)]
         calendar = treated.operational.execute(
-            "SELECT calendar_event_id, business_date, event_name, expected_effect_json "
+            "SELECT calendar_event_id, business_date, event_name, lag_days, expected_effect_json, scope_json "
             "FROM business_calendar "
             "WHERE episode_id = 'ep-incidents'"
         ).fetchone()
-        assert tuple(calendar) == (
-            result.calendar_event_id,
-            "2026-02-08",
-            "synthetic-calendar-context",
-            '{"txn_count":{"aggregation":"sum","relative_change":0.0}}',
-        )
+        seasonal_calendar = seasonal.operational.execute(
+            "SELECT business_date, event_name, lag_days, expected_effect_json, scope_json "
+            "FROM business_calendar WHERE episode_id = 'ep-incidents'"
+        ).fetchone()
+        assert calendar[0] == result.calendar_event_id
+        assert tuple(calendar[1:]) == tuple(seasonal_calendar)
+        assert json.loads(calendar[4]) == {
+            "txn_count": {
+                "aggregation": "sum",
+                "relative_change": seasonal_template.expected_relative_change.value,
+            }
+        }
+        assert json.loads(calendar[5]) == {
+            "channel": [config.transactions.channel.value]
+        }
         assert all(
             _timestamp(row[0]).second != 0
             for row in treated.operational.execute(
@@ -738,6 +786,7 @@ def test_single_fraud_surge_can_land_on_a_public_calendar_date(
         control.close()
         treated.close()
         repeat.close()
+        seasonal.close()
 
 
 def test_sparse_new_merchant_truth_is_independent_of_sample_size(tmp_path: Path) -> None:

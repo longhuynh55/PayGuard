@@ -181,9 +181,14 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert set(account_roles) <= base_customer_ids
-        assert pair.operational.execute(
-            "SELECT 1 FROM customers WHERE episode_id <> 'base' LIMIT 1"
-        ).fetchone()
+        # Smoke has no new_fraud template assignment until P1.7 extends the manifest;
+        # episode-local mule customers are checked on the injected new_fraud fixture below.
+        assert {
+            row[0]
+            for row in pair.operational.execute(
+                "SELECT DISTINCT episode_id FROM customers"
+            )
+        } == {"base"}
         account_transfers = [
             dict(row)
             for row in pair.operational.execute(
@@ -463,6 +468,26 @@ def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
             for table in list_operational_schema(treated.operational)
         }
         assert control_content == treated_before
+        for episode_id in ("base", "ep-0002", "ep-0004"):
+            metadata_key = (
+                "p1.4.mechanisms.v1"
+                if episode_id == "base"
+                else f"p1.4.mechanisms.v1:{episode_id}"
+            )
+            groups = json.loads(
+                treated.private.execute(
+                    "SELECT value_json FROM run_metadata WHERE key = ?", (metadata_key,)
+                ).fetchone()[0]
+            )["groups"]
+            assert not any(
+                group["mechanism"] in {"social_engineering", "legit_business_spike"}
+                for group in groups
+            )
+            if episode_id == "base":
+                assert any(
+                    group["mechanism"] == "household_business_activity"
+                    for group in groups
+                )
 
         social = inject_new_fraud(
             treated.operational,
@@ -471,6 +496,24 @@ def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
             episode_id="ep-0002",
             incident_truth_id="truth-p16-new-fraud",
         )
+        social_metadata = json.loads(
+            treated.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key='p1.4.mechanisms.v1:ep-0002'"
+            ).fetchone()[0]
+        )
+        social_group = next(
+            group for group in social_metadata["groups"]
+            if group["mechanism"] == "social_engineering"
+        )
+        mule_customer_id = social_group["mule_customer_id"]
+        assert treated.operational.execute(
+            "SELECT 1 FROM customers WHERE customer_id = ? AND episode_id = 'ep-0002'",
+            (mule_customer_id,),
+        ).fetchone()
+        assert treated.operational.execute(
+            "SELECT 1 FROM customers WHERE customer_id = ? AND episode_id = 'base'",
+            (mule_customer_id,),
+        ).fetchone() is None
         business = inject_legit_business_spike(
             treated.operational,
             treated.private,
@@ -483,7 +526,21 @@ def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
             table: [dict(row) for row in treated.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
             for table in list_operational_schema(treated.operational)
         }
-        assert treated_after == control_content
+        assert treated_after != control_content
+        for episode_id, incident in (("ep-0002", social), ("ep-0004", business)):
+            control_ids = {
+                row["txn_id"]
+                for row in control_content["transactions"]
+                if row["episode_id"] == episode_id
+            }
+            treated_ids = {
+                row["txn_id"]
+                for row in treated_after["transactions"]
+                if row["episode_id"] == episode_id
+            }
+            assert set(incident.affected_transaction_ids) <= treated_ids - control_ids
+        assert len(social.affected_transaction_ids) == 10
+        assert len(business.affected_transaction_ids) == 5
         social_truth = dict(
             treated.private.execute(
                 "SELECT * FROM incident_truth WHERE incident_truth_id = ?",
@@ -506,7 +563,7 @@ def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
         assert social_truth["effect_available_at"] == social.effect_available_at
         assert business_truth["cause"] == "legit_business_change"
         assert business_truth["requires_intervention"] == 0
-        assert business_truth["rule_covered"] == 1
+        assert business_truth["rule_covered"] == 0
         assert json.loads(business_truth["accepted_actions_json"]) == []
         assert business_truth["effect_available_at"] == business.effect_available_at
         assert social.affected_transaction_ids and business.affected_transaction_ids
