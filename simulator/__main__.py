@@ -19,7 +19,7 @@ from simulator.config import (
     validate_episode_duration_match,
 )
 from simulator.episodes import generate_episodes
-from simulator.reports import build_smoke_reports, resolved_support_config
+from simulator.reports import build_profile_reports, resolved_support_config
 from simulator.reproducibility import (
     RUN_FINGERPRINT_METADATA_KEY,
     canonical_run_fingerprint,
@@ -116,17 +116,19 @@ def _generate(args: argparse.Namespace) -> int:
                 },
             },
         )
-        if args.profile == "smoke":
-            public_report, private_report = build_smoke_reports(
-                stores.operational,
-                stores.private,
-                simulator_config,
-                episode_config,
-                model_config_path=args.model_config,
-                model_doc_path=args.model_doc,
-            )
-            _write_json(output / "reports" / "smoke.json", public_report)
-            _write_json(output / "private" / "reports" / "smoke_truth.json", private_report)
+        public_report, private_report = build_profile_reports(
+            stores.operational,
+            stores.private,
+            simulator_config,
+            episode_config,
+            profile=args.profile,
+            model_config_path=args.model_config,
+            model_doc_path=args.model_doc,
+        )
+        _write_json(output / "reports" / f"{args.profile}.json", public_report)
+        _write_json(
+            output / "private" / "reports" / f"{args.profile}_truth.json", private_report
+        )
 
         completed_at = datetime.now(UTC)
         runtime = {

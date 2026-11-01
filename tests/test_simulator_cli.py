@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,10 +18,12 @@ import pytest
 import yaml
 
 from simulator.validate import validate_run
-from simulator.config import load_simulator_config
+from simulator.config import load_episode_config, load_simulator_config
+from simulator.episodes import generate_episodes
 from simulator.incidents import inject_fraud_surge, inject_new_fraud
 from simulator.recipient_features import derive_recipient_signals
-from simulator.storage import utc_timestamp
+from simulator.reports import build_profile_reports
+from simulator.storage import create_export_stores, utc_timestamp
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1438,4 +1441,122 @@ def test_zero_report_probability_blocks_p2_handoff(tmp_path: Path) -> None:
     validation = _cli("validate", "--run", str(run_dir))
     assert validation.returncode != 0, validation.stdout + validation.stderr
     assert "FAIL p2_handoff_support" in validation.stdout
+
+
+# Digests of the smoke reports generated from main 78f2a6e; the pilot support report must not change them.
+SMOKE_SUPPORT_REPORT_SHA256 = {
+    "reports/smoke.json": "3d1703e1702f0d4f0b6e961b3f4df731685a02f32db3861cc60a598245a46df4",
+    "private/reports/smoke_truth.json": "113f15e9b63549fc98eec1361c51bd068b063982161dfe10bf5b99c9ef65c3c2",
+}
+_ROLE_TEMPLATE_ROW_KEYS = {
+    "role",
+    "template",
+    "episode_count",
+    "transaction_count",
+    "label_snapshot_state_counts",
+    "reported_label_count",
+    "truth_positive_count",
+    "truth_reported_count",
+    "incident_truth_counts_by_cause",
+}
+
+
+def _json_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {key for nested in value.values() for key in _json_keys(nested)}
+    if isinstance(value, list):
+        return {key for nested in value for key in _json_keys(nested)}
+    return set()
+
+
+def test_smoke_support_reports_keep_the_round_one_bytes(valid_smoke_run: Path) -> None:
+    for relative, expected in SMOKE_SUPPORT_REPORT_SHA256.items():
+        digest = hashlib.sha256((valid_smoke_run / relative).read_bytes()).hexdigest()
+        assert digest == expected, relative
+    private_report = json.loads(
+        (valid_smoke_run / "private" / "reports" / "smoke_truth.json").read_text(encoding="utf-8")
+    )
+    assert "role_template_support" not in private_report
+    assert set(private_report["p1_4_feature_diagnostics"]) == {
+        "base",
+        "ep-0001",
+        "ep-0002",
+        "ep-0003",
+        "ep-0004",
+        "ep-0005",
+    }
+    assert not (valid_smoke_run / "reports" / "pilot.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "damage"),
+    [
+        ("reports/smoke.json", "missing"),
+        ("private/reports/smoke_truth.json", "missing"),
+        ("reports/smoke.json", "corrupt"),
+    ],
+)
+def test_validate_rejects_missing_or_corrupt_support_report(
+    tmp_path: Path, valid_smoke_run: Path, relative_path: str, damage: str
+) -> None:
+    run_dir = tmp_path / f"{damage}-{relative_path.replace('/', '-')}"
+    shutil.copytree(valid_smoke_run, run_dir)
+    if damage == "missing":
+        (run_dir / relative_path).unlink()
+    else:
+        (run_dir / relative_path).write_text("{not json", encoding="utf-8")
+
+    validation = _cli("validate", "--run", str(run_dir))
+    assert validation.returncode != 0, validation.stdout + validation.stderr
+    assert "FAIL report_truth_boundary" in validation.stdout
+
+
+def test_pilot_support_report_limits_held_out_episodes_to_structural_counts(
+    tmp_path: Path,
+) -> None:
+    locked = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    by_id = {item.episode_id: item for item in locked.profile("pilot").assignments}
+    chosen = [by_id[episode_id] for episode_id in ("ep-0011", "ep-0031", "ep-0037", "ep-0049")]
+    subset_profile = locked.profile("pilot").model_copy(update={"assignments": chosen})
+    subset = locked.model_copy(update={"profiles": {**locked.profiles, "pilot": subset_profile}})
+    simulator_config = load_simulator_config(ROOT / "configs" / "simulator.yaml")
+    # Pilot scale is set to smoke scale so the four-episode sub-profile runs in test time.
+    small_world = simulator_config.model_copy(
+        update={
+            "profiles": {
+                **simulator_config.profiles,
+                "pilot": simulator_config.profiles["smoke"],
+            }
+        }
+    )
+    pair = create_export_stores(tmp_path / "pilot-subset")
+    try:
+        generate_episodes(pair.operational, pair.private, small_world, subset, profile="pilot")
+        pair.commit()
+        public_report, private_report = build_profile_reports(
+            pair.operational,
+            pair.private,
+            small_world,
+            subset,
+            profile="pilot",
+            model_config_path=ROOT / "configs" / "model.yaml",
+            model_doc_path=ROOT / "docs" / "model.md",
+        )
+    finally:
+        pair.close()
+
+    assert public_report["profile"] == "pilot"
+    assert private_report["profile"] == "pilot"
+    held_out = {item.episode_id for item in chosen if item.role != "development"}
+    assert held_out == {"ep-0031", "ep-0037", "ep-0049"}
+    diagnostics = private_report["p1_4_feature_diagnostics"]
+    assert set(diagnostics) == {"base", "ep-0011"}
+    assert not held_out & set(diagnostics)
+    assert diagnostics["ep-0011"]["transaction_count"] > 0
+    observed: Counter[tuple[str, str]] = Counter()
+    for row in private_report["role_template_support"]:
+        assert set(row) == _ROLE_TEMPLATE_ROW_KEYS
+        observed[(row["role"], row["template"])] += row["episode_count"]
+    assert observed == Counter((item.role, item.template) for item in chosen)
+    assert not {"template", "cause", "truth_positive_count"} & _json_keys(public_report)
 

@@ -15,7 +15,7 @@ from model.config import load_pipeline_config
 from model.data import InsufficientSplitSupportError, ModelConfig, build_splits, load_model_config
 from simulator.asof import read_as_of
 from simulator.config import EpisodeConfig, SimulatorConfig
-from simulator.labels import label_delay_report, label_truth_metadata_key
+from simulator.labels import label_delay_report, label_truth_metadata_key, snapshot_labels
 from simulator.storage import utc_timestamp
 
 
@@ -25,6 +25,8 @@ REFERENCE_ROW_RE = re.compile(
     re.MULTILINE,
 )
 WINDOWS = (("1h", timedelta(hours=1)), ("24h", timedelta(hours=24)), ("7d", timedelta(days=7)))
+REPORT_PROFILES = ("smoke", "pilot")
+LABEL_STATES = ("confirmed_fraud", "confirmed_legit", "matured_negative", "pending")
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -572,17 +574,116 @@ def _p14_feature_diagnostics(
     }
 
 
-def build_smoke_reports(
+def _diagnostic_episode_ids(profile: str, episode_rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Return the episodes that may carry point-in-time diagnostics for this profile.
+
+    Pilot calibration and test episodes are held out and keep structural counts only.
+    The smoke report keeps its round-one contract, so every smoke episode stays listed.
+    """
+    diagnostic_roles = (
+        {"development"} if profile == "pilot" else {"development", "calibration", "test"}
+    )
+    return ("base", *(row["episode_id"] for row in episode_rows if row["role"] in diagnostic_roles))
+
+
+def _own_episode_label_states(
+    operational: sqlite3.Connection,
+    simulator_config: SimulatorConfig,
+    *,
+    episode_id: str,
+    as_of_time: str,
+) -> dict[str, int]:
+    """Count only the episode's own transactions by label state; base history is excluded."""
+    counts = dict.fromkeys(LABEL_STATES, 0)
+    for snapshot in snapshot_labels(
+        operational,
+        simulator_config,
+        episode_id=episode_id,
+        as_of_time=as_of_time,
+    ):
+        if snapshot.episode_id == episode_id:
+            counts[snapshot.state] += 1
+    return counts
+
+
+def _role_template_support(
+    private: sqlite3.Connection,
+    episode_rows: list[dict[str, Any]],
+    *,
+    episode_distributions: dict[str, Any],
+    episode_label_states: dict[str, dict[str, int]],
+    episode_truth_counts: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Count episodes by evaluation role and locked template; structural counts only."""
+    templates = {
+        row[0]: row[1]
+        for row in private.execute("SELECT episode_id, template FROM episode_manifest")
+    }
+    causes_by_episode: dict[str, Counter[str]] = {}
+    for row in private.execute(
+        "SELECT episode_id, cause, COUNT(*) FROM incident_truth GROUP BY episode_id, cause"
+    ):
+        causes_by_episode.setdefault(row[0], Counter())[row[1]] = row[2]
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for episode in episode_rows:
+        episode_id = episode["episode_id"]
+        if episode_id not in templates:
+            raise ValueError(f"private manifest is missing the template for {episode_id!r}")
+        group = groups.setdefault(
+            (episode["role"], templates[episode_id]),
+            {
+                "episode_count": 0,
+                "transaction_count": 0,
+                "label_snapshot_state_counts": dict.fromkeys(LABEL_STATES, 0),
+                "truth_positive_count": 0,
+                "truth_reported_count": 0,
+                "incident_truth_counts_by_cause": Counter(),
+            },
+        )
+        group["episode_count"] += 1
+        group["transaction_count"] += episode_distributions[episode_id]["transaction_count"]
+        for state, count in episode_label_states.get(episode_id, {}).items():
+            group["label_snapshot_state_counts"][state] += count
+        truth = episode_truth_counts.get(episode_id)
+        if truth is not None:
+            group["truth_positive_count"] += truth["truth_positive_count"]
+            group["truth_reported_count"] += truth["reported_count"]
+        group["incident_truth_counts_by_cause"].update(causes_by_episode.get(episode_id, {}))
+    rows: list[dict[str, Any]] = []
+    for (role, template), group in sorted(groups.items()):
+        states = group["label_snapshot_state_counts"]
+        rows.append(
+            {
+                "role": role,
+                "template": template,
+                "episode_count": group["episode_count"],
+                "transaction_count": group["transaction_count"],
+                "label_snapshot_state_counts": states,
+                "reported_label_count": states["confirmed_fraud"] + states["confirmed_legit"],
+                "truth_positive_count": group["truth_positive_count"],
+                "truth_reported_count": group["truth_reported_count"],
+                "incident_truth_counts_by_cause": dict(
+                    sorted(group["incident_truth_counts_by_cause"].items())
+                ),
+            }
+        )
+    return rows
+
+
+def build_profile_reports(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
     simulator_config: SimulatorConfig,
     episode_config: EpisodeConfig,
     *,
+    profile: str,
     model_config: ModelConfig | None = None,
     model_config_path: str | Path = "configs/model.yaml",
     model_doc_path: str | Path = "docs/model.md",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return a public operational report and a separate private truth report."""
+    """Return the public operational and private truth reports for one locked profile."""
+    if profile not in REPORT_PROFILES:
+        raise ValueError(f"report profile must be one of {REPORT_PROFILES}, got {profile!r}")
     resolved_model = model_config or load_model_config(model_config_path)
     timezone_name = resolved_model.business_timezone
     t0 = _t0_timestamp(simulator_config, timezone_name)
@@ -594,7 +695,7 @@ def build_smoke_reports(
         )
     ]
     if not episode_rows:
-        raise ValueError("smoke reporting requires at least one registered episode")
+        raise ValueError(f"{profile} reporting requires at least one registered episode")
     report_episode = episode_rows[0]["episode_id"]
     support_config = resolved_support_config(
         resolved_model, model_config_path, model_doc_path
@@ -669,6 +770,7 @@ def build_smoke_reports(
     episode_completeness: dict[str, Any] = {}
     monitoring_episode_support: list[dict[str, Any]] = []
     episode_truth_counts: dict[str, Any] = {}
+    episode_label_states: dict[str, dict[str, int]] = {}
     duration_days = episode_config.protocol.duration_days.value
     monitoring_end = t0 + timedelta(days=duration_days)
     for episode in episode_rows:
@@ -750,6 +852,13 @@ def build_smoke_reports(
                 end=simulator_config.timeline.t0_business_date.value + timedelta(days=duration_days),
                 timezone_name=timezone_name,
             )
+            if profile == "pilot":
+                episode_label_states[episode_id] = _own_episode_label_states(
+                    operational,
+                    simulator_config,
+                    episode_id=episode_id,
+                    as_of_time=utc_timestamp(label_as_of),
+                )
 
     public_cohorts = {
         **support["cohorts"],
@@ -777,7 +886,7 @@ def build_smoke_reports(
     }
     public_report = {
         "report_version": 1,
-        "profile": "smoke",
+        "profile": profile,
         "business_timezone": timezone_name,
         "as_of_time": t0_text,
         "label_policy_version": label_policy_time["label_policy_version"],
@@ -836,11 +945,11 @@ def build_smoke_reports(
         episode_id: _p14_feature_diagnostics(
             operational, private, episode_id=episode_id, config=simulator_config
         )
-        for episode_id in ("base", *(row["episode_id"] for row in episode_rows))
+        for episode_id in _diagnostic_episode_ids(profile, episode_rows)
     }
     private_report = {
         "report_version": 1,
-        "profile": "smoke",
+        "profile": profile,
         "truth_bearing": True,
         "truth_label_support": {
             "basis": "private_simulator_truth",
@@ -851,5 +960,13 @@ def build_smoke_reports(
         "incident_truth_counts_by_cause": incident_counts,
         "p1_4_feature_diagnostics": p14_diagnostics,
     }
+    if profile == "pilot":
+        private_report["role_template_support"] = _role_template_support(
+            private,
+            episode_rows,
+            episode_distributions=episode_distributions,
+            episode_label_states=episode_label_states,
+            episode_truth_counts=episode_truth_counts,
+        )
     return public_report, private_report
 
