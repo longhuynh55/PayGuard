@@ -47,6 +47,58 @@ def _campaign_dates(start_date: date, t0_date: date, interval_days: int) -> list
     return dates
 
 
+def _jittered_local_time(
+    config: SimulatorConfig,
+    seed: int,
+    namespace: str,
+    *keys: object,
+    base: datetime,
+) -> datetime:
+    """Add a namespaced minute/second offset within the scheduled hour."""
+    jitter = config.fraud.timing_jitter
+    rng = keyed_rng(seed, f"p1.fraud.timing.{namespace}", *keys)
+    return base + timedelta(
+        minutes=rng.randint(0, jitter.maximum_minute_offset.value),
+        seconds=rng.randint(1, jitter.maximum_second_offset.value),
+    )
+
+
+def _jittered_local_time_before(
+    config: SimulatorConfig,
+    seed: int,
+    namespace: str,
+    *keys: object,
+    base: datetime,
+) -> datetime:
+    """Add a namespaced minute/second offset before a scheduled local time."""
+    jitter = config.fraud.timing_jitter
+    rng = keyed_rng(seed, f"p1.fraud.timing.{namespace}", *keys)
+    return base - timedelta(
+        minutes=rng.randint(0, jitter.maximum_minute_offset.value),
+        seconds=rng.randint(1, jitter.maximum_second_offset.value),
+    )
+
+
+def _jittered_cashout_time(
+    config: SimulatorConfig,
+    seed: int,
+    namespace: str,
+    *keys: object,
+    incoming_at: datetime,
+    delay_minutes: int,
+) -> datetime:
+    """Vary a configured cash-out delay without preceding settlement."""
+    max_jitter = config.fraud.timing_jitter.cashout_delay_jitter_minutes.value * 60
+    rng = keyed_rng(seed, f"p1.fraud.timing.{namespace}.cashout", *keys)
+    jitter_seconds = rng.randint(-max_jitter, max_jitter)
+    if jitter_seconds == 0:
+        jitter_seconds = 1
+    outgoing_at = incoming_at + timedelta(minutes=delay_minutes, seconds=jitter_seconds)
+    if outgoing_at.second == 0:
+        outgoing_at += timedelta(seconds=1)
+    return outgoing_at
+
+
 def _fraud_transaction_id(
     seed: int,
     namespace: str,
@@ -111,6 +163,7 @@ def _insert_transaction(
         },
     )
 
+
     authorized_at = created_at + authorization_delay
     authorization_type = "authorized" if approved else "declined"
     authorization_event_id = f"{txn_id}:{authorization_type}"
@@ -152,6 +205,54 @@ def _insert_transaction(
         },
     )
     return 2
+
+
+def sample_card_testing_timing(
+    config: SimulatorConfig,
+    *,
+    seed: int,
+    namespace: str,
+    keys: tuple[object, ...],
+    base_start: datetime,
+    attempts_per_card: int,
+) -> tuple[datetime, tuple[int, ...], int]:
+    """Draw start, inter-attempt spacing, and follow-up from the shared card timing law."""
+    jitter = config.fraud.timing_jitter
+    mechanism = config.fraud.card_testing
+    if not namespace.strip() or not keys:
+        raise ValueError("card-testing timing requires a namespace and stable keys")
+    if attempts_per_card < 2:
+        raise ValueError("card-testing timing requires at least two attempts")
+    start_rng = keyed_rng(seed, f"p1.fraud.timing.card_testing.{namespace}.start", *keys)
+    start_at = base_start + timedelta(
+        hours=start_rng.randint(
+            -jitter.card_testing_start_hour_jitter.value,
+            jitter.card_testing_start_hour_jitter.value,
+        ),
+        minutes=start_rng.randint(0, jitter.maximum_minute_offset.value),
+        seconds=start_rng.randint(1, jitter.maximum_second_offset.value),
+    )
+    base_spacing = mechanism.window_minutes.value * 60 // mechanism.attempts_per_card.value
+    spacings = tuple(
+        base_spacing
+        + keyed_rng(
+            seed,
+            f"p1.fraud.timing.card_testing.{namespace}.spacing",
+            *keys,
+            index,
+        ).randint(
+            -jitter.card_testing_spacing_jitter_seconds.value,
+            jitter.card_testing_spacing_jitter_seconds.value,
+        )
+        for index in range(attempts_per_card - 1)
+    )
+    followup_delay = mechanism.followup_delay_seconds.value + keyed_rng(
+        seed, f"p1.fraud.timing.card_testing.{namespace}.followup", *keys
+    ).randint(
+        -jitter.card_testing_followup_jitter_seconds.value,
+        jitter.card_testing_followup_jitter_seconds.value,
+    )
+    return start_at, spacings, followup_delay
 
 
 def card_testing_metadata_key(episode_id: str) -> str:
@@ -275,10 +376,8 @@ def generate_card_testing(
         run_seed, "p1.fraud.benign_control.merchant", *scope
     ).choice(merchant_ids)
     window = timedelta(minutes=mechanism.window_minutes.value)
-    followup_delay = timedelta(seconds=mechanism.followup_delay_seconds.value)
     authorization_delay = timedelta(seconds=config.transactions.authorization_delay_seconds.value)
     settlement_delay = timedelta(minutes=config.transactions.settlement_delay_minutes.value)
-    spacing_seconds = (mechanism.window_minutes.value * 60) // mechanism.attempts_per_card.value
     authorization_response_code = config.transactions.authorization_response_code.value
 
     group_metadata: list[dict[str, object]] = []
@@ -326,24 +425,33 @@ def generate_card_testing(
                     if role == "fraud"
                     else "p1.fraud.benign_control"
                 )
-                group_start = datetime.combine(
+                scheduled_start = datetime.combine(
                     group_date,
                     time(mechanism.start_hour_local.value, 0),
                     tzinfo=business_timezone,
                 )
                 if role == "benign_control":
-                    group_start += timedelta(
+                    scheduled_start += timedelta(
                         minutes=mechanism.benign_control_delay_minutes.value
                     )
+                group_start, spacing_intervals, followup_delay_seconds = sample_card_testing_timing(
+                    config,
+                    seed=run_seed,
+                    namespace=role,
+                    keys=(*scope, pattern_index),
+                    base_start=scheduled_start,
+                    attempts_per_card=mechanism.attempts_per_card.value,
+                )
+                attempt_offsets = [0]
+                for spacing in spacing_intervals:
+                    attempt_offsets.append(attempt_offsets[-1] + spacing)
                 small_ids: list[str] = []
                 group_approved_small = 0
                 group_declined_small = 0
                 group_event_count = 0
 
                 for attempt_index in range(mechanism.attempts_per_card.value):
-                    created_at = group_start + timedelta(
-                        seconds=attempt_index * spacing_seconds
-                    )
+                    created_at = group_start + timedelta(seconds=attempt_offsets[attempt_index])
                     amount_rng = keyed_rng(
                         run_seed,
                         f"{component}.amount",
@@ -439,9 +547,12 @@ def generate_card_testing(
                     "lifecycle_event_count": group_event_count,
                     "start_at": group_start.isoformat(),
                 }
+                metadata["attempt_spacing_seconds"] = list(spacing_intervals)
 
                 if role == "fraud":
-                    followup_created_at = group_start + window + followup_delay
+                    followup_created_at = group_start + window + timedelta(
+                        seconds=followup_delay_seconds
+                    )
                     followup_amount_rng = keyed_rng(
                         run_seed,
                         "p1.fraud.card_testing.amount",
@@ -519,7 +630,7 @@ def generate_card_testing(
                     )
                 else:
                     metadata["end_at"] = (
-                        group_start + timedelta(seconds=(mechanism.attempts_per_card.value - 1) * spacing_seconds)
+                        group_start + timedelta(seconds=attempt_offsets[-1])
                     ).isoformat()
 
                 metadata["lifecycle_event_count"] = group_event_count
@@ -579,9 +690,10 @@ def generate_other_fraud_mechanisms(
     episode_id: str,
     duration_days: int = 30,
     include_episode_mechanisms: bool = True,
+    mechanisms: set[str] | frozenset[str] | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> dict[str, int]:
-    """Generate ATO, pre-drift collusion, social-engineering, and benign controls.
+    """Generate selected P1.4 mechanisms, preserving private group metadata.
 
     Operational rows contain only transaction/customer attributes. Mechanism,
     role, group membership, and truth IDs stay in private run metadata.
@@ -596,6 +708,24 @@ def generate_other_fraud_mechanisms(
         raise ValueError("duration_days must be a positive integer")
     if not isinstance(include_episode_mechanisms, bool):
         raise ValueError("include_episode_mechanisms must be a boolean")
+    if mechanisms is None:
+        mechanisms = (
+            {"ato", "collusion", "household_business_activity"}
+            if episode_id == "base"
+            else {"ato"}
+        )
+    if not isinstance(mechanisms, (set, frozenset)) or not mechanisms <= {
+        "ato",
+        "collusion",
+        "social_engineering",
+        "legit_business_spike",
+        "household_business_activity",
+    }:
+        raise ValueError("mechanisms contains an unsupported P1.4 mechanism")
+    if episode_id == "base" and mechanisms & {"social_engineering", "legit_business_spike"}:
+        raise ValueError("social-engineering and business-spike chains must be injected into template episodes")
+    if episode_id != "base" and mechanisms & {"collusion", "household_business_activity"}:
+        raise ValueError("collusion and ordinary household-business activity belong to base history")
     if episode_id == "base":
         registered = operational.execute(
             "SELECT 1 FROM episodes WHERE episode_id = 'base' AND role = 'base'"
@@ -611,10 +741,22 @@ def generate_other_fraud_mechanisms(
     if registered is None:
         raise ValueError("fraud generation requires a registered episode")
     metadata_key = mechanism_metadata_key(episode_id)
-    if private.execute(
-        "SELECT 1 FROM run_metadata WHERE key = ?", (metadata_key,)
-    ).fetchone():
-        raise ValueError("P1.4 mechanism generation has already been recorded in this private export")
+    prior_metadata_row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?", (metadata_key,)
+    ).fetchone()
+    prior_metadata: dict[str, object] | None = None
+    if prior_metadata_row is not None:
+        try:
+            prior_metadata = json.loads(prior_metadata_row[0])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"P1.4 mechanism metadata is invalid for {episode_id}") from exc
+        if (
+            not isinstance(prior_metadata, dict)
+            or prior_metadata.get("episode_id") != episode_id
+            or not isinstance(prior_metadata.get("groups"), list)
+            or not isinstance(prior_metadata.get("summary"), dict)
+        ):
+            raise ValueError(f"P1.4 mechanism metadata is malformed for {episode_id}")
 
     if episode_id == "base":
         start_date = config.timeline.start_business_date.value
@@ -726,14 +868,30 @@ def generate_other_fraud_mechanisms(
         return txn_id, event_count
 
     def add_new_mule(
-        day: date, group_index: int, hour: int, *, warmup_days: int
+        day: date,
+        group_index: int,
+        first_receipt_at: datetime,
+        *,
+        warmup_days: int,
     ) -> str:
         customer_id = new_customer_id("recipient", day, group_index)
         if operational.execute(
             "SELECT 1 FROM customers WHERE customer_id = ?", (customer_id,)
         ).fetchone():
             raise ValueError("P1.4 generated customer ID collision")
-        account_start = local_start(day, hour) - timedelta(days=warmup_days, minutes=1)
+        jitter = config.fraud.timing_jitter
+        creation_rng = keyed_rng(
+            seed,
+            "p1.fraud.timing.social_engineering.mule_creation",
+            *scope,
+            day.isoformat(),
+            group_index,
+        )
+        account_start = first_receipt_at - timedelta(
+            days=warmup_days,
+            minutes=creation_rng.randint(1, jitter.mule_creation_jitter_minutes.value),
+            seconds=creation_rng.randint(1, jitter.maximum_second_offset.value),
+        )
         profile_rng = keyed_rng(
             seed, "p1.fraud.social_engineering.new_account_profile", *scope, group_index
         )
@@ -758,7 +916,7 @@ def generate_other_fraud_mechanisms(
         # ATO carries a probabilistic new-device signature. Independently
         # sampled legitimate device changes already occur in normal traffic.
         ato = config.fraud.ato
-        if individuals and (episode_id == "base" or include_episode_mechanisms):
+        if "ato" in mechanisms and individuals and (episode_id == "base" or include_episode_mechanisms):
             ato_start = start_date + timedelta(days=ato.start_offset_days.value)
             ato_span = timedelta(
                 days=(ato.transaction_count.value - 1) * ato.transaction_spacing_days.value
@@ -792,8 +950,18 @@ def generate_other_fraud_mechanisms(
                 amounts: list[int] = []
                 group_events = 0
                 for index in range(ato.transaction_count.value):
-                    created_at = local_start(campaign_date, ato.start_hour_local.value) + timedelta(
+                    scheduled_at = local_start(campaign_date, ato.start_hour_local.value) + timedelta(
                         days=index * ato.transaction_spacing_days.value
+                    )
+                    created_at = _jittered_local_time(
+                        config,
+                        seed,
+                        "ato.transaction_time",
+                        *scope,
+                        campaign_date.isoformat(),
+                        group_index,
+                        index,
+                        base=scheduled_at,
                     )
                     amount = keyed_rng(
                         seed, "p1.fraud.ato.amount", *scope, campaign_date.isoformat(), index
@@ -824,7 +992,7 @@ def generate_other_fraud_mechanisms(
 
         # Collusion is generated only in the pre-drift portion of shared history.
         collusion = config.fraud.collusion
-        if episode_id == "base" and individuals and mules:
+        if "collusion" in mechanisms and episode_id == "base" and individuals and mules:
             pre_drift_end = min(end_date, config.timeline.drift_start_business_date.value)
             for group_index, campaign_date in enumerate(
                 _campaign_dates(start_date, pre_drift_end, collusion.campaign_interval_days.value)
@@ -840,7 +1008,15 @@ def generate_other_fraud_mechanisms(
                 cashout_id = keyed_rng(
                     seed, "p1.fraud.collusion.cashout", campaign_date.isoformat()
                 ).choice(cashout_candidates or participants)
-                starts = local_start(campaign_date, collusion.start_hour_local.value)
+                starts = _jittered_local_time(
+                    config,
+                    seed,
+                    "collusion.start_time",
+                    *scope,
+                    campaign_date.isoformat(),
+                    group_index,
+                    base=local_start(campaign_date, collusion.start_hour_local.value),
+                )
                 inbound_ids: list[str] = []
                 outbound_ids: list[str] = []
                 amounts: list[int] = []
@@ -865,9 +1041,19 @@ def generate_other_fraud_mechanisms(
                     inbound_ids.append(txn_id)
                     group_events += event_count
                 for index, amount in enumerate(amounts):
-                    outgoing_at = starts + timedelta(
+                    incoming_at = starts + timedelta(
                         minutes=index * collusion.transfer_spacing_minutes.value
-                        + collusion.cashout_delay_minutes.value
+                    )
+                    outgoing_at = _jittered_cashout_time(
+                        config,
+                        seed,
+                        "collusion",
+                        *scope,
+                        campaign_date.isoformat(),
+                        group_index,
+                        index,
+                        incoming_at=incoming_at,
+                        delay_minutes=collusion.cashout_delay_minutes.value,
                     )
                     device_id = device_id_for_transaction(
                         identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
@@ -896,23 +1082,57 @@ def generate_other_fraud_mechanisms(
                 summary["collusion_transaction_count"] += len(inbound_ids) + len(outbound_ids)
                 summary["lifecycle_event_count"] += group_events
 
-        # Social engineering sends funds to a newly available mule account. A
-        # household business receives the same sender count as a benign control.
+        # P1.6 selects the unknown-fraud or business-spike component through this
+        # P1.4 writer. Base history keeps only ordinary household fan-in.
         social = config.fraud.social_engineering
-        if (episode_id == "base" or include_episode_mechanisms) and len(individuals) >= 2 and households:
+        social_enabled = "social_engineering" in mechanisms
+        business_mechanism = next(
+            (
+                item
+                for item in ("legit_business_spike", "household_business_activity")
+                if item in mechanisms
+            ),
+            None,
+        )
+        if (
+            (social_enabled or business_mechanism is not None)
+            and (episode_id == "base" or include_episode_mechanisms)
+            and len(individuals) >= 2
+            and households
+        ):
             fan_in = min(social.fan_in_count.value, len(individuals))
             campaign_span = timedelta(days=(fan_in - 1) * social.incoming_spacing_days.value)
             social_start = start_date + timedelta(days=social.start_offset_days.value)
-            for group_index, campaign_date in enumerate(
-                campaign_date
-                for campaign_date in _campaign_dates(
+            if business_mechanism == "household_business_activity" and episode_id == "base":
+                background_business_dates = [
+                    end_date - timedelta(
+                        days=(fan_in - 1) * social.incoming_spacing_days.value + 1
+                    )
+                ]
+            else:
+                background_business_dates = _campaign_dates(
                     social_start, end_date, social.campaign_interval_days.value
                 )
+            for group_index, campaign_date in enumerate(
+                campaign_date
+                for campaign_date in background_business_dates
                 if campaign_date + campaign_span < end_date
             ):
                 if fan_in < 2:
                     continue
-                starts = local_start(campaign_date, social.start_hour_local.value)
+                starts = _jittered_local_time(
+                    config,
+                    seed,
+                    (
+                        "social_engineering.start_time"
+                        if social_enabled
+                        else f"{business_mechanism}.start_time"
+                    ),
+                    *scope,
+                    campaign_date.isoformat(),
+                    group_index,
+                    base=local_start(campaign_date, social.start_hour_local.value),
+                )
                 control_at = starts + campaign_span + timedelta(hours=2)
                 control_at_text = control_at.astimezone(ZoneInfo("UTC")).isoformat(timespec="microseconds").replace("+00:00", "Z")
                 prior_start_text = (control_at - timedelta(days=7)).astimezone(ZoneInfo("UTC")).isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -930,6 +1150,8 @@ def generate_other_fraud_mechanisms(
                              (household_id_candidate, control_at_text, prior_start_text, control_at_text)),
                         )
                     }
+                    if business_mechanism == "household_business_activity" and prior_senders:
+                        continue
                     eligible = tuple(item for item in individuals if item not in prior_senders)
                     available_older = tuple(item for item in older_individuals if item in eligible)
                     if (
@@ -951,94 +1173,133 @@ def generate_other_fraud_mechanisms(
                 selected_older = sender_rng.sample(
                     tuple(item for item in older_individuals if item in eligible), older_count
                 )
-                remaining_senders = tuple(item for item in eligible if item not in selected_older)
+                remaining_senders = tuple(
+                    item
+                    for item in eligible
+                    if item not in selected_older and item not in older_individuals
+                )
+                if len(remaining_senders) < fan_in - older_count:
+                    raise ValueError("P1.4 requires enough non-older senders for a matched fan-in group")
                 selected_others = sender_rng.sample(remaining_senders, fan_in - older_count)
                 senders = [*selected_older, *selected_others]
-                mule_id = add_new_mule(
-                    campaign_date,
-                    group_index,
-                    social.start_hour_local.value,
-                    warmup_days=social.new_account_warmup_days.value,
-                )
-                cashout_candidates = tuple(item for item in individuals if item not in senders)
-                cashout_id = keyed_rng(
-                    seed, "p1.fraud.social_engineering.cashout", *scope, campaign_date.isoformat()
-                ).choice(cashout_candidates or senders)
+                mule_id = None
+                cashout_id = None
+                if social_enabled:
+                    mule_id = add_new_mule(
+                        campaign_date,
+                        group_index,
+                        starts,
+                        warmup_days=social.new_account_warmup_days.value,
+                    )
+                    cashout_candidates = tuple(item for item in individuals if item not in senders)
+                    cashout_id = keyed_rng(
+                        seed, "p1.fraud.social_engineering.cashout", *scope, campaign_date.isoformat()
+                    ).choice(cashout_candidates or senders)
                 incoming_ids: list[str] = []
                 outgoing_ids: list[str] = []
                 business_ids: list[str] = []
                 business_amounts: list[int] = []
+                business_times: list[datetime] = []
                 amounts: list[int] = []
                 fraud_events = 0
                 business_events = 0
                 for index, sender_id in enumerate(senders):
-                    amount = keyed_rng(
-                        seed, "p1.fraud.social_engineering.amount", *scope,
-                        campaign_date.isoformat(), index,
-                    ).randint(amount_min, amount_max)
-                    amounts.append(amount)
                     incoming_at = starts + timedelta(days=index * social.incoming_spacing_days.value)
-                    sender_device = device_id_for_transaction(
-                        identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=sender_id, transaction_key=f"social-in-{campaign_date}-{index}",
-                        change_probability=0.0, force_new=False,
-                    )
-                    txn_id, event_count = write_transaction(
-                        namespace="social_engineering", group_index=group_index,
-                        transaction_index=index, sender_id=sender_id, recipient_id=mule_id,
-                        merchant_id=None, channel="wallet", amount=amount,
-                        created_at=incoming_at, device_id=sender_device,
-                    )
-                    incoming_ids.append(txn_id)
-                    fraud_events += event_count
+                    if social_enabled:
+                        amount = keyed_rng(
+                            seed, "p1.fraud.social_engineering.amount", *scope,
+                            campaign_date.isoformat(), index,
+                        ).randint(amount_min, amount_max)
+                        amounts.append(amount)
+                        sender_device = device_id_for_transaction(
+                            identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
+                            customer_id=sender_id, transaction_key=f"social-in-{campaign_date}-{index}",
+                            change_probability=0.0, force_new=False,
+                        )
+                        txn_id, event_count = write_transaction(
+                            namespace="social_engineering", group_index=group_index,
+                            transaction_index=index, sender_id=sender_id, recipient_id=mule_id,
+                            merchant_id=None, channel="wallet", amount=amount,
+                            created_at=incoming_at, device_id=sender_device,
+                        )
+                        incoming_ids.append(txn_id)
+                        fraud_events += event_count
 
-                    control_amount = keyed_rng(
-                        seed, "p1.fraud.legit_business_spike.amount", *scope,
-                        campaign_date.isoformat(), index,
-                    ).randint(
-                        social.business_control_minimum_amount.value,
-                        social.business_control_maximum_amount.value,
-                    )
-                    business_amounts.append(control_amount)
-                    control_at = incoming_at + timedelta(hours=2)
-                    control_device = device_id_for_transaction(
-                        identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=sender_id, transaction_key=f"business-in-{campaign_date}-{index}",
-                        change_probability=0.0, force_new=False,
-                    )
-                    control_id, event_count = write_transaction(
-                        namespace="legit_business_spike", group_index=group_index,
-                        transaction_index=index, sender_id=sender_id,
-                        recipient_id=household_id, merchant_id=None, channel="wallet",
-                        amount=control_amount, created_at=control_at, device_id=control_device,
-                    )
-                    business_ids.append(control_id)
-                    business_events += event_count
+                    if business_mechanism is not None:
+                        control_amount = keyed_rng(
+                            seed, f"p1.fraud.{business_mechanism}.amount", *scope,
+                            campaign_date.isoformat(), index,
+                        ).randint(
+                            social.business_control_minimum_amount.value,
+                            social.business_control_maximum_amount.value,
+                        )
+                        business_amounts.append(control_amount)
+                        control_scheduled_at = local_start(
+                            campaign_date, social.start_hour_local.value
+                        ) + timedelta(
+                            days=index * social.incoming_spacing_days.value,
+                            hours=2,
+                        )
+                        control_at = _jittered_local_time_before(
+                            config,
+                            seed,
+                            f"{business_mechanism}.transaction_time",
+                            *scope,
+                            campaign_date.isoformat(),
+                            group_index,
+                            index,
+                            base=control_scheduled_at,
+                        )
+                        control_device = device_id_for_transaction(
+                            identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
+                            customer_id=sender_id, transaction_key=f"business-in-{campaign_date}-{index}",
+                            change_probability=0.0, force_new=False,
+                        )
+                        control_id, event_count = write_transaction(
+                            namespace=business_mechanism, group_index=group_index,
+                            transaction_index=index, sender_id=sender_id,
+                            recipient_id=household_id, merchant_id=None, channel="wallet",
+                            amount=control_amount, created_at=control_at, device_id=control_device,
+                        )
+                        business_ids.append(control_id)
+                        business_times.append(control_at)
+                        business_events += event_count
 
-                for index, amount in enumerate(amounts):
-                    outgoing_at = starts + timedelta(
-                        days=index * social.incoming_spacing_days.value,
-                        minutes=social.cashout_delay_minutes.value,
-                    )
-                    mule_device = device_id_for_transaction(
-                        identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
-                        customer_id=mule_id, transaction_key=f"social-out-{campaign_date}-{index}",
-                        change_probability=0.0, force_new=False,
-                    )
-                    txn_id, event_count = write_transaction(
-                        namespace="social_engineering", group_index=group_index,
-                        transaction_index=fan_in + index, sender_id=mule_id,
-                        recipient_id=cashout_id, merchant_id=None, channel="wallet",
-                        amount=amount, created_at=outgoing_at, device_id=mule_device,
-                    )
-                    outgoing_ids.append(txn_id)
-                    fraud_events += event_count
+                if social_enabled:
+                    for index, amount in enumerate(amounts):
+                        incoming_at = starts + timedelta(
+                            days=index * social.incoming_spacing_days.value
+                        )
+                        outgoing_at = _jittered_cashout_time(
+                            config,
+                            seed,
+                            "social_engineering",
+                            *scope,
+                            campaign_date.isoformat(),
+                            group_index,
+                            index,
+                            incoming_at=incoming_at,
+                            delay_minutes=social.cashout_delay_minutes.value,
+                        )
+                        mule_device = device_id_for_transaction(
+                            identity_seed=identity_seed, draw_seed=seed, episode_id=episode_id,
+                            customer_id=mule_id, transaction_key=f"social-out-{campaign_date}-{index}",
+                            change_probability=0.0, force_new=False,
+                        )
+                        txn_id, event_count = write_transaction(
+                            namespace="social_engineering", group_index=group_index,
+                            transaction_index=fan_in + index, sender_id=mule_id,
+                            recipient_id=cashout_id, merchant_id=None, channel="wallet",
+                            amount=amount, created_at=outgoing_at, device_id=mule_device,
+                        )
+                        outgoing_ids.append(txn_id)
+                        fraud_events += event_count
 
-                group_id = f"p14-social-engineering-{group_index:04d}"
-                groups.extend((
-                    {
+                if social_enabled:
+                    groups.append({
                         "mechanism": "social_engineering", "role": "fraud",
-                        "group_id": group_id, "victim_customer_ids": list(senders),
+                        "group_id": f"p14-social-engineering-{group_index:04d}",
+                        "victim_customer_ids": list(senders),
                         "mule_customer_id": mule_id, "mule_role": "internal_mule",
                         "cashout_customer_id": cashout_id,
                         "incoming_transaction_ids": incoming_ids,
@@ -1047,35 +1308,47 @@ def generate_other_fraud_mechanisms(
                         "end_at": (
                             starts + campaign_span + timedelta(minutes=social.cashout_delay_minutes.value)
                         ).isoformat(),
-                    },
-                    {
-                        "mechanism": "legit_business_spike", "role": "benign_control",
-                        "group_id": group_id, "sender_customer_ids": list(senders),
+                    })
+                    summary["social_engineering_transaction_count"] += len(incoming_ids) + len(outgoing_ids)
+                    summary["lifecycle_event_count"] += fraud_events
+                if business_mechanism is not None:
+                    groups.append({
+                        "mechanism": business_mechanism, "role": "benign_control",
+                        "group_id": f"p14-{business_mechanism}-{group_index:04d}",
+                        "sender_customer_ids": list(senders),
                         "recipient_customer_id": household_id,
                         "transaction_ids": business_ids, "fan_in_count": fan_in,
                         "amounts": business_amounts,
-                        "start_at": (starts + timedelta(hours=2)).isoformat(),
-                        "end_at": (starts + campaign_span + timedelta(hours=2)).isoformat(),
-                    },
-                ))
-                summary["social_engineering_transaction_count"] += len(incoming_ids) + len(outgoing_ids)
-                summary["business_control_transaction_count"] += len(business_ids)
-                summary["lifecycle_event_count"] += fraud_events + business_events
+                        "start_at": min(business_times).isoformat(),
+                        "end_at": max(business_times).isoformat(),
+                    })
+                    summary["business_control_transaction_count"] += len(business_ids)
+                    summary["lifecycle_event_count"] += business_events
 
-        insert_private_record(
-            private,
-            "run_metadata",
-            {
-                "key": metadata_key,
-                "value_json": {
-                    "algorithm": "p1.4-fraud-mechanisms-v1",
-                    "episode_id": episode_id,
-                    "seed": seed,
-                    "summary": summary,
-                    "groups": groups,
-                },
-            },
+        combined_summary = dict(prior_metadata.get("summary", {})) if prior_metadata else {}
+        for key, value in summary.items():
+            combined_summary[key] = int(combined_summary.get(key, 0)) + value
+        metadata_value = {
+            "algorithm": "p1.4-fraud-mechanisms-v1",
+            "episode_id": episode_id,
+            "seed": seed,
+            "summary": combined_summary,
+            "groups": [*(prior_metadata.get("groups", []) if prior_metadata else []), *groups],
+        }
+        encoded_metadata = json.dumps(
+            metadata_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
+        if prior_metadata is None:
+            insert_private_record(
+                private,
+                "run_metadata",
+                {"key": metadata_key, "value_json": metadata_value},
+            )
+        else:
+            private.execute(
+                "UPDATE run_metadata SET value_json = ? WHERE key = ?",
+                (encoded_metadata, metadata_key),
+            )
         private.execute("RELEASE SAVEPOINT p1_4_mechanisms_metadata")
         operational.execute("RELEASE SAVEPOINT p1_4_mechanisms")
     except Exception:

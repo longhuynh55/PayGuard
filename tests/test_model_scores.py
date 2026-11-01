@@ -177,12 +177,13 @@ def test_smoke_cli_scores_episode_asof_and_evaluates_private_truth(
     assert report["label_policy_version"] == "mvp-h90-v1"
     legit_support = report["overall"]["coverage_by_class"]["legit"]
     assert legit_support["alpha"] == 0.005
-    assert legit_support["calibration_sample_count"] == 149
+    # F1 removes SE chains from the shared base, reducing calibration support.
+    assert legit_support["calibration_sample_count"] == 142
     assert legit_support["required_calibration_sample_count"] == 199
     assert legit_support["insufficient_support"] is True
     fraud_support = report["overall"]["coverage_by_class"]["fraud"]
     assert fraud_support["alpha"] == 0.20
-    assert fraud_support["calibration_sample_count"] == 27
+    assert fraud_support["calibration_sample_count"] == 19
     assert fraud_support["required_calibration_sample_count"] == 4
     assert fraud_support["insufficient_support"] is False
     assert "not a model result" in report["interpretation"]

@@ -107,6 +107,34 @@ def _load_p14_fraud_ids(
     return fraud_ids
 
 
+def _load_p16_fraud_ids(private: sqlite3.Connection, episode_id: str) -> set[str]:
+    row = private.execute(
+        "SELECT value_json FROM run_metadata WHERE key = ?",
+        (f"p1.6.fraud_groups.v1:{episode_id}",),
+    ).fetchone()
+    if row is None:
+        return set()
+    metadata = json.loads(row[0])
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("episode_id") != episode_id
+        or not isinstance(metadata.get("groups"), list)
+    ):
+        raise ValueError("P1.6 fraud group metadata is malformed")
+    fraud_ids: set[str] = set()
+    for group in metadata["groups"]:
+        if (
+            not isinstance(group, dict)
+            or group.get("role") != "fraud"
+            or not isinstance(group.get("transaction_ids"), list)
+            or not group["transaction_ids"]
+            or any(not isinstance(txn_id, str) or not txn_id for txn_id in group["transaction_ids"])
+        ):
+            raise ValueError("P1.6 fraud group does not contain private fraud transaction IDs")
+        fraud_ids.update(group["transaction_ids"])
+    return fraud_ids
+
+
 def _source_for_channel(channel: str) -> str:
     """Choose a source supported by the observed transaction channel."""
     return "chargeback" if channel == "card" else "customer_report"
@@ -180,7 +208,9 @@ def generate_label_events(
                 f"{missing_draw_keys[:3]}"
             )
     card_fraud_ids = _load_card_testing_ids(private, episode_id)
-    fraud_ids = _load_p14_fraud_ids(private, episode_id)
+    fraud_ids = _load_p14_fraud_ids(private, episode_id) | _load_p16_fraud_ids(
+        private, episode_id
+    )
     txn_ids = {row["txn_id"] for row in transactions}
     if not fraud_ids <= txn_ids:
         missing = sorted(fraud_ids - txn_ids)

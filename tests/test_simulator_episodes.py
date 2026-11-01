@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import simulator.episodes as episodes_module
+from simulator.__main__ import main as simulator_main
 from simulator.asof import read_as_of
 from simulator.config import (
     EpisodeConfig,
@@ -19,6 +21,8 @@ from simulator.config import (
     validate_episode_config,
 )
 from simulator.episodes import derive_episode_seed, generate_episodes
+from simulator.incidents import inject_legit_business_spike, inject_new_fraud
+from simulator.validate import validate_run
 from simulator.labels import label_delay_report
 from simulator.reproducibility import (
     canonical_episode_content,
@@ -62,6 +66,96 @@ def _generate(root: Path, config: EpisodeConfig | None = None):
     )
     pair.commit()
     return pair, summary
+
+
+def test_new_fraud_pipeline_passes_random_keys_to_labels_and_standard_smoke_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_inject_template = episodes_module._inject_template
+    injected: dict[str, object] = {}
+
+    def inject_social_engineering_before_labels(
+        operational,
+        private,
+        simulator_config,
+        episode_config,
+        assignment,
+        episode_id,
+        seed,
+        world,
+        transaction_random_keys,
+    ):
+        summary = original_inject_template(
+            operational,
+            private,
+            simulator_config,
+            episode_config,
+            assignment,
+            episode_id,
+            seed,
+            world,
+            transaction_random_keys,
+        )
+        if episode_id == "ep-0002":
+            injected["summary"] = inject_new_fraud(
+                operational,
+                private,
+                simulator_config,
+                episode_id=episode_id,
+                incident_truth_id="truth-pipeline-social-engineering",
+                seed=seed,
+                transaction_random_keys=transaction_random_keys,
+            )
+            injected["random_keys"] = transaction_random_keys
+        return summary
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            episodes_module, "_inject_template", inject_social_engineering_before_labels
+        )
+        pair, _ = _generate(tmp_path / "injected-label-generation")
+
+    try:
+        injected_summary = injected["summary"]
+        transaction_ids = set(injected_summary.affected_transaction_ids)
+        random_keys = injected["random_keys"]
+        assert len(transaction_ids) == 10
+        assert transaction_ids <= set(random_keys)
+        label_truth = json.loads(
+            pair.private.execute(
+                "SELECT value_json FROM run_metadata "
+                "WHERE key = 'p1.5.label_truth.v1:ep-0002'"
+            ).fetchone()[0]
+        )
+        outcomes = {
+            row["txn_id"]: row
+            for row in label_truth["transactions"]
+            if row["txn_id"] in transaction_ids
+        }
+        assert set(outcomes) == transaction_ids
+        assert all(row["true_label"] == "fraud" for row in outcomes.values())
+        expected_reported_ids = {
+            txn_id for txn_id, row in outcomes.items() if row["reported"]
+        }
+        observed_label_ids = {
+            row[0]
+            for row in pair.operational.execute(
+                "SELECT txn_id FROM label_events WHERE episode_id = 'ep-0002' "
+                "AND txn_id IN (" + ", ".join("?" for _ in transaction_ids) + ")",
+                tuple(sorted(transaction_ids)),
+            )
+        }
+        assert expected_reported_ids
+        assert observed_label_ids == expected_reported_ids
+    finally:
+        pair.close()
+
+    standard_run = tmp_path / "standard-smoke"
+    assert simulator_main(
+        ["generate", "--profile", "smoke", "--out", str(standard_run)]
+    ) == 0
+    validation = validate_run(standard_run)
+    assert validation["status"] == "passed"
 
 
 def _base_snapshot(connection: sqlite3.Connection) -> dict[str, list[dict]]:
@@ -180,9 +274,14 @@ def test_smoke_manifest_is_private_locked_and_has_all_three_roles_and_templates(
             )
         }
         assert set(account_roles) <= base_customer_ids
-        assert pair.operational.execute(
-            "SELECT 1 FROM customers WHERE episode_id <> 'base' LIMIT 1"
-        ).fetchone()
+        # Smoke has no new_fraud template assignment until P1.7 extends the manifest;
+        # episode-local mule customers are checked on the injected new_fraud fixture below.
+        assert {
+            row[0]
+            for row in pair.operational.execute(
+                "SELECT DISTINCT episode_id FROM customers"
+            )
+        } == {"base"}
         account_transfers = [
             dict(row)
             for row in pair.operational.execute(
@@ -445,6 +544,139 @@ def test_episode_data_isolated_asof_and_default_labels_calendar_do_not_leak(
         )
     finally:
         pair.close()
+
+
+def test_p16_truth_templates_reference_p14_groups_without_operational_leakage(
+    tmp_path: Path,
+) -> None:
+    control, _ = _generate(tmp_path / "p16-template-control")
+    treated, _ = _generate(tmp_path / "p16-template-treated")
+    try:
+        control_content = {
+            table: [dict(row) for row in control.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
+            for table in list_operational_schema(control.operational)
+        }
+        treated_before = {
+            table: [dict(row) for row in treated.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
+            for table in list_operational_schema(treated.operational)
+        }
+        assert control_content == treated_before
+        for episode_id in ("base", "ep-0002", "ep-0004"):
+            metadata_key = (
+                "p1.4.mechanisms.v1"
+                if episode_id == "base"
+                else f"p1.4.mechanisms.v1:{episode_id}"
+            )
+            groups = json.loads(
+                treated.private.execute(
+                    "SELECT value_json FROM run_metadata WHERE key = ?", (metadata_key,)
+                ).fetchone()[0]
+            )["groups"]
+            assert not any(
+                group["mechanism"] in {"social_engineering", "legit_business_spike"}
+                for group in groups
+            )
+            if episode_id == "base":
+                assert any(
+                    group["mechanism"] == "household_business_activity"
+                    for group in groups
+                )
+
+        social = inject_new_fraud(
+            treated.operational,
+            treated.private,
+            load_simulator_config(ROOT / "configs" / "simulator.yaml"),
+            episode_id="ep-0002",
+            incident_truth_id="truth-p16-new-fraud",
+            seed=treated.private.execute(
+                "SELECT seed FROM episode_manifest WHERE episode_id = 'ep-0002'"
+            ).fetchone()[0],
+            transaction_random_keys={},
+        )
+        social_metadata = json.loads(
+            treated.private.execute(
+                "SELECT value_json FROM run_metadata WHERE key='p1.4.mechanisms.v1:ep-0002'"
+            ).fetchone()[0]
+        )
+        social_group = next(
+            group for group in social_metadata["groups"]
+            if group["mechanism"] == "social_engineering"
+        )
+        mule_customer_id = social_group["mule_customer_id"]
+        assert treated.operational.execute(
+            "SELECT 1 FROM customers WHERE customer_id = ? AND episode_id = 'ep-0002'",
+            (mule_customer_id,),
+        ).fetchone()
+        assert treated.operational.execute(
+            "SELECT 1 FROM customers WHERE customer_id = ? AND episode_id = 'base'",
+            (mule_customer_id,),
+        ).fetchone() is None
+        business = inject_legit_business_spike(
+            treated.operational,
+            treated.private,
+            load_simulator_config(ROOT / "configs" / "simulator.yaml"),
+            episode_id="ep-0004",
+            incident_truth_id="truth-p16-legit-business",
+            seed=treated.private.execute(
+                "SELECT seed FROM episode_manifest WHERE episode_id = 'ep-0004'"
+            ).fetchone()[0],
+            transaction_random_keys={},
+        )
+
+        treated_after = {
+            table: [dict(row) for row in treated.operational.execute(f'SELECT * FROM "{table}" ORDER BY 1')]
+            for table in list_operational_schema(treated.operational)
+        }
+        assert treated_after != control_content
+        for episode_id, incident in (("ep-0002", social), ("ep-0004", business)):
+            control_ids = {
+                row["txn_id"]
+                for row in control_content["transactions"]
+                if row["episode_id"] == episode_id
+            }
+            treated_ids = {
+                row["txn_id"]
+                for row in treated_after["transactions"]
+                if row["episode_id"] == episode_id
+            }
+            assert set(incident.affected_transaction_ids) <= treated_ids - control_ids
+        assert len(social.affected_transaction_ids) == 10
+        assert len(business.affected_transaction_ids) == 5
+        social_truth = dict(
+            treated.private.execute(
+                "SELECT * FROM incident_truth WHERE incident_truth_id = ?",
+                ("truth-p16-new-fraud",),
+            ).fetchone()
+        )
+        business_truth = dict(
+            treated.private.execute(
+                "SELECT * FROM incident_truth WHERE incident_truth_id = ?",
+                ("truth-p16-legit-business",),
+            ).fetchone()
+        )
+        assert social_truth["cause"] == "new_fraud"
+        assert social_truth["requires_intervention"] == 1
+        assert social_truth["rule_covered"] == 0
+        assert json.loads(social_truth["accepted_actions_json"]) == [
+            "human_review",
+            "fraud_ops",
+        ]
+        assert social_truth["effect_available_at"] == social.effect_available_at
+        assert business_truth["cause"] == "legit_business_change"
+        assert business_truth["requires_intervention"] == 0
+        assert business_truth["rule_covered"] == 0
+        assert json.loads(business_truth["accepted_actions_json"]) == []
+        assert business_truth["effect_available_at"] == business.effect_available_at
+        assert social.affected_transaction_ids and business.affected_transaction_ids
+        assert "incident_truth" not in list_operational_schema(treated.operational)
+        assert all(
+            not {"cause", "mechanism", "accepted_actions_json"} & set(columns)
+            for table, columns in list_operational_schema(treated.operational).items()
+            if table != "decisions"
+        )
+    finally:
+        control.close()
+        treated.close()
 
 
 def test_episode_add_remove_and_reorder_preserve_existing_data_and_roles(

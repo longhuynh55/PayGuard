@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -17,6 +18,7 @@ import yaml
 
 from simulator.validate import validate_run
 from simulator.config import load_simulator_config
+from simulator.incidents import inject_fraud_surge, inject_new_fraud
 from simulator.recipient_features import derive_recipient_signals
 from simulator.storage import utc_timestamp
 
@@ -107,6 +109,131 @@ def _fingerprint(run_dir: Path) -> str:
     return json.loads(value)["canonical_content_fingerprint"]
 
 
+def test_injected_and_background_card_testing_share_jittered_timing(
+    valid_smoke_run: Path, tmp_path: Path,
+) -> None:
+    simulator_config = load_simulator_config()
+    treated_run = tmp_path / "fraud-surge"
+    shutil.copytree(valid_smoke_run, treated_run)
+    surge_date = simulator_config.timeline.t0_business_date.value + timedelta(days=11)
+    with sqlite3.connect(treated_run / "operational" / "observations.sqlite") as operational, sqlite3.connect(
+        treated_run / "private" / "evaluator.sqlite"
+    ) as private:
+        operational.row_factory = sqlite3.Row
+        private.row_factory = sqlite3.Row
+        surge = inject_fraud_surge(
+            operational,
+            private,
+            simulator_config,
+            episode_id="ep-0001",
+            incident_truth_id="truth-cli-fraud-surge",
+            business_date=surge_date,
+            seed=7421,
+        )
+        operational.commit()
+        private.commit()
+        card_metadata = json.loads(
+            private.execute(
+                "SELECT value_json FROM run_metadata "
+                "WHERE key='p1.4.card_testing.v1:ep-0001'"
+            ).fetchone()[0]
+        )
+        background_group = next(
+            group for group in card_metadata["groups"] if group.get("role") == "fraud"
+        )
+        background_ids = [
+            *background_group["small_transaction_ids"],
+            background_group["larger_followup_transaction_id"],
+        ]
+        target_ids = [*background_ids, *surge.affected_transaction_ids]
+        placeholders = ", ".join("?" for _ in target_ids)
+        transaction_rows = {
+            row["txn_id"]: dict(row)
+            for row in operational.execute(
+                f"SELECT txn_id, customer_id, merchant_id, created_at, amount "
+                f"FROM transactions WHERE txn_id IN ({placeholders})",
+                target_ids,
+            )
+        }
+        mechanism = simulator_config.fraud.card_testing
+        jitter = simulator_config.fraud.timing_jitter
+        base_spacing = mechanism.window_minutes.value * 60 // mechanism.attempts_per_card.value
+        background_small = sorted(
+            (transaction_rows[txn_id] for txn_id in background_group["small_transaction_ids"]),
+            key=lambda row: row["created_at"],
+        )
+        surge_rows = sorted(
+            (transaction_rows[txn_id] for txn_id in surge.affected_transaction_ids),
+            key=lambda row: row["created_at"],
+        )
+        for small_rows, followup_row in (
+            (
+                background_small,
+                transaction_rows[background_group["larger_followup_transaction_id"]],
+            ),
+            (surge_rows[:-1], surge_rows[-1]),
+        ):
+            start_local = datetime.fromisoformat(
+                small_rows[0]["created_at"].replace("Z", "+00:00")
+            ).astimezone(ZoneInfo(simulator_config.timeline.business_timezone.value))
+            assert mechanism.start_hour_local.value - jitter.card_testing_start_hour_jitter.value <= start_local.hour
+            assert start_local.hour <= mechanism.start_hour_local.value + jitter.card_testing_start_hour_jitter.value + 1
+            assert start_local.second > 0
+            gaps = [
+                int(
+                    (
+                        datetime.fromisoformat(right["created_at"].replace("Z", "+00:00"))
+                        - datetime.fromisoformat(left["created_at"].replace("Z", "+00:00"))
+                    ).total_seconds()
+                )
+                for left, right in zip(small_rows, small_rows[1:])
+            ]
+            assert all(
+                base_spacing - jitter.card_testing_spacing_jitter_seconds.value
+                <= gap
+                <= base_spacing + jitter.card_testing_spacing_jitter_seconds.value
+                for gap in gaps
+            )
+            start_at = datetime.fromisoformat(
+                small_rows[0]["created_at"].replace("Z", "+00:00")
+            )
+            followup_at = datetime.fromisoformat(
+                followup_row["created_at"].replace("Z", "+00:00")
+            )
+            delay_after_window = int(
+                (followup_at - start_at).total_seconds()
+                - mechanism.window_minutes.value * 60
+            )
+            assert (
+                mechanism.followup_delay_seconds.value
+                - jitter.card_testing_followup_jitter_seconds.value
+                <= delay_after_window
+                <= mechanism.followup_delay_seconds.value
+                + jitter.card_testing_followup_jitter_seconds.value
+            )
+
+        bursts = {
+            (row[0], row[1], row[2]): (row[3], row[4])
+            for row in operational.execute(
+                "SELECT customer_id, merchant_id, substr(created_at, 1, 10), "
+                "COUNT(*), MIN(created_at) FROM transactions "
+                "WHERE episode_id='ep-0001' AND channel='card' "
+                "GROUP BY customer_id, merchant_id, substr(created_at, 1, 10) "
+                "HAVING COUNT(*) >= ?",
+                (mechanism.attempts_per_card.value,),
+            )
+        }
+        for ids in (background_ids, list(surge.affected_transaction_ids)):
+            first = min(
+                (transaction_rows[txn_id] for txn_id in ids),
+                key=lambda row: row["created_at"],
+            )
+            key = (first["customer_id"], first["merchant_id"], first["created_at"][:10])
+            assert key in bursts
+            assert bursts[key][0] >= mechanism.attempts_per_card.value
+            assert datetime.fromisoformat(bursts[key][1].replace("Z", "+00:00")).second > 0
+
+
 @pytest.fixture(scope="module")
 def valid_smoke_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
     run_dir = tmp_path_factory.mktemp("p1_8_smoke") / "smoke"
@@ -115,11 +242,13 @@ def valid_smoke_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def test_cli_recipient_signals_separate_cashout_from_business_fanin(
-    valid_smoke_run: Path,
+    valid_smoke_run: Path, tmp_path: Path,
 ) -> None:
-    """Public generated transactions expose cash-out while fan-in is shared by the control."""
+    """Injected social engineering and base household activity share fan-in, not outflow."""
     episode_id = "ep-0002"
     simulator_config = load_simulator_config()
+    treated_run = tmp_path / "new-fraud-template"
+    shutil.copytree(valid_smoke_run, treated_run)
     t0 = utc_timestamp(
         datetime.combine(
             simulator_config.timeline.t0_business_date.value,
@@ -127,67 +256,94 @@ def test_cli_recipient_signals_separate_cashout_from_business_fanin(
             tzinfo=ZoneInfo(simulator_config.timeline.business_timezone.value),
         )
     )
-    as_of = utc_timestamp(
-        datetime.fromisoformat(t0.replace("Z", "+00:00"))
-        + timedelta(days=11, hours=16)
-    )
-    with sqlite3.connect(valid_smoke_run / "operational" / "observations.sqlite") as operational:
+    with sqlite3.connect(treated_run / "operational" / "observations.sqlite") as operational, sqlite3.connect(
+        treated_run / "private" / "evaluator.sqlite"
+    ) as private:
         operational.row_factory = sqlite3.Row
-        signals = derive_recipient_signals(
-            operational,
-            episode_id=episode_id,
-            t0=t0,
-            as_of_time=as_of,
+        private.row_factory = sqlite3.Row
+        base_metadata = json.loads(
+            private.execute(
+                "SELECT value_json FROM run_metadata WHERE key='p1.4.mechanisms.v1'"
+            ).fetchone()[0]
         )
-        mule_candidates = [
-            signal for signal in signals.values()
-            if signal.fan_in_7d == 4
-            and signal.outflow_ratio_24h == 1.0
-            and signal.new_or_dormant
-        ]
-        business_candidates = [
-            signal for signal in signals.values()
-            if signal.fan_in_7d == 4
-            and signal.outflow_ratio_24h == 0.0
-            and not signal.new_or_dormant
-        ]
-        matched_pairs = [
-            (mule, business)
-            for mule in mule_candidates
-            for business in business_candidates
-            if mule.older_sender_share_7d == business.older_sender_share_7d
-        ]
-        assert matched_pairs, "operational transfers should expose matched mule and household-control signals"
-        mule_signal, business_signal = sorted(
-            matched_pairs,
-            key=lambda pair: (pair[0].recipient_customer_id, pair[1].recipient_customer_id),
-        )[0]
+        household_group = next(
+            group for group in base_metadata["groups"]
+            if group["mechanism"] == "household_business_activity"
+        )
+        business_as_of = utc_timestamp(
+            datetime.fromisoformat(t0.replace("Z", "+00:00")) + timedelta(hours=1)
+        )
+        business_signals = derive_recipient_signals(
+            operational, episode_id=episode_id, t0=t0, as_of_time=business_as_of
+        )
+        business_signal = business_signals[household_group["recipient_customer_id"]]
 
-        assert mule_signal.fan_in_7d == business_signal.fan_in_7d == 4
+        inject_new_fraud(
+            operational,
+            private,
+            simulator_config,
+            episode_id=episode_id,
+            incident_truth_id="truth-cli-new-fraud",
+            seed=private.execute(
+                "SELECT seed FROM episode_manifest WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()[0],
+            transaction_random_keys={},
+        )
+        private.commit()
+        social_metadata = json.loads(
+            private.execute(
+                "SELECT value_json FROM run_metadata WHERE key='p1.4.mechanisms.v1:ep-0002'"
+            ).fetchone()[0]
+        )
+        social_group = next(
+            group for group in social_metadata["groups"]
+            if group["mechanism"] == "social_engineering"
+        )
+        incoming_ids = social_group["incoming_transaction_ids"]
+        incoming_placeholders = ", ".join("?" for _ in incoming_ids)
+        last_incoming = operational.execute(
+            f"SELECT MAX(created_at) FROM transactions WHERE txn_id IN ({incoming_placeholders})",
+            incoming_ids,
+        ).fetchone()[0]
+        social_as_of = utc_timestamp(
+            datetime.fromisoformat(last_incoming.replace("Z", "+00:00"))
+            + timedelta(hours=23)
+        )
+        social_signals = derive_recipient_signals(
+            operational, episode_id=episode_id, t0=t0, as_of_time=social_as_of
+        )
+        mule_signal = social_signals[social_group["mule_customer_id"]]
+        outgoing_ids = social_group["outgoing_transaction_ids"]
+        paired_ids = [*incoming_ids, *outgoing_ids]
+        transfer_placeholders = ", ".join("?" for _ in paired_ids)
+        paired_times = {
+            row["txn_id"]: row["created_at"]
+            for row in operational.execute(
+                f"SELECT txn_id, created_at FROM transactions WHERE txn_id IN ({transfer_placeholders})",
+                paired_ids,
+            )
+        }
+        delays = [
+            int(
+                (
+                    datetime.fromisoformat(paired_times[outgoing].replace("Z", "+00:00"))
+                    - datetime.fromisoformat(paired_times[incoming].replace("Z", "+00:00"))
+                ).total_seconds()
+            )
+            for incoming, outgoing in zip(incoming_ids, outgoing_ids, strict=True)
+        ]
+        assert len(delays) == len(incoming_ids)
+        assert simulator_config.fraud.social_engineering.cashout_delay_minutes.value * 60 not in delays
+        assert len(set(delays)) > 1
+
+        assert mule_signal.fan_in_7d == business_signal.fan_in_7d == 5
         assert mule_signal.outflow_ratio_24h == 1.0
         assert business_signal.outflow_ratio_24h == 0.0
         assert mule_signal.new_or_dormant is True
         assert business_signal.new_or_dormant is False
         assert mule_signal.older_sender_share_7d == business_signal.older_sender_share_7d
-        assert len(mule_signal.first_counterparty_transfer_txn_ids) == 4
-
-        end_of_pattern = utc_timestamp(
-            datetime.fromisoformat(t0.replace("Z", "+00:00"))
-            + timedelta(days=12, hours=16)
-        )
-        end_signals = derive_recipient_signals(
-            operational,
-            episode_id=episode_id,
-            t0=t0,
-            as_of_time=end_of_pattern,
-        )
-        assert any(
-            signal.fan_in_7d == 5
-            and signal.outflow_ratio_24h == 1.0
-            and signal.new_or_dormant
-            and len(signal.first_counterparty_transfer_txn_ids) == 5
-            for signal in end_signals.values()
-        ), "the full five-sender mule pattern should be visible when its final transfer arrives"
+        assert len(mule_signal.first_counterparty_transfer_txn_ids) == 5
 
         rows = [dict(row) for row in operational.execute(
             "SELECT txn_id, episode_id, customer_id, device_id, card_token, channel, amount "
@@ -219,10 +375,46 @@ def test_cli_recipient_signals_separate_cashout_from_business_fanin(
             assert diagnostic["id_format_artifacts"]["transaction_format_class_auc"] == 0.5
             assert diagnostic["id_format_artifacts"]["customer_format_class_auc"] == 0.5
             assert diagnostic["auc_by_feature"]["recipient_account_age_days"] is not None
+            assert "created_at_second_zero" in diagnostic["auc_by_feature"]
             contrast = diagnostic["by_mechanism"][
                 "social_engineering_vs_legit_business_spike"
             ]
             assert "recipient_account_age_days" in contrast["auc_by_feature"]
+        base_timing = diagnostics["base"]["fixed_delay_artifacts"]
+        for mechanism in ("collusion",):
+            artifact = base_timing[mechanism]
+            assert artifact["paired_cashout_count"] > 0
+            assert artifact["exact_configured_delay_count"] == 0
+            assert len(artifact["distinct_delay_seconds"]) > 1
+        assert base_timing["social_engineering"]["paired_cashout_count"] == 0
+        p14_transaction_ids: set[str] = set()
+        with sqlite3.connect(valid_smoke_run / "private" / "evaluator.sqlite") as private:
+            for (value_json,) in private.execute(
+                "SELECT value_json FROM run_metadata "
+                "WHERE key = 'p1.4.mechanisms.v1' OR key LIKE 'p1.4.mechanisms.v1:%'"
+            ):
+                groups = json.loads(value_json)["groups"]
+                for group in groups:
+                    for field in (
+                        "transaction_ids",
+                        "incoming_transaction_ids",
+                        "outgoing_transaction_ids",
+                    ):
+                        p14_transaction_ids.update(group.get(field, []))
+        with sqlite3.connect(valid_smoke_run / "operational" / "observations.sqlite") as operational:
+            generated_timestamps = {
+                txn_id: created_at
+                for txn_id, created_at in operational.execute(
+                    "SELECT txn_id, created_at FROM transactions "
+                    f"WHERE txn_id IN ({', '.join('?' for _ in p14_transaction_ids)})",
+                    tuple(sorted(p14_transaction_ids)),
+                )
+            }
+        assert set(generated_timestamps) == p14_transaction_ids
+        assert all(
+            datetime.fromisoformat(value.replace("Z", "+00:00")).second != 0
+            for value in generated_timestamps.values()
+        )
 
 
 @pytest.fixture(scope="module")
@@ -338,11 +530,17 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     ] == "mvp-h90-v1"
     assert public_report["label_delay"]["training_snapshot_at_t0"]["model_version"] is None
     calibration = public_report["p2_cohort_support"]["calibration"]
-    assert calibration["positive_count"] == 27
+    # F1 removes SE chains from base and non-new_fraud episodes; the old 27 positives
+    # become 19, below the locked isotonic calibration minimum of 25.
+    assert calibration["positive_count"] == 19
+    assert calibration["negative_count"] == 142
+    assert calibration["sample_count"] == 161
     assert calibration["support_status"] == "sufficient"
     assert calibration["missing_support"] == []
-    assert calibration["calibration_minimum_met"] is True
-    assert calibration["warnings"] == []
+    assert calibration["calibration_minimum_met"] is False
+    assert calibration["warnings"] == [
+        "isotonic_support_below_25_per_class; fallback_method=sigmoid"
+    ]
     assert "truth_positive_count" not in json.dumps(public_report)
     private_report = json.loads(
         (run_dir / "private" / "reports" / "smoke_truth.json").read_text(encoding="utf-8")
@@ -356,6 +554,20 @@ def test_smoke_cli_generates_separate_stores_reports_and_validates(valid_smoke_r
     assert validated.returncode == 0, validated.stdout + validated.stderr
     assert "Validation summary:" in validated.stdout
     assert "report/delay draws reproduce from private stable keys" in validated.stdout
+    shape_check = next(
+        check
+        for check in validate_run(run_dir)["checks"]
+        if check["name"] == "operational_identifier_shape_contract"
+    )
+    assert shape_check["passed"] is True
+    affected_ids: set[str] = set()
+    with sqlite3.connect(private_path) as private:
+        for (value_json,) in private.execute(
+            "SELECT value_json FROM run_metadata WHERE key LIKE 'p1.6.incident_effect.v1:%'"
+        ):
+            affected_ids.update(json.loads(value_json)["affected_transaction_ids"])
+    assert affected_ids
+    assert all(re.fullmatch(r"txn-[0-9a-f]{64}", txn_id) for txn_id in affected_ids)
 
 
 @pytest.mark.parametrize(
@@ -431,7 +643,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
         str(episode_config),
     )
     assert generated.returncode == 0, generated.stdout + generated.stderr
-    assert "Validation summary: 19 passed, 0 failed" in generated.stdout
+    assert "Validation summary: 20 passed, 0 failed" in generated.stdout
 
     with sqlite3.connect(run_dir / "private" / "evaluator.sqlite") as connection:
         effects = [
@@ -467,7 +679,7 @@ def test_pipeline_modes_validate_adjustments_against_original_amount(
 
     validated = _cli("validate", "--run", str(run_dir))
     assert validated.returncode == 0, validated.stdout + validated.stderr
-    assert "Validation summary: 19 passed, 0 failed" in validated.stdout
+    assert "Validation summary: 20 passed, 0 failed" in validated.stdout
 
 
 def test_generate_checks_episode_duration_against_selected_simulator_config(
@@ -1160,6 +1372,43 @@ def test_validate_rejects_incident_truth_shifted_outside_operational_effects(
     validation = _cli("validate", "--run", str(run_dir))
     assert validation.returncode != 0, validation.stdout + validation.stderr
     assert "FAIL incident_truth_contract" in validation.stdout
+
+
+def test_validate_rejects_transaction_events_outside_episode_window(
+    tmp_path: Path, valid_smoke_run: Path
+) -> None:
+    run_dir = tmp_path / "late_transaction_event"
+    shutil.copytree(valid_smoke_run, run_dir)
+    database = run_dir / "operational" / "observations.sqlite"
+    config = load_simulator_config()
+    episode_start = datetime.combine(
+        config.timeline.t0_business_date.value,
+        time.min,
+        tzinfo=ZoneInfo(config.timeline.business_timezone.value),
+    ).astimezone(ZoneInfo("UTC"))
+    episode_end = (
+        episode_start + timedelta(days=config.episode.duration_days.value)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    with sqlite3.connect(database) as connection:
+        txn_id = connection.execute(
+            "SELECT txn_id FROM transactions WHERE episode_id = 'ep-0001' ORDER BY txn_id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO transaction_events "
+            "(event_id, txn_id, episode_id, event_type, event_at, available_at, amount, response_code) "
+            "VALUES (?, ?, 'ep-0001', 'authorized', ?, ?, NULL, NULL)",
+            (f"{txn_id}:late-authorized", txn_id, episode_end, episode_end),
+        )
+
+    result = validate_run(run_dir)
+    assert result["status"] == "failed"
+    incident_check = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "transaction_event_episode_window"
+    )
+    assert incident_check["passed"] is False
+    assert "event_at is outside the episode future window" in incident_check["detail"]
 
 
 def test_zero_report_probability_blocks_p2_handoff(tmp_path: Path) -> None:

@@ -381,6 +381,47 @@ def _validate_episode_manifest(
     return f"{len(non_base)} locked smoke episode roles and private manifest entries match"
 
 
+def _validate_transaction_event_episode_window(
+    operational: sqlite3.Connection,
+    metadata: dict[str, Any],
+) -> str:
+    """Require every non-base transaction event to remain inside the episode future."""
+    simulator_config = validate_simulator_config(metadata["resolved_config"]["simulator"])
+    episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
+    episode_start = datetime.combine(
+        simulator_config.timeline.t0_business_date.value,
+        time.min,
+        tzinfo=timezone,
+    ).astimezone(UTC)
+    episode_end = episode_start + timedelta(days=episode_config.protocol.duration_days.value)
+    event_count = 0
+    for event in operational.execute(
+        "SELECT event_id, episode_id, event_at, available_at FROM transaction_events "
+        "WHERE episode_id <> 'base' ORDER BY episode_id, event_at, event_id"
+    ):
+        for field in ("event_at", "available_at"):
+            try:
+                value = datetime.fromisoformat(
+                    event[field].replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except (AttributeError, TypeError, ValueError) as exc:
+                _fail(
+                    f"transaction event {event['event_id']} has invalid {field} "
+                    f"for {event['episode_id']}: {exc}"
+                )
+            if not episode_start <= value < episode_end:
+                _fail(
+                    f"transaction event {event['event_id']} {field} is outside the "
+                    f"episode future window for {event['episode_id']}"
+                )
+        event_count += 1
+    return (
+        f"{event_count} non-base transaction events have event_at and available_at "
+        "inside [T0, T0 + duration_days)"
+    )
+
+
 def _validate_incident_truth(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
@@ -458,11 +499,47 @@ def _validate_incident_truth(
         "data_pipeline": {
             "cause": "data_pipeline",
             "requires_intervention": 1,
+            "rule_covered": 1,
+            "mechanisms": {"amount_multiplier_100", "amount_null_burst"},
             "accepted_actions": {"data_ticket", "human_review"},
         },
         "seasonal": {
             "cause": "seasonal",
             "requires_intervention": 0,
+            "rule_covered": None,
+            "mechanisms": {"one_day_valid_transaction_increase"},
+            "accepted_actions": set(),
+        },
+        "fraud_surge": {
+            "cause": "fraud_surge",
+            "requires_intervention": 1,
+            "rule_covered": 1,
+            "mechanisms": {"known_card_testing_surge"},
+            "accepted_actions": {"fraud_ops", "human_review"},
+        },
+        "new_fraud": {
+            "cause": "new_fraud",
+            "requires_intervention": 1,
+            "rule_covered": 0,
+            "mechanisms": {
+                "social_engineering",
+                "silent_concept_drift",
+                "new_merchant_sparse_history",
+            },
+            "accepted_actions": {"human_review", "fraud_ops"},
+        },
+        "no_material_change": {
+            "cause": "no_material_change",
+            "requires_intervention": 0,
+            "rule_covered": 0,
+            "mechanisms": {"new_merchant_sparse_history"},
+            "accepted_actions": set(),
+        },
+        "legit_business_change": {
+            "cause": "legit_business_change",
+            "requires_intervention": 0,
+            "rule_covered": 0,
+            "mechanisms": {"legit_business_spike"},
             "accepted_actions": set(),
         },
     }
@@ -477,173 +554,390 @@ def _validate_incident_truth(
             if truth_rows:
                 _fail(f"clean episode {episode_id} must not have incident truth")
             continue
-        expected = expected_contracts.get(template)
-        if expected is None:
+        if template not in {"data_pipeline", "seasonal"}:
             _fail(f"unsupported round-one incident template in manifest: {template!r}")
-        if len(truth_rows) != 1:
+        causes = sorted(truth["cause"] for truth in truth_rows)
+        if template == "data_pipeline" and causes != ["data_pipeline"]:
+            _fail(f"data_pipeline manifest episode {episode_id} requires one pipeline truth")
+        if template == "seasonal" and causes not in (
+            ["seasonal"],
+            ["fraud_surge", "seasonal"],
+        ):
             _fail(
-                f"episode {episode_id} template {template!r} requires exactly one incident truth; "
-                f"found {len(truth_rows)}"
+                f"seasonal manifest episode {episode_id} requires seasonal truth, optionally "
+                "paired with one fraud_surge truth"
             )
-        truth = truth_rows[0]
-        effect_manifest = effect_manifests[truth["incident_truth_id"]]
-        if effect_manifest["episode_id"] != episode_id:
-            _fail(
-                f"incident effect reference episode does not match incident truth for {episode_id}"
-            )
-        affected_ids = effect_manifest["affected_transaction_ids"]
-        pre_injection_amounts = effect_manifest.get(
-            "pre_injection_amount_by_txn_id"
-        )
-        if template == "data_pipeline":
-            if (
-                not isinstance(pre_injection_amounts, dict)
-                or set(pre_injection_amounts) != set(affected_ids)
-                or any(
-                    type(amount) is not int or amount <= 0
-                    for amount in pre_injection_amounts.values()
-                )
-            ):
+        if template == "seasonal" and len(truth_rows) == 2:
+            parents = {truth["parent_scenario"] for truth in truth_rows}
+            if len(parents) != 1 or None in parents:
                 _fail(
-                    f"data-pipeline effect reference for {episode_id} must preserve each "
-                    "positive pre-injection amount in private metadata"
+                    f"two-cause episode {episode_id} truths must share a non-null parent_scenario"
                 )
-            if truth["mechanism"] not in {
-                "amount_multiplier_100",
-                "amount_null_burst",
-            }:
-                _fail(f"data-pipeline truth has an unsupported mechanism for {episode_id}")
-        elif pre_injection_amounts is not None:
-            _fail(
-                f"non-pipeline effect reference for {episode_id} cannot carry pipeline amounts"
-            )
-        affected_rows: list[dict[str, Any]] = []
-        for offset in range(0, len(affected_ids), 500):
-            batch = affected_ids[offset : offset + 500]
-            placeholders = ", ".join("?" for _ in batch)
-            affected_rows.extend(
+            calendar_rows = [
                 dict(row)
                 for row in operational.execute(
-                    "SELECT txn_id, episode_id, event_at, available_at, amount "
-                    "FROM transactions "
+                    "SELECT business_date, expected_effect_json FROM business_calendar "
+                    "WHERE episode_id = ? ORDER BY business_date, calendar_event_id",
+                    (episode_id,),
+                )
+            ]
+            if len(calendar_rows) != 1:
+                _fail(
+                    f"two-cause episode {episode_id} must publish exactly the seasonal "
+                    "business-calendar component"
+                )
+            seasonal_truth = next(truth for truth in truth_rows if truth["cause"] == "seasonal")
+            seasonal_ids = effect_manifests[seasonal_truth["incident_truth_id"]][
+                "affected_transaction_ids"
+            ]
+            seasonal_placeholders = ", ".join("?" for _ in seasonal_ids)
+            seasonal_dates = {
+                datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+                .astimezone(timezone)
+                .date()
+                .isoformat()
+                for row in operational.execute(
+                    "SELECT event_at FROM transactions "
+                    f"WHERE txn_id IN ({seasonal_placeholders})",
+                    tuple(seasonal_ids),
+                )
+            }
+            try:
+                calendar_effect = json.loads(calendar_rows[0]["expected_effect_json"])
+                seasonal_change = calendar_effect["txn_count"]["relative_change"]
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                _fail(
+                    f"two-cause episode {episode_id} calendar does not declare the seasonal "
+                    f"txn_count effect: {exc}"
+                )
+            if (
+                len(seasonal_dates) != 1
+                or calendar_rows[0]["business_date"] not in seasonal_dates
+                or isinstance(seasonal_change, bool)
+                or not isinstance(seasonal_change, (int, float))
+                or seasonal_change <= 0
+            ):
+                _fail(
+                    f"two-cause episode {episode_id} calendar must declare only the "
+                    "positive seasonal txn_count component"
+                )
+        for truth in truth_rows:
+            expected = expected_contracts.get(truth["cause"])
+            if expected is None:
+                _fail(
+                    f"unsupported incident truth cause {truth['cause']!r} for {episode_id}"
+                )
+            effect_manifest = effect_manifests[truth["incident_truth_id"]]
+            if effect_manifest["episode_id"] != episode_id:
+                _fail(
+                    f"incident effect reference episode does not match incident truth for {episode_id}"
+                )
+            affected_ids = effect_manifest["affected_transaction_ids"]
+            pre_injection_amounts = effect_manifest.get(
+                "pre_injection_amount_by_txn_id"
+            )
+            is_pipeline = truth["cause"] == "data_pipeline"
+            if is_pipeline:
+                if (
+                    not isinstance(pre_injection_amounts, dict)
+                    or set(pre_injection_amounts) != set(affected_ids)
+                    or any(
+                        type(amount) is not int or amount <= 0
+                        for amount in pre_injection_amounts.values()
+                    )
+                ):
+                    _fail(
+                        f"data-pipeline effect reference for {episode_id} must preserve each "
+                        "positive pre-injection amount in private metadata"
+                    )
+            elif pre_injection_amounts is not None:
+                _fail(
+                    f"non-pipeline effect reference for {episode_id} cannot carry pipeline amounts"
+                )
+            if truth["mechanism"] not in expected["mechanisms"]:
+                _fail(
+                    f"incident truth mechanism does not match {truth['cause']!r} for {episode_id}"
+                )
+            affected_rows: list[dict[str, Any]] = []
+            for offset in range(0, len(affected_ids), 500):
+                batch = affected_ids[offset : offset + 500]
+                placeholders = ", ".join("?" for _ in batch)
+                affected_rows.extend(
+                    dict(row)
+                    for row in operational.execute(
+                        "SELECT txn_id, episode_id, event_at, available_at, amount "
+                        "FROM transactions "
+                        f"WHERE txn_id IN ({placeholders})",
+                        tuple(batch),
+                    )
+                )
+            actual_ids = {row["txn_id"] for row in affected_rows}
+            missing_ids = sorted(set(affected_ids) - actual_ids)
+            if missing_ids:
+                _fail(
+                    f"incident effect reference for {episode_id} points to missing operational "
+                    f"transactions: {missing_ids[:5]}"
+                )
+            if is_pipeline:
+                for row in affected_rows:
+                    original_amount = pre_injection_amounts[row["txn_id"]]
+                    expected_amount = (
+                        None
+                        if truth["mechanism"] == "amount_null_burst"
+                        else original_amount * 100
+                    )
+                    if row["amount"] != expected_amount:
+                        _fail(
+                            f"data-pipeline transaction {row['txn_id']} does not match its "
+                            "private pre-injection amount and mode"
+                        )
+            wrong_episode_ids = sorted(
+                row["txn_id"] for row in affected_rows if row["episode_id"] != episode_id
+            )
+            if wrong_episode_ids:
+                _fail(
+                    f"incident effect reference for {episode_id} points outside its episode: "
+                    f"{wrong_episode_ids[:5]}"
+                )
+            for row in affected_rows:
+                event_at = datetime.fromisoformat(row["event_at"].replace("Z", "+00:00"))
+                available_at = datetime.fromisoformat(row["available_at"].replace("Z", "+00:00"))
+                if not episode_start <= event_at < episode_end:
+                    _fail(
+                        f"incident affected transaction {row['txn_id']} event_at is outside "
+                        f"the episode future window for {episode_id}"
+                    )
+                if not episode_start <= available_at < episode_end:
+                    _fail(
+                        f"incident affected transaction {row['txn_id']} available_at is outside "
+                        f"the episode future window for {episode_id}"
+                    )
+            expected_effect_start = min(row["event_at"] for row in affected_rows)
+            expected_effect_available = min(row["available_at"] for row in affected_rows)
+            expected_effect_end = max(row["event_at"] for row in affected_rows)
+            if truth["effect_start_at"] != expected_effect_start:
+                _fail(
+                    f"incident truth effect_start_at does not match affected operational "
+                    f"transactions for {episode_id} (expected {expected_effect_start})"
+                )
+            if truth["effect_available_at"] != expected_effect_available:
+                _fail(
+                    f"incident truth effect_available_at does not match affected operational "
+                    f"transactions for {episode_id} (expected {expected_effect_available})"
+                )
+            if (
+                truth["effect_end_at"] is not None
+                and truth["effect_end_at"] != expected_effect_end
+            ):
+                _fail(
+                    f"incident truth effect_end_at does not match affected operational "
+                    f"transactions for {episode_id} (expected {expected_effect_end})"
+                )
+            if truth["requires_intervention"] != expected["requires_intervention"]:
+                _fail(
+                    f"incident truth requires_intervention does not match {truth['cause']!r} "
+                    f"for {episode_id}"
+                )
+            expected_rule_covered = expected["rule_covered"]
+            if truth["cause"] == "seasonal":
+                local_dates = {
+                    datetime.fromisoformat(row["event_at"].replace("Z", "+00:00"))
+                    .astimezone(timezone)
+                    .date()
+                    .isoformat()
+                    for row in affected_rows
+                }
+                if len(local_dates) != 1:
+                    _fail(f"seasonal truth for {episode_id} must affect exactly one business date")
+                date_placeholders = ", ".join("?" for _ in local_dates)
+                calendar_dates = {
+                    row[0]
+                    for row in operational.execute(
+                        "SELECT business_date FROM business_calendar "
+                        f"WHERE episode_id = ? AND business_date IN ({date_placeholders})",
+                        (episode_id, *sorted(local_dates)),
+                    )
+                }
+                expected_rule_covered = int(bool(calendar_dates))
+            if truth["rule_covered"] != expected_rule_covered:
+                _fail(
+                    f"incident truth rule_covered does not match {truth['cause']!r} for {episode_id}"
+                )
+            try:
+                actions = json.loads(truth["accepted_actions_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                _fail(f"incident truth accepted_actions_json is invalid for {episode_id}: {exc}")
+            if (
+                not isinstance(actions, list)
+                or any(not isinstance(action, str) for action in actions)
+                or len(actions) != len(set(actions))
+                or set(actions) != expected["accepted_actions"]
+            ):
+                _fail(f"incident truth accepted_actions do not match docs/data.md section 5 for {episode_id}")
+
+            time_fields = (
+                "effect_start_at",
+                "effect_available_at",
+                "intervention_start_at",
+                "deadline_at",
+            )
+            parsed_times: dict[str, datetime] = {}
+            for field in time_fields:
+                value = truth[field]
+                if utc_timestamp(value) != value:
+                    _fail(f"incident truth {field} must use fixed-width UTC for {episode_id}")
+                parsed_times[field] = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if not parsed_times["effect_start_at"] <= parsed_times["effect_available_at"]:
+                _fail(f"incident truth effect_start_at follows effect_available_at for {episode_id}")
+            if parsed_times["intervention_start_at"] != parsed_times["effect_available_at"]:
+                _fail(f"incident truth intervention_start_at must equal effect_available_at for {episode_id}")
+            if parsed_times["intervention_start_at"] > parsed_times["deadline_at"]:
+                _fail(f"incident truth intervention_start_at follows deadline_at for {episode_id}")
+            if parsed_times["deadline_at"] != (
+                parsed_times["intervention_start_at"]
+                + timedelta(days=MVP_INCIDENT_DEADLINE_DAYS)
+            ):
+                _fail(
+                    f"incident truth deadline_at must equal intervention_start_at + "
+                    f"{MVP_INCIDENT_DEADLINE_DAYS} days for {episode_id}"
+                )
+            effect_end = truth["effect_end_at"]
+            if effect_end is not None:
+                if utc_timestamp(effect_end) != effect_end:
+                    _fail(f"incident truth effect_end_at must use fixed-width UTC for {episode_id}")
+                if datetime.fromisoformat(effect_end.replace("Z", "+00:00")) < parsed_times["effect_start_at"]:
+                    _fail(f"incident truth effect_end_at precedes effect_start_at for {episode_id}")
+            verified_incidents += 1
+    _validate_parent_scenarios(truth_by_episode)
+    _validate_p16_fraud_groups(operational, private, truth_by_episode, effect_manifests)
+    return f"{verified_incidents} incident truth rows match locked templates and docs/data.md section 5"
+
+
+def _validate_parent_scenarios(
+    truth_by_episode: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Require parent components to be the supported overlapping pair in one episode."""
+    parents: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for episode_id, truth_rows in truth_by_episode.items():
+        for truth in truth_rows:
+            parent = truth.get("parent_scenario")
+            if parent is None:
+                continue
+            if not isinstance(parent, str) or not parent.strip():
+                _fail(
+                    f"incident truth {truth['incident_truth_id']} parent_scenario must be non-empty text"
+                )
+            parents.setdefault((episode_id, parent), []).append(truth)
+    for (episode_id, parent), members in parents.items():
+        if len(members) != 2:
+            _fail(
+                f"parent scenario {parent!r} in episode {episode_id} must contain exactly "
+                "two truth components"
+            )
+        causes = [truth["cause"] for truth in members]
+        if set(causes) != {"fraud_surge", "seasonal"}:
+            _fail(
+                f"parent scenario {parent!r} in episode {episode_id} must pair one fraud_surge "
+                "and one seasonal truth"
+            )
+        intervals: list[tuple[datetime, datetime]] = []
+        for truth in members:
+            try:
+                start = datetime.fromisoformat(truth["effect_start_at"].replace("Z", "+00:00"))
+                end_value = truth.get("effect_end_at") or truth["effect_start_at"]
+                end = datetime.fromisoformat(end_value.replace("Z", "+00:00"))
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                _fail(
+                    f"parent scenario {parent!r} in episode {episode_id} has invalid effect interval: {exc}"
+                )
+            if start.tzinfo is None or end.tzinfo is None or end < start:
+                _fail(
+                    f"parent scenario {parent!r} in episode {episode_id} has invalid effect interval"
+                )
+            intervals.append((start, end))
+        if max(interval[0] for interval in intervals) > min(interval[1] for interval in intervals):
+            _fail(
+                f"parent scenario {parent!r} in episode {episode_id} component effect windows must overlap"
+            )
+
+
+def _validate_p16_fraud_groups(
+    operational: sqlite3.Connection,
+    private: sqlite3.Connection,
+    truth_by_episode: dict[str, list[dict[str, Any]]],
+    effect_manifests: dict[str, dict[str, Any]],
+) -> None:
+    """Check P1.6-generated fraud labels against their private incident effects."""
+    truths_by_id = {
+        truth["incident_truth_id"]: truth
+        for rows in truth_by_episode.values()
+        for truth in rows
+    }
+    seen_transaction_ids: set[str] = set()
+    for row in private.execute(
+        "SELECT key, value_json FROM run_metadata "
+        "WHERE substr(key, 1, ?) = ?",
+        (len("p1.6.fraud_groups.v1:"), "p1.6.fraud_groups.v1:"),
+    ):
+        episode_id = row["key"].split(":", 1)[1]
+        try:
+            metadata = json.loads(row["value_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            _fail(f"P1.6 fraud group metadata for {episode_id!r} is invalid JSON: {exc}")
+        groups = metadata.get("groups") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("algorithm") != "p1.6-fraud-groups-v1"
+            or metadata.get("episode_id") != episode_id
+            or type(metadata.get("seed")) is not int
+            or not isinstance(groups, list)
+            or not groups
+        ):
+            _fail(f"P1.6 fraud group metadata for {episode_id!r} is malformed")
+        for group in groups:
+            if not isinstance(group, dict):
+                _fail(f"P1.6 fraud group for {episode_id!r} must be an object")
+            truth_id = group.get("incident_truth_id")
+            mechanism = group.get("mechanism")
+            transaction_ids = group.get("transaction_ids")
+            truth = truths_by_id.get(truth_id)
+            effect = effect_manifests.get(truth_id)
+            if (
+                group.get("role") != "fraud"
+                or not isinstance(truth_id, str)
+                or truth is None
+                or truth["episode_id"] != episode_id
+                or effect is None
+                or effect.get("episode_id") != episode_id
+                or not isinstance(transaction_ids, list)
+                or not transaction_ids
+                or any(not isinstance(item, str) or not item for item in transaction_ids)
+                or len(transaction_ids) != len(set(transaction_ids))
+                or set(transaction_ids) != set(effect.get("affected_transaction_ids", []))
+            ):
+                _fail(f"P1.6 fraud group does not match incident truth {truth_id!r}")
+            expected_truth_mechanism = {
+                "fraud_surge": "known_card_testing_surge",
+                "silent_concept_drift": "silent_concept_drift",
+                "sparse_new_merchant": "new_merchant_sparse_history",
+            }.get(mechanism)
+            if expected_truth_mechanism is None or truth["mechanism"] != expected_truth_mechanism:
+                _fail(f"P1.6 fraud group mechanism does not match incident truth {truth_id!r}")
+            if any(item in seen_transaction_ids for item in transaction_ids):
+                _fail(f"P1.6 fraud transaction appears in more than one fraud group: {truth_id!r}")
+            seen_transaction_ids.update(transaction_ids)
+            for offset in range(0, len(transaction_ids), 500):
+                batch = transaction_ids[offset : offset + 500]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = operational.execute(
+                    "SELECT txn_id, episode_id FROM transactions "
                     f"WHERE txn_id IN ({placeholders})",
                     tuple(batch),
-                )
-            )
-        actual_ids = {row["txn_id"] for row in affected_rows}
-        missing_ids = sorted(set(affected_ids) - actual_ids)
-        if missing_ids:
-            _fail(
-                f"incident effect reference for {episode_id} points to missing operational "
-                f"transactions: {missing_ids[:5]}"
-            )
-        if template == "data_pipeline":
-            for row in affected_rows:
-                original_amount = pre_injection_amounts[row["txn_id"]]
-                expected_amount = (
-                    None
-                    if truth["mechanism"] == "amount_null_burst"
-                    else original_amount * 100
-                )
-                if row["amount"] != expected_amount:
-                    _fail(
-                        f"data-pipeline transaction {row['txn_id']} does not match its "
-                        "private pre-injection amount and mode"
-                    )
-        wrong_episode_ids = sorted(
-            row["txn_id"] for row in affected_rows if row["episode_id"] != episode_id
-        )
-        if wrong_episode_ids:
-            _fail(
-                f"incident effect reference for {episode_id} points outside its episode: "
-                f"{wrong_episode_ids[:5]}"
-            )
-        for row in affected_rows:
-            event_at = datetime.fromisoformat(row["event_at"].replace("Z", "+00:00"))
-            available_at = datetime.fromisoformat(row["available_at"].replace("Z", "+00:00"))
-            if not episode_start <= event_at < episode_end:
-                _fail(
-                    f"incident affected transaction {row['txn_id']} event_at is outside "
-                    f"the episode future window for {episode_id}"
-                )
-            if not episode_start <= available_at < episode_end:
-                _fail(
-                    f"incident affected transaction {row['txn_id']} available_at is outside "
-                    f"the episode future window for {episode_id}"
-                )
-        expected_effect_start = min(row["event_at"] for row in affected_rows)
-        expected_effect_available = min(row["available_at"] for row in affected_rows)
-        expected_effect_end = max(row["event_at"] for row in affected_rows)
-        if truth["effect_start_at"] != expected_effect_start:
-            _fail(
-                f"incident truth effect_start_at does not match affected operational "
-                f"transactions for {episode_id} (expected {expected_effect_start})"
-            )
-        if truth["effect_available_at"] != expected_effect_available:
-            _fail(
-                f"incident truth effect_available_at does not match affected operational "
-                f"transactions for {episode_id} (expected {expected_effect_available})"
-            )
-        if (
-            truth["effect_end_at"] is not None
-            and truth["effect_end_at"] != expected_effect_end
-        ):
-            _fail(
-                f"incident truth effect_end_at does not match affected operational "
-                f"transactions for {episode_id} (expected {expected_effect_end})"
-            )
-        if truth["cause"] != expected["cause"]:
-            _fail(f"incident truth cause does not match {template!r} for {episode_id}")
-        if truth["requires_intervention"] != expected["requires_intervention"]:
-            _fail(f"incident truth requires_intervention does not match {template!r} for {episode_id}")
-        try:
-            actions = json.loads(truth["accepted_actions_json"])
-        except (TypeError, json.JSONDecodeError) as exc:
-            _fail(f"incident truth accepted_actions_json is invalid for {episode_id}: {exc}")
-        if (
-            not isinstance(actions, list)
-            or any(not isinstance(action, str) for action in actions)
-            or len(actions) != len(set(actions))
-            or set(actions) != expected["accepted_actions"]
-        ):
-            _fail(f"incident truth accepted_actions do not match docs/data.md section 5 for {episode_id}")
-
-        time_fields = (
-            "effect_start_at",
-            "effect_available_at",
-            "intervention_start_at",
-            "deadline_at",
-        )
-        parsed_times: dict[str, datetime] = {}
-        for field in time_fields:
-            value = truth[field]
-            if utc_timestamp(value) != value:
-                _fail(f"incident truth {field} must use fixed-width UTC for {episode_id}")
-            parsed_times[field] = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if not parsed_times["effect_start_at"] <= parsed_times["effect_available_at"]:
-            _fail(f"incident truth effect_start_at follows effect_available_at for {episode_id}")
-        if parsed_times["intervention_start_at"] != parsed_times["effect_available_at"]:
-            _fail(f"incident truth intervention_start_at must equal effect_available_at for {episode_id}")
-        if parsed_times["intervention_start_at"] > parsed_times["deadline_at"]:
-            _fail(f"incident truth intervention_start_at follows deadline_at for {episode_id}")
-        if parsed_times["deadline_at"] != (
-            parsed_times["intervention_start_at"]
-            + timedelta(days=MVP_INCIDENT_DEADLINE_DAYS)
-        ):
-            _fail(
-                f"incident truth deadline_at must equal intervention_start_at + "
-                f"{MVP_INCIDENT_DEADLINE_DAYS} days for {episode_id}"
-            )
-        effect_end = truth["effect_end_at"]
-        if effect_end is not None:
-            if utc_timestamp(effect_end) != effect_end:
-                _fail(f"incident truth effect_end_at must use fixed-width UTC for {episode_id}")
-            if datetime.fromisoformat(effect_end.replace("Z", "+00:00")) < parsed_times["effect_start_at"]:
-                _fail(f"incident truth effect_end_at precedes effect_start_at for {episode_id}")
-        if truth["parent_scenario"] is not None:
-            _fail(f"round-one smoke truth must not have a parent scenario for {episode_id}")
-        verified_incidents += 1
-    return f"{verified_incidents} incident truth rows match locked templates and docs/data.md section 5"
+                ).fetchall()
+                if {item["txn_id"] for item in rows} != set(batch) or any(
+                    item["episode_id"] != episode_id for item in rows
+                ):
+                    _fail(f"P1.6 fraud group references missing or cross-episode rows: {truth_id!r}")
 
 
 def _pipeline_effect_amounts(
@@ -1563,6 +1857,22 @@ def _validate_private_label_truth(
             f"(missing={len(set(transactions) - set(all_outcomes))}, "
             f"extra={len(set(all_outcomes) - set(transactions))})"
         )
+    for metadata_row in private.execute(
+        "SELECT key, value_json FROM run_metadata "
+        "WHERE substr(key, 1, ?) = ?",
+        (len("p1.6.fraud_groups.v1:"), "p1.6.fraud_groups.v1:"),
+    ):
+        try:
+            p16_metadata = json.loads(metadata_row["value_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            _fail(f"P1.6 fraud label metadata is invalid JSON: {exc}")
+        for group in p16_metadata.get("groups", []) if isinstance(p16_metadata, dict) else []:
+            transaction_ids = group.get("transaction_ids", []) if isinstance(group, dict) else []
+            if any(
+                txn_id not in all_outcomes or all_outcomes[txn_id].get("true_label") != "fraud"
+                for txn_id in transaction_ids
+            ):
+                _fail("P1.6 generated fraud group does not have fraud labels in private P1.5 truth")
     labels = {
         row["txn_id"]: dict(row) for row in operational.execute("SELECT * FROM label_events")
     }
@@ -1728,13 +2038,24 @@ def _validate_p14_mechanism_chains(
             if not isinstance(group, dict) or group.get("role") not in {"fraud", "benign_control"}:
                 _fail(f"P1.4 mechanism group has no private role for {episode_id}")
             mechanism = group.get("mechanism")
-            if mechanism not in {"ato", "collusion", "social_engineering", "legit_business_spike"}:
+            if mechanism not in {
+                "ato",
+                "collusion",
+                "social_engineering",
+                "legit_business_spike",
+                "household_business_activity",
+            }:
                 _fail(f"P1.4 mechanism group has an unsupported type for {episode_id}")
-            expected_role = "benign_control" if mechanism == "legit_business_spike" else "fraud"
+            business_mechanisms = {"legit_business_spike", "household_business_activity"}
+            expected_role = "benign_control" if mechanism in business_mechanisms else "fraud"
             if group["role"] != expected_role:
                 _fail(f"P1.4 {mechanism} group has an inconsistent private role")
             if mechanism == "collusion" and episode_id != "base":
                 _fail("P1.4 collusion must remain in shared pre-drift history")
+            if mechanism in {"social_engineering", "legit_business_spike"} and episode_id == "base":
+                _fail(f"P1.4 {mechanism} must be generated only by its P1.6 template injector")
+            if mechanism == "household_business_activity" and episode_id != "base":
+                _fail("P1.4 ordinary household-business activity must remain in base history")
             txn_ids = [
                 txn_id
                 for field in ("transaction_ids", "incoming_transaction_ids", "outgoing_transaction_ids")
@@ -1753,7 +2074,7 @@ def _validate_p14_mechanism_chains(
                 ).astimezone(UTC) >= drift_start:
                     _fail("P1.4 collusion transaction is on or after the drift point")
                 amount = pre_injection_amounts.get(txn_id, transaction["amount"])
-                if mechanism == "legit_business_spike":
+                if mechanism in business_mechanisms:
                     amount_in_range = type(amount) is int and control_min <= amount <= control_max
                 else:
                     amount_in_range = type(amount) is int and near_min <= amount <= near_max
@@ -1875,7 +2196,7 @@ def _validate_p14_mechanism_chains(
                             "P1.4 social-engineering mule lacks the configured as-of history "
                             "before receipt"
                         )
-            if mechanism == "legit_business_spike":
+            if mechanism in business_mechanisms:
                 recipient_id = group.get("recipient_customer_id")
                 control_rows = [group_rows[item] for item in group.get("transaction_ids", [])]
                 expected_senders = group.get("sender_customer_ids")
@@ -2105,6 +2426,13 @@ def validate_run(run_dir: str | Path) -> dict[str, Any]:
         _evaluate(checks, "as_of_reader_selection", lambda: _validate_asof(operational))
         if private is not None:
             _evaluate(checks, "episode_manifest_and_fingerprints", lambda: _validate_episode_manifest(operational, private, _load_run_metadata(private)))
+            _evaluate(
+                checks,
+                "transaction_event_episode_window",
+                lambda: _validate_transaction_event_episode_window(
+                    operational, _load_run_metadata(private)
+                ),
+            )
             _evaluate(checks, "incident_truth_contract", lambda: _validate_incident_truth(operational, private, _load_run_metadata(private)))
             _evaluate(checks, "operational_identifier_shape_contract", lambda: _validate_operational_identifier_shapes(operational, private))
             _evaluate(checks, "legitimate_new_account_control", lambda: _validate_legitimate_new_account_control(operational, private))

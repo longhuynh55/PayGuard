@@ -303,7 +303,7 @@ fraud:
     start_hour_local:
       value: 9
       unit: local wall-clock hour in Asia/Ho_Chi_Minh
-      rationale: Fixed synthetic start time for the card-testing attempt window.
+      rationale: Anchor hour for background and injected card-testing timing jitter.
       provenance:
         kind: assumption
         reference: P1.4 simulator schedule assumption; no time-of-day estimate is claimed.
@@ -373,7 +373,7 @@ fraud:
     followup_delay_seconds:
       value: 60
       unit: seconds after the attempt window
-      rationale: Leaves a short observable gap between the dense small attempts and the larger follow-up.
+      rationale: Anchor delay for the jittered larger follow-up after the dense small attempts.
       provenance:
         kind: assumption
         reference: P1.4 simulator mechanism assumption; no behavioral estimate is claimed.
@@ -555,6 +555,57 @@ fraud:
       provenance:
         kind: assumption
         reference: P1.4 benign control assumption; no business amount distribution is claimed.
+
+  timing_jitter:
+    maximum_minute_offset:
+      value: 59
+      unit: minutes within the scheduled local start hour
+      rationale: Spread generated ATO, collusion, social-engineering, business-control, and card-testing transaction starts across the configured hour.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical time-of-day estimate.
+    maximum_second_offset:
+      value: 59
+      unit: seconds within the generated minute
+      rationale: Avoid fixed second-zero timestamps for generated incident transactions.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical time-of-day estimate.
+    cashout_delay_jitter_minutes:
+      value: 5
+      unit: absolute minutes around the configured cash-out delay
+      rationale: Vary each paired cash-out delay while keeping it after settlement and within the mule capability window.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical latency estimate.
+    mule_creation_jitter_minutes:
+      value: 59
+      unit: additional minutes before the configured mule history window
+      rationale: Avoid a fixed mule-creation clock time while preserving at least the full configured seven-day history.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two generator-timing artifact reduction; not an empirical account-creation estimate.
+    card_testing_start_hour_jitter:
+      value: 3
+      unit: hours either side of the scheduled local start hour
+      rationale: Give background and injected card-testing campaigns the same spread of local start hours.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two review fix F3; not an empirical time-of-day estimate.
+    card_testing_spacing_jitter_seconds:
+      value: 5
+      unit: seconds either side of the configured attempt spacing
+      rationale: Vary each interval while keeping all small attempts inside the configured card-testing window.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two review fix F3; not an empirical attempt-spacing estimate.
+    card_testing_followup_jitter_seconds:
+      value: 45
+      unit: seconds either side of the configured post-window delay
+      rationale: Vary the larger follow-up time for background and injected card-testing campaigns.
+      provenance:
+        kind: assumption
+        reference: P1.6 round-two review fix F3; not an empirical follow-up estimate.
 
 label_reporting:
   maturity_horizon_days:

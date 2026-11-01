@@ -621,11 +621,11 @@ def p37_smoke_match_context(
         for episode_id, result in alert_results.items()
     }
     print(f"P3.7 smoke alert counts: {alert_counts}")
-    # P1.4 adds episode-level ATO and recipient cash-out rows; these are the
-    # resulting smoke counts with the clean development episode left unchanged.
+    # P1.6 F1 removes SE/business-spike rows from base and nonmatching templates;
+    # monitoring config is unchanged and the clean development episode stays at zero.
     assert alert_counts == {
         "ep-0001": 0,
-        "ep-0002": 7,
+        "ep-0002": 3,
         "ep-0003": 1,
         "ep-0004": 21,
         "ep-0005": 0,
@@ -642,7 +642,7 @@ def p37_smoke_match_context(
     print(f"P3.7 smoke incident counts: {incident_counts}")
     assert incident_counts == {
         "ep-0001": 0,
-        "ep-0002": 1,
+        "ep-0002": 2,
         "ep-0003": 1,
         "ep-0004": 2,
         "ep-0005": 0,
@@ -720,9 +720,9 @@ def p37_smoke_match_context(
     assert detection_recall["denominator"] == 2
     assert detection_recall["recall"] == 1.0
     incident_counts = evaluation_result.report["incident_counts"]
-    # P1.4 leaves one consolidated pipeline incident per affected episode;
-    # seasonal alerts still do not match the locked amount feature contract.
-    assert incident_counts["matched"] == 2
+    # F1's reduced ep-0002 effect scope yields one additional matching amount
+    # incident; recall still counts the two distinct pipeline truths exactly once.
+    assert incident_counts["matched"] == 3
     assert incident_counts["ambiguous"] == 0
     assert incident_counts["benign_matched"] == 0
     assert incident_counts["unmatched"] == 2
