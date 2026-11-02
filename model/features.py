@@ -10,6 +10,7 @@ import sqlite3
 
 from model.data import ModelExample, ModelSplits
 from simulator.asof import read_as_of
+from simulator.storage import utc_timestamp
 
 
 FeatureValue: TypeAlias = int | float | None
@@ -136,16 +137,67 @@ def _create_source_tables(
         )
         """
     )
-    if transactions:
-        connection.executemany(
-            "INSERT INTO source_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [_selected_columns(row, _TRANSACTION_COLUMNS) for row in transactions],
-        )
-    if customers:
-        connection.executemany(
-            "INSERT INTO source_customers VALUES (?, ?, ?, ?)",
-            [_selected_columns(row, _CUSTOMER_COLUMNS) for row in customers],
-        )
+    _bulk_insert(
+        connection,
+        "source_transactions",
+        _SOURCE_TRANSACTION_TYPES,
+        [_selected_columns(row, _TRANSACTION_COLUMNS) for row in transactions],
+    )
+    _bulk_insert(
+        connection,
+        "source_customers",
+        _SOURCE_CUSTOMER_TYPES,
+        [_selected_columns(row, _CUSTOMER_COLUMNS) for row in customers],
+    )
+
+
+_SOURCE_TRANSACTION_TYPES = (
+    ("txn_id", "VARCHAR"),
+    ("episode_id", "VARCHAR"),
+    ("customer_id", "VARCHAR"),
+    ("device_id", "VARCHAR"),
+    ("card_token", "VARCHAR"),
+    ("created_at", "TIMESTAMPTZ"),
+    ("available_at", "TIMESTAMPTZ"),
+    ("amount", "BIGINT"),
+)
+_SOURCE_CUSTOMER_TYPES = (
+    ("customer_id", "VARCHAR"),
+    ("episode_id", "VARCHAR"),
+    ("event_at", "TIMESTAMPTZ"),
+    ("available_at", "TIMESTAMPTZ"),
+)
+_FEATURE_EXAMPLE_TYPES = (
+    ("position", "BIGINT"),
+    ("txn_id", "VARCHAR"),
+    ("transaction_episode_id", "VARCHAR"),
+    ("episode_id", "VARCHAR"),
+    ("created_at", "TIMESTAMPTZ"),
+)
+
+
+def _bulk_insert(
+    connection: duckdb.DuckDBPyConnection,
+    table: str,
+    column_types: tuple[tuple[str, str], ...],
+    rows: list[tuple[object, ...]],
+) -> None:
+    """Insert rows with one typed array bind per column.
+
+    ``executemany`` costs one client round trip per row (about 45 s for 43k
+    rows); a single ``unnest`` insert binds each column once. Values are bound
+    as VARCHAR/BIGINT and cast in SQL, which yields the same typed values.
+    """
+    if not rows:
+        return
+    names = ", ".join(name for name, _ in column_types)
+    selects = ", ".join(
+        f"CAST(unnest(CAST(? AS {'BIGINT' if sql_type == 'BIGINT' else 'VARCHAR'}[])) "
+        f"AS {sql_type})"
+        for _, sql_type in column_types
+    )
+    params = [list(column) for column in zip(*rows, strict=True)]
+    connection.execute(f"INSERT INTO {table} ({names}) SELECT {selects}", params)
 
 
 _FEATURE_QUERY = f"""
@@ -303,8 +355,10 @@ def build_feature_splits(
             """
         )
         if all_examples:
-            connection.executemany(
-                "INSERT INTO feature_examples VALUES (?, ?, ?, ?, ?)",
+            _bulk_insert(
+                connection,
+                "feature_examples",
+                _FEATURE_EXAMPLE_TYPES,
                 [
                     (
                         index,
@@ -401,22 +455,28 @@ def build_score_feature_matrix(
     for example in examples:
         by_decision.setdefault(example.event_at, []).append(example)
 
+    # Rows visible at any decision are a subset of rows visible at the latest
+    # decision (``available_at <= as_of`` is monotone and the episode/base scope
+    # is identical), so one as-of read at the latest decision time yields the
+    # same row set as the union of per-decision snapshots. The SQL below still
+    # applies each example's own ``available_at <= created_at`` bound.
     snapshot_transactions: dict[str, dict[str, object]] = {}
     snapshot_customers: dict[str, dict[str, object]] = {}
-    for decision_at in by_decision:
+    if by_decision:
+        latest_decision_at = max(by_decision, key=utc_timestamp)
         transactions_as_of = read_as_of(
             operational,
             "transactions",
             episode_id=episode_id,
             t0=t0,
-            as_of_time=decision_at,
+            as_of_time=latest_decision_at,
         )
         customers_as_of = read_as_of(
             operational,
             "customers",
             episode_id=episode_id,
             t0=t0,
-            as_of_time=decision_at,
+            as_of_time=latest_decision_at,
         )
         _merge_as_of_rows(snapshot_transactions, transactions_as_of, "txn_id")
         _merge_as_of_rows(snapshot_customers, customers_as_of, "customer_id")
@@ -442,8 +502,10 @@ def build_score_feature_matrix(
             """
         )
         if all_examples:
-            connection.executemany(
-                "INSERT INTO feature_examples VALUES (?, ?, ?, ?, ?)",
+            _bulk_insert(
+                connection,
+                "feature_examples",
+                _FEATURE_EXAMPLE_TYPES,
                 [
                     (
                         index,
