@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -14,6 +15,7 @@ from model.features import FEATURE_LOOKBACK_DAYS
 from evaluation.matcher import (
     EvaluationMatcherError,
     PrivateEvaluationData,
+    assert_operational_roles_match_private_manifest,
     load_private_evaluation_data,
     match_incidents,
     normalize_as_of_time,
@@ -441,6 +443,43 @@ def _build_report(
     }
 
 
+def _truth_report_path(
+    report_path: str | Path | None,
+    *,
+    private_db_path: Path,
+    input_paths: Iterable[Path],
+) -> Path:
+    """Resolve where a truth-derived report may be written.
+
+    A report stays under the run's private reports directory (the ``reports/``
+    beside the private evaluator DB) and may never be an input artifact, including
+    through a hard link or a symlink. Replacing an earlier report is allowed.
+    """
+    reports_dir = (private_db_path.parent / "reports").resolve()
+    output_path = (
+        Path(report_path).expanduser().resolve()
+        if report_path is not None
+        else reports_dir / "p4_5_decisions.json"
+    )
+    try:
+        output_path.relative_to(reports_dir)
+    except ValueError as exc:
+        raise DecisionEvaluationError(
+            "truth reports must be written under the run's private reports directory "
+            f"{reports_dir}, not {output_path}"
+        ) from exc
+    for input_path in input_paths:
+        if (
+            output_path.exists()
+            and input_path.exists()
+            and os.path.samefile(output_path, input_path)
+        ):
+            raise DecisionEvaluationError(
+                f"refusing to overwrite input artifact {input_path}"
+            )
+    return output_path
+
+
 def evaluate_decisions(
     decisions: Iterable[Mapping[str, Any]],
     *,
@@ -457,6 +496,10 @@ def evaluate_decisions(
     span several agent (policy_version, model_slug) pairs are refused unless the
     selector names exactly one of them.
     """
+    private_path = Path(private_db_path).expanduser().resolve()
+    output_path = _truth_report_path(
+        report_path, private_db_path=private_path, input_paths=(private_path,)
+    )
     context = load_private_evaluation_data(
         private_db_path,
         episode_ids=episode_ids,
@@ -480,13 +523,6 @@ def evaluate_decisions(
         metric_window_days=context.metric_window_days,
     )
 
-    output_path = (
-        Path(report_path).expanduser().resolve()
-        if report_path is not None
-        else Path(private_db_path).expanduser().resolve().parent
-        / "reports"
-        / "p4_5_decisions.json"
-    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
@@ -521,6 +557,11 @@ def evaluate_operational_decisions(
         raise DecisionEvaluationError(
             f"operational database does not exist: {operational_path}"
         )
+    output_path = _truth_report_path(
+        report_path,
+        private_db_path=private_path,
+        input_paths=(operational_path, private_path),
+    )
 
     connection = sqlite3.connect(f"{operational_path.as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -540,12 +581,15 @@ def evaluate_operational_decisions(
             raise DecisionEvaluationError(
                 "operational database contains private evaluator tables"
             )
-        all_episode_ids = tuple(
-            str(row[0])
+        operational_role_rows = tuple(
+            (str(row[0]), str(row[1]))
             for row in connection.execute(
-                "SELECT episode_id FROM episodes WHERE episode_id <> 'base' ORDER BY episode_id"
+                "SELECT episode_id, role FROM episodes "
+                "WHERE episode_id <> 'base' ORDER BY episode_id"
             )
         )
+        all_episode_ids = tuple(episode_id for episode_id, _ in operational_role_rows)
+        operational_roles = dict(operational_role_rows)
         if not all_episode_ids:
             raise DecisionEvaluationError(
                 "operational database has no registered non-base episodes"
@@ -587,11 +631,15 @@ def evaluate_operational_decisions(
     finally:
         connection.close()
 
+    assert_operational_roles_match_private_manifest(
+        private_path,
+        {episode_id: operational_roles[episode_id] for episode_id in selected_episode_ids},
+    )
     return evaluate_decisions(
         decisions,
         private_db_path=private_path,
         episode_ids=selected_episode_ids,
         policy_version=policy_version,
         model_slug=model_slug,
-        report_path=report_path,
+        report_path=output_path,
     )

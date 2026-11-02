@@ -269,7 +269,9 @@ def compute_alerts(
 ) -> SignalResult:
     """Create PSI alerts from one episode's P3.1 rows through a requested cutoff.
 
-    Future snapshots are ignored; rows for another episode are rejected so a
+    Future snapshots are ignored. A row whose available_at differs from its
+    as_of_time is refused: a snapshot is readable only at its own cutoff, so a
+    late row must not produce an alert. Rows for another episode are rejected so a
     caller cannot accidentally mix parallel episode timelines.
     """
     if not isinstance(episode_id, str) or not episode_id.strip() or episode_id == "base":
@@ -295,12 +297,23 @@ def compute_alerts(
         metric_as_of = _parse_as_of(
             source_row["as_of_time"], field=f"daily_metrics[{index}].as_of_time"
         )
+        if "available_at" not in source_row:
+            raise MonitoringSignalsError(f"daily_metrics row {index} is missing available_at")
+        metric_available_at = _parse_as_of(
+            source_row["available_at"], field=f"daily_metrics[{index}].available_at"
+        )
+        if metric_available_at != metric_as_of:
+            raise MonitoringSignalsError(
+                f"daily_metrics row {index} available_at {metric_available_at} must equal its "
+                f"as_of_time {metric_as_of}: a snapshot is readable only at its own cutoff"
+            )
         if metric_as_of > cutoff:
             future_count += 1
             continue
         row = _validate_metric_row(source_row, index, episode_id=episode_id)
         normalized_row = dict(row)
         normalized_row["as_of_time"] = metric_as_of
+        normalized_row["available_at"] = metric_available_at
         row_key = (
             metric_as_of,
             normalized_row["metric_id"],
@@ -415,7 +428,7 @@ def compute_alerts(
             "reference": row["reference_window"],
             "threshold": threshold,
             "event_at": row["as_of_time"],
-            "available_at": row["as_of_time"],
+            "available_at": row["available_at"],
         }
         alert["alert_id"] = _alert_id(row)
         alerts.append(alert)

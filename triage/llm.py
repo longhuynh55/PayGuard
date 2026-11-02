@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 import urllib.error
@@ -320,22 +321,18 @@ class LLMClient:
                         response_record = self._record_from_response(
                             response, cache_key, started
                         )
-                        usage = response.get("usage")
-                        has_metered_usage = isinstance(usage, Mapping) and any(
-                            key in usage
-                            for key in (
-                                "prompt_tokens",
-                                "completion_tokens",
-                                "cost",
-                            )
-                        )
-                        settled_amount = (
-                            response_record.cost_usd if has_metered_usage else reserved_amount
-                        )
-                        conservative = not has_metered_usage
+                        measured_usd, unmeasured_reason = self._measured_usd(response)
                     else:
+                        measured_usd, unmeasured_reason = None, "response_not_object"
+                    if measured_usd is None:
                         settled_amount = reserved_amount
                         conservative = True
+                    else:
+                        settled_amount = Decimal(str(measured_usd))
+                        conservative = False
+                        unmeasured_reason = None
+                    if response_record is not None:
+                        response_record = replace(response_record, cost_usd=float(settled_amount))
                     if reservation_id is not None:
                         self._cost_ledger.settle(
                             reservation_id,
@@ -343,6 +340,7 @@ class LLMClient:
                             model_slug=self.config.canonical_slug,
                             policy=self._ledger_policy,
                             conservative=conservative,
+                            conservative_reason=unmeasured_reason,
                         )
                 request_failure = None
                 break
@@ -354,6 +352,7 @@ class LLMClient:
                         model_slug=self.config.canonical_slug,
                         policy=self._ledger_policy,
                         conservative=True,
+                        conservative_reason="request_failed",
                     )
                 request_failure = exc
                 if not exc.retryable or attempt >= self.config.retry_count:
@@ -368,6 +367,7 @@ class LLMClient:
                         model_slug=self.config.canonical_slug,
                         policy=self._ledger_policy,
                         conservative=True,
+                        conservative_reason="transport_error",
                     )
                 request_failure = _RequestFailure("transport_error", "OpenRouter request failed.")
                 break
@@ -390,7 +390,7 @@ class LLMClient:
         model = _optional_text(response.get("model"))
         provider = _optional_text(response.get("provider"))
         if response.get("error") is not None:
-            record = self._record_from_response(response, cache_key, started)
+            record = response_record or self._record_from_response(response, cache_key, started)
             self._spent_cost_usd += record.cost_usd
             if self._spent_cost_usd > self.config.max_total_cost_usd:
                 return LLMResult(
@@ -400,7 +400,7 @@ class LLMClient:
             return LLMResult(record, error=LLMError("provider_error", "OpenRouter rejected the request."))
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
-            record = self._record_from_response(response, cache_key, started)
+            record = response_record or self._record_from_response(response, cache_key, started)
             self._spent_cost_usd += record.cost_usd
             if self._spent_cost_usd > self.config.max_total_cost_usd:
                 return LLMResult(
@@ -444,6 +444,29 @@ class LLMClient:
         output_cost = Decimal(self.config.max_tokens) * output_rate / Decimal(1_000_000)
         return input_cost + output_cost
 
+    def _measured_usd(self, response: Mapping[str, Any]) -> tuple[float | None, str | None]:
+        """Return the USD amount a response measured, or ``(None, reason)`` when it did not.
+
+        A valid cost (a finite JSON number >= 0) is the measurement. Without one, both
+        token counters must be valid non-negative integers and the cost is derived from
+        the configured rates. Anything else is unmeasured and must settle conservatively.
+        """
+        usage = response.get("usage")
+        if not isinstance(usage, Mapping):
+            return None, "usage_missing"
+        cost = _strict_finite_nonnegative_float(usage.get("cost"))
+        if cost is not None:
+            return cost, None
+        prompt_tokens = _strict_nonnegative_int(usage.get("prompt_tokens"))
+        completion_tokens = _strict_nonnegative_int(usage.get("completion_tokens"))
+        if prompt_tokens is not None and completion_tokens is not None:
+            token_cost = (
+                prompt_tokens * self.config.input_usd_per_million
+                + completion_tokens * self.config.output_usd_per_million
+            ) / 1_000_000
+            return token_cost, None
+        return None, ("cost_invalid" if "cost" in usage else "token_usage_incomplete")
+
     def _cache_key(
         self, prompt: str, *, episode_id: str, as_of_time: str, data_snapshot: str
     ) -> str:
@@ -482,13 +505,8 @@ class LLMClient:
         reasoning_tokens = _nonnegative_int(
             details.get("reasoning_tokens", usage.get("reasoning_tokens"))
         )
-        raw_cost = usage.get("cost")
-        cost_usd = _finite_nonnegative_float(raw_cost)
-        if cost_usd is None:
-            cost_usd = (
-                prompt_tokens * self.config.input_usd_per_million
-                + completion_tokens * self.config.output_usd_per_million
-            ) / 1_000_000
+        measured_usd, _ = self._measured_usd(response)
+        cost_usd = 0.0 if measured_usd is None else measured_usd
         if getattr(self, "_fake_cost_free", False) and self._cost_ledger is not None:
             cost_usd = 0.0
         return LLMCallRecord(
@@ -624,11 +642,16 @@ def _nonnegative_int(value: Any) -> int:
     return max(0, result)
 
 
-def _finite_nonnegative_float(value: Any) -> float | None:
-    try:
-        result = float(value)
-    except (TypeError, ValueError, OverflowError):
+def _strict_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
-    if result < 0 or result == float("inf") or result != result:
+    return value
+
+
+def _strict_finite_nonnegative_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
         return None
     return result

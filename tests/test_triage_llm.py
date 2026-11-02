@@ -4,8 +4,11 @@ import io
 import json
 import urllib.error
 from dataclasses import replace
+from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
+from triage.cost_ledger import DurableCostLedger
 from triage.llm import FakeLLMClient, LLMClient, load_llm_config, resolve_openrouter_api_key
 
 
@@ -32,6 +35,69 @@ def _call(client: LLMClient):
         as_of_time="2026-02-02T00:00:00Z",
         data_snapshot="snapshot-digest",
     )
+
+
+def _ledger_events(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _response_with_usage(usage: dict) -> dict:
+    return {
+        "model": "qwen/qwen3.7-flash-20260727",
+        "provider": "Alibaba",
+        "choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}],
+        "usage": usage,
+    }
+
+
+def test_settlement_uses_only_measured_usage_and_marks_the_rest_conservative(
+    tmp_path: Path,
+) -> None:
+    """A2: settle at a valid cost or two valid token counters; any other usage keeps the reservation."""
+    unmeasured = {
+        "cost_wrong_type_completion_missing": {"cost": "0.02", "prompt_tokens": 56},
+        "cost_negative_completion_missing": {"cost": -0.5, "prompt_tokens": 56},
+        "cost_nan_completion_missing": {"cost": float("nan"), "completion_tokens": 34},
+        "prompt_tokens_only": {"prompt_tokens": 56},
+    }
+    for case, usage in unmeasured.items():
+        ledger_path = tmp_path / f"{case}.jsonl"
+        ledger = DurableCostLedger(ledger_path, cap_usd="10.00")
+        client = LLMClient(
+            transport=lambda _payload, _timeout, usage=usage: _response_with_usage(usage),
+            cost_ledger=ledger,
+        )
+        assert _call(client).ok, case
+        events = _ledger_events(ledger_path)
+        reserve = next(event for event in events if event["event"] == "reserve")
+        settle = next(event for event in events if event["event"] == "settle")
+        assert settle["amount_usd"] == reserve["amount_usd"], case
+        assert settle["conservative"] is True, case
+        assert settle["conservative_reason"], case
+        assert ledger.snapshot()["spent_usd"] == reserve["amount_usd"], case
+
+    measured = {
+        "valid_cost_completion_missing": {"cost": 0.02, "prompt_tokens": 56},
+        "negative_cost_both_token_counts_valid": {
+            "cost": -1,
+            "prompt_tokens": 56,
+            "completion_tokens": 34,
+        },
+    }
+    for case, usage in measured.items():
+        ledger_path = tmp_path / f"measured-{case}.jsonl"
+        ledger = DurableCostLedger(ledger_path, cap_usd="10.00")
+        client = LLMClient(
+            transport=lambda _payload, _timeout, usage=usage: _response_with_usage(usage),
+            cost_ledger=ledger,
+        )
+        assert _call(client).ok, case
+        settle = next(event for event in _ledger_events(ledger_path) if event["event"] == "settle")
+        assert settle["conservative"] is False, case
+        assert settle["conservative_reason"] is None, case
+        assert ledger.snapshot()["spent_usd"] == settle["amount_usd"], case
+        if case == "valid_cost_completion_missing":
+            assert Decimal(settle["amount_usd"]) == Decimal("0.02")
 
 
 def test_fake_client_is_offline_and_records_usage_and_cache_key(monkeypatch) -> None:
