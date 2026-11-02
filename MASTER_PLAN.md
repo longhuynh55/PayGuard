@@ -118,6 +118,7 @@ Simulator sinh dữ liệu gần như miễn phí; giới hạn thật của s�
 
 | Ngày | Quyết định |
 |---|---|
+| 02/11/2026 | Người dùng duyệt sau audit Codex Terra (3 lượt, chỉ đọc): AUDIT-FIX-1 (A1–A3, B2) merge; PERF-TRIAGE (C1 snapshot `run_sql` toàn BLOB đổi affinity + O4/O6/C3) làm ngay; PERF-STORAGE, DORMANT-FIX, CLEANUP-1 sau HARNESS-PILOT; B9 hoãn. P6 thêm orchestration (Prefect/Dagster bọc harness) + LLM tracing. Repo GitHub chuyển public, gỡ `archive/`, `review/findings/`, `scripts/review_task.sh` khỏi cây; findings lưu ngoài repo; tắt supervisor |
 | 01/11/2026 | P1.7 fix 2 xong: F1′ đạt (SQL as-of trên `ep-0011` ra 11 giao dịch ⊋ truth 10; 60/60 episode có 3 customer sau T0, 0 timestamp trùng) → người dùng duyệt cập nhật kỳ vọng smoke `ep-0004` 21 → 22 alert (gate giữ nguyên) → merge P1.7 |
 | 01/11/2026 | P1.7 vòng 2 hết 2 vòng review (r2: F1′ chặn — control N7 không giao dịch trước deadline `new_fraud` nên SQL giao dịch của customer sau T0 as-of vẫn ra đúng truth; số customer sau T0/timestamp trùng tách được episode `new_fraud`) → người dùng chốt: fix 2 ngắn (F1′ + N8 + N9) rồi merge **không review lại** (r2) |
 | 01/11/2026 | Review P1.7 vòng 2 r1 (CHANGES_REQUIRED: F1 control N7 tạo cùng thời điểm, sau deadline nên SQL vẫn tách được mule `new_fraud`; F2 config N7 thiếu trong fingerprint) → người dùng chốt (N5): N7 áp cho **mọi episode, kể cả clean**, để truy vấn customer tạo sau T0 không tách được clean khỏi injected; gate smoke giữ nguyên (findings) |
