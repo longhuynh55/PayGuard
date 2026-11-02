@@ -91,6 +91,7 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
   - **Kiểm chứng:** `--analysis-role calibration` và `test` không có lock → exit 2, "required lock marker is missing" (chạy trên root đã có BASE). `triage measure --agent-provider fake` trên BASE copy (có `generation-manifest.json` profile pilot): `--incidents 3` bị từ chối: bản sao pilot chỉ có **< 3 ca development đủ điều kiện agent** nên fallback sang calibration, guard từ chối; `--incidents 1` hoàn tất, episode được chọn có role `development`. Báo cáo ghi `cost_cap_usd: 1.0` — đúng theo thiết kế: cap tạm P4 vòng 1 (MASTER §5), không đổi.
   - **Kiểm tra cuối:** full suite `uv run pytest` **451 passed, 1 xfailed** (505 s); `simulator generate/validate --profile smoke` (21/21), `review/verify_plan_claims.py` OK, `review/check_links.py` 0 link hỏng.
 
+- **Trạng thái:** ✅ merge 03/11/2026 (review Opus r1 PASS: phản ví dụ as-of trên DB smoke đột biến — 607 giao dịch, 14 customer, 263 score, lịch đến muộn — feature + daily metrics code cũ = mới; pilot `ep-0001` 122 target cũ = mới, 113,7 s → 1,7 s; full suite 461 passed + 1 xfailed, 8,7 phút). Harness pilot `rule_human` lần đầu xong: 66 phút, 22 decision development. GAP so cũ/mới 4 episode pilot đóng bằng probe reviewer P1+P3 (orchestrator chấp nhận, dừng job cũ). Backlog không chặn: F-2 quét held-out bỏ sót ID trong giá trị list và khóa điểm ở tổ tiên (+ 2 test); F-4 docstring `model/features.py:420-422` lỗi thời; F-5 thêm test functional hàng có `available_at` giữa hai decision.
 ### AUDIT-FIX-1 — Sửa 3 lỗi audit Terra lượt 1 (người dùng duyệt 02/11/2026)
 - **Bối cảnh:** audit chỉ đọc bằng Codex `gpt-6.1-terra` high ngày 02/11 (báo cáo ngoài repo, nhật ký [orchestration](orchestration.md)).
 - **A1 (chặn):** `python -m evaluation decisions` (và mọi đường chấm ngoài harness) chọn role/áp lock theo `episodes.role` operational nhưng không đối chiếu `episode_manifest.role` private trước khi đọc truth hay ghi role ledger (`evaluation/__main__.py:150`, `evaluation/matcher.py:399`). Sửa: đối chiếu role của mọi episode được chọn với manifest private; thiếu hoặc lệch → từ chối trước mọi đọc truth, report, ledger. Test functional: relabel episode test thành `development` trong DB operational → bị từ chối.
@@ -202,8 +203,10 @@ Lệnh dựng run dir pilot cho `triage measure` (agent `fake`, không gọi LLM
 python -m payguard run --profile pilot --policy rule_human --out data/p5-pilot
 mkdir -p data/p5-pilot-measure/operational
 cp data/p5-pilot/base/operational/observations.sqlite data/p5-pilot-measure/operational/
-python -m triage measure --run data/p5-pilot-measure --agent-provider fake --incidents 3 --out data/p5-pilot-measure/measure.json
+python -m triage measure --run data/p5-pilot-measure --agent-provider fake --incidents 1 --out data/p5-pilot-measure/measure.json
 ```
+
+Ghi chú (review HARNESS-PILOT r1 F-3): pilot development hiện có < 3 incident tới agent nên `--incidents 3` thoát mã 2 (`insufficient_agent_eligible_incidents`); số ca thật ghi cho P5.0d.
 
 Run dir này chưa có agent decision và chỉ dùng cho một lần đo. `measure` đọc `development` trước; nếu thiếu ca đủ điều kiện thì fallback sang `calibration` bị lock guard từ chối trước khi lock tồn tại.
 
