@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import pytest
 import yaml
 
-from simulator.validate import validate_run
+from simulator.validate import ValidationError, _validate_pilot_report_contract, validate_run
 from simulator.config import load_episode_config, load_simulator_config
 from simulator.episodes import generate_episodes
 from simulator.incidents import inject_fraud_surge, inject_new_fraud
@@ -1509,6 +1509,92 @@ def test_validate_rejects_missing_or_corrupt_support_report(
     validation = _cli("validate", "--run", str(run_dir))
     assert validation.returncode != 0, validation.stdout + validation.stderr
     assert "FAIL report_truth_boundary" in validation.stdout
+
+
+def test_validate_rejects_private_support_report_with_another_profile(
+    tmp_path: Path, valid_smoke_run: Path
+) -> None:
+    run_dir = tmp_path / "private-profile-mismatch"
+    shutil.copytree(valid_smoke_run, run_dir)
+    private_path = run_dir / "private" / "reports" / "smoke_truth.json"
+    private_report = json.loads(private_path.read_text(encoding="utf-8"))
+    private_report["profile"] = "pilot"
+    private_path.write_text(json.dumps(private_report), encoding="utf-8")
+
+    validation = _cli("validate", "--run", str(run_dir))
+    assert validation.returncode != 0, validation.stdout + validation.stderr
+    assert "FAIL report_truth_boundary" in validation.stdout
+    assert "private smoke report has an unsupported version/profile" in validation.stdout
+
+
+def test_pilot_validator_rejects_score_like_fields_under_held_out_episodes(
+    tmp_path: Path,
+) -> None:
+    locked = load_episode_config(ROOT / "configs" / "episodes.yaml")
+    assignments = locked.profile("pilot").assignments
+    development = {item.episode_id for item in assignments if item.role == "development"}
+    held_out = sorted(item.episode_id for item in assignments if item.role != "development")
+    operational = sqlite3.connect(":memory:")
+    operational.execute("CREATE TABLE episodes (episode_id TEXT PRIMARY KEY, role TEXT NOT NULL)")
+    operational.executemany(
+        "INSERT INTO episodes (episode_id, role) VALUES (?, ?)",
+        [(item.episode_id, item.role) for item in assignments],
+    )
+    metadata = {"resolved_config": {"episodes": locked.model_dump(mode="json")}}
+    template_rows = [
+        {
+            "role": item.role,
+            "template": item.template,
+            "episode_count": 1,
+            "transaction_count": 0,
+            "label_snapshot_state_counts": {},
+            "reported_label_count": 0,
+            "truth_positive_count": 0,
+            "truth_reported_count": 0,
+            "incident_truth_counts_by_cause": {},
+        }
+        for item in assignments
+    ]
+    run_dir = tmp_path / "pilot"
+    (run_dir / "reports").mkdir(parents=True)
+    (run_dir / "private" / "reports").mkdir(parents=True)
+
+    def public_report() -> dict[str, object]:
+        return {
+            "profile": "pilot",
+            "report_version": 1,
+            "label_delay": {episode_id: {"observed": 0} for episode_id in held_out},
+        }
+
+    def private_report() -> dict[str, object]:
+        return {
+            "profile": "pilot",
+            "report_version": 1,
+            "truth_bearing": True,
+            "p1_4_feature_diagnostics": {
+                episode_id: {} for episode_id in ("base", *sorted(development))
+            },
+            "role_template_support": template_rows,
+        }
+
+    def validate_with(public: dict[str, object], private: dict[str, object]) -> str:
+        (run_dir / "reports" / "pilot.json").write_text(json.dumps(public), encoding="utf-8")
+        (run_dir / "private" / "reports" / "pilot_truth.json").write_text(
+            json.dumps(private), encoding="utf-8"
+        )
+        return _validate_pilot_report_contract(run_dir, operational, metadata)
+
+    assert "pilot diagnostics cover base" in validate_with(public_report(), private_report())
+
+    leaked_public = public_report()
+    leaked_public["label_delay"][held_out[0]]["auc"] = 0.8  # type: ignore[index]
+    with pytest.raises(ValidationError, match="held-out episodes"):
+        validate_with(leaked_public, private_report())
+
+    leaked_private = private_report()
+    leaked_private["heldout_scores"] = {held_out[1]: {"auc": 0.7}}
+    with pytest.raises(ValidationError, match="held-out episodes"):
+        validate_with(public_report(), leaked_private)
 
 
 def test_pilot_support_report_limits_held_out_episodes_to_structural_counts(

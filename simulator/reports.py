@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right, insort
 import json
 import re
 import sqlite3
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from model.config import load_pipeline_config
@@ -266,6 +267,169 @@ def _auc(scores: list[float], labels: list[int]) -> float | None:
     )
 
 
+_P14_INF = float("inf")
+
+
+def _entries_between(
+    entries: Sequence[tuple[Any, ...]],
+    low_exclusive: datetime,
+    high_inclusive: datetime,
+) -> Sequence[tuple[Any, ...]]:
+    """Return sorted index entries whose first field lies in (low, high]."""
+    start = bisect_right(entries, (low_exclusive, _P14_INF))
+    end = bisect_right(entries, (high_inclusive, _P14_INF))
+    return entries[start:end]
+
+
+def _p14_point_in_time_features(
+    rows: Sequence[dict[str, Any]],
+    *,
+    target_ids: set[str],
+    customers: Mapping[str, Mapping[str, Any]],
+    near_min: int,
+    near_max: int,
+) -> dict[str, dict[str, float]]:
+    """Return the P1.4 point-in-time features of every target transaction.
+
+    A row belongs to a target's history when its ``created_at`` and ``available_at`` are
+    both at or before the target's ``created_at`` (text order, as in the per-target scan
+    this replaces). Targets are swept in ``created_at`` order and each row is indexed once,
+    when that point is reached. Trailing windows are bisect slices over sorted per-key
+    entries, and per-account counters answer the seen-before questions. The target is
+    removed from its own prior history by position, so it still counts toward the windows
+    exactly when it is part of its history.
+    """
+    created = [_parse_timestamp(row["created_at"]) for row in rows]
+    entering_at = [max(row["created_at"], row["available_at"]) for row in rows]
+    pending = sorted(range(len(rows)), key=entering_at.__getitem__)
+    device_counts: Counter[tuple[str, str | None]] = Counter()
+    pair_counts: Counter[tuple[str, str]] = Counter()
+    senders_by_recipient: defaultdict[str, list[tuple[datetime, int, str]]] = defaultdict(list)
+    outflows_by_customer: defaultdict[str, list[tuple[datetime, int, int]]] = defaultdict(list)
+    inflows_by_recipient: defaultdict[str, list[tuple[datetime, int, int]]] = defaultdict(list)
+    activity_by_account: defaultdict[str, list[tuple[datetime, int]]] = defaultdict(list)
+
+    def admit(index: int) -> None:
+        row = rows[index]
+        customer = row["customer_id"]
+        recipient = row["recipient_customer_id"]
+        amount = row["amount"]
+        device_counts[(customer, row["device_id"])] += 1
+        insort(activity_by_account[customer], (created[index], index))
+        if recipient is None:
+            return
+        pair_counts[(customer, recipient)] += 1
+        insort(senders_by_recipient[recipient], (created[index], index, customer))
+        if recipient != customer:
+            insort(activity_by_account[recipient], (created[index], index))
+        if type(amount) is int:
+            insort(outflows_by_customer[customer], (created[index], index, amount))
+            insort(inflows_by_recipient[recipient], (created[index], index, amount))
+
+    features: dict[str, dict[str, float]] = {}
+    targets = sorted(
+        (index for index, row in enumerate(rows) if row["txn_id"] in target_ids),
+        key=lambda index: rows[index]["created_at"],
+    )
+    admitted = 0
+    for index in targets:
+        target = rows[index]
+        moment = target["created_at"]
+        while admitted < len(pending) and entering_at[pending[admitted]] <= moment:
+            admit(pending[admitted])
+            admitted += 1
+        in_history = entering_at[index] <= moment
+        own = 1 if in_history else 0
+        current_at = created[index]
+        customer = target["customer_id"]
+        recipient_id = target["recipient_customer_id"]
+        is_transfer = recipient_id is not None
+        device_seen = device_counts[(customer, target["device_id"])] - own > 0
+        pair_seen = is_transfer and pair_counts[(customer, recipient_id)] - own > 0
+        cutoff_7d = current_at - timedelta(days=7)
+        senders = (
+            {
+                sender_id
+                for _, _, sender_id in _entries_between(
+                    senders_by_recipient.get(recipient_id, []), cutoff_7d, current_at
+                )
+            }
+            if is_transfer
+            else set()
+        )
+        fan_in = len(senders)
+        older_senders = sum(
+            customers.get(sender_id, {}).get("age_band") == "55+" for sender_id in senders
+        )
+        cutoff_24h = current_at - timedelta(hours=24)
+        outgoing = sum(
+            amount
+            for _, _, amount in _entries_between(
+                outflows_by_customer.get(customer, []), cutoff_24h, current_at
+            )
+        )
+        incoming = sum(
+            amount
+            for _, _, amount in _entries_between(
+                inflows_by_recipient.get(customer, []), cutoff_24h, current_at
+            )
+        )
+        last_prior_activity: datetime | None = None
+        if is_transfer:
+            for activity_at, other_index in reversed(
+                activity_by_account.get(recipient_id, [])
+            ):
+                if other_index != index:
+                    last_prior_activity = activity_at
+                    break
+        recipient = customers.get(recipient_id) if is_transfer else None
+        recipient_created = _parse_timestamp(recipient["event_at"]) if recipient else None
+        sender = customers.get(customer)
+        sender_created = _parse_timestamp(sender["event_at"]) if sender else None
+        sender_age_days = (
+            (current_at - sender_created).total_seconds() / 86_400
+            if sender_created is not None
+            else -1.0
+        )
+        recipient_age_days = (
+            (current_at - recipient_created).total_seconds() / 86_400
+            if recipient_created is not None
+            else -1.0
+        )
+        dormant_cutoff = current_at - timedelta(days=30)
+        new_or_dormant = bool(
+            is_transfer
+            and (
+                recipient_created is None
+                or recipient_created > dormant_cutoff
+                or last_prior_activity is None
+                or last_prior_activity <= dormant_cutoff
+            )
+        )
+        amount = target["amount"]
+        features[target["txn_id"]] = {
+            "new_device_to_sender": float(target["device_id"] is not None and not device_seen),
+            "first_transfer_to_counterparty": float(is_transfer and not pair_seen),
+            "recipient_fan_in_7d": float(fan_in),
+            "older_sender_share_7d": float(older_senders / fan_in if fan_in else 0.0),
+            "account_outflow_ratio_24h": float(outgoing / incoming if incoming else 0.0),
+            "new_or_dormant_recipient": float(new_or_dormant),
+            "sender_account_age_days": sender_age_days,
+            "recipient_account_age_days": recipient_age_days,
+            "transaction_id_hash_format": float(
+                re.fullmatch(r"txn-[0-9a-f]{64}", target["txn_id"]) is not None
+            ),
+            "customer_id_six_digit_format": float(
+                re.fullmatch(r"customer-[0-9]{6}", customer) is not None
+            ),
+            "amount_near_10m_vnd": float(
+                type(amount) is int and near_min <= amount <= near_max
+            ),
+            "created_at_second_zero": float(current_at.second == 0),
+        }
+    return features
+
+
 def _p14_feature_diagnostics(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
@@ -285,12 +449,15 @@ def _p14_feature_diagnostics(
         item["txn_id"]: int(item["true_label"] == "fraud") for item in outcomes
     }
     t0_text = utc_timestamp(_t0_timestamp(config, config.timeline.business_timezone.value))
+    # The diagnostic's own transactions plus base history before T0 (all of base for base).
     all_rows = [
         dict(row)
-        for row in operational.execute("SELECT * FROM transactions ORDER BY event_at, txn_id")
-        if (row["episode_id"] == "base" and episode_id == "base")
-        or (row["episode_id"] == "base" and row["event_at"] < t0_text)
-        or row["episode_id"] == episode_id
+        for row in operational.execute(
+            "SELECT * FROM transactions "
+            "WHERE episode_id = ? OR (episode_id = 'base' AND event_at < ?) "
+            "ORDER BY event_at, txn_id",
+            (episode_id, t0_text),
+        )
     ]
     customers = {
         row["customer_id"]: dict(row)
@@ -373,113 +540,20 @@ def _p14_feature_diagnostics(
         "created_at_second_zero": [],
     }
     target_labels: list[int] = []
-    features_by_id: dict[str, dict[str, float]] = {}
     near_min = config.fraud.near_threshold_minimum_amount.value
     near_max = config.fraud.near_threshold_maximum_amount.value
+    features_by_id = _p14_point_in_time_features(
+        all_rows,
+        target_ids=set(labels_by_id),
+        customers=customers,
+        near_min=near_min,
+        near_max=near_max,
+    )
     for target in all_rows:
         if target["txn_id"] not in labels_by_id:
             continue
-        current_at = _parse_timestamp(target["created_at"])
-        history = [
-            row for row in all_rows
-            if row["created_at"] <= target["created_at"]
-            and row["available_at"] <= target["created_at"]
-        ]
-        prior = [row for row in history if row["txn_id"] != target["txn_id"]]
-        device_seen = any(
-            row["customer_id"] == target["customer_id"]
-            and row["device_id"] == target["device_id"]
-            for row in prior
-        )
-        recipient_id = target["recipient_customer_id"]
-        is_transfer = recipient_id is not None
-        pair_seen = any(
-            row["customer_id"] == target["customer_id"]
-            and row["recipient_customer_id"] == recipient_id
-            for row in prior
-        ) if is_transfer else False
-        cutoff_7d = current_at - timedelta(days=7)
-        incoming_7d = [
-            row for row in history
-            if row["recipient_customer_id"] == recipient_id
-            and recipient_id is not None
-            and cutoff_7d < _parse_timestamp(row["created_at"]) <= current_at
-        ]
-        fan_in = len({row["customer_id"] for row in incoming_7d})
-        sender_ids = {row["customer_id"] for row in incoming_7d}
-        older_senders = sum(
-            customers.get(sender_id, {}).get("age_band") == "55+"
-            for sender_id in sender_ids
-        )
-        cutoff_24h = current_at - timedelta(hours=24)
-        recent_account = [
-            row for row in history
-            if cutoff_24h < _parse_timestamp(row["created_at"]) <= current_at
-        ]
-        outgoing = sum(
-            row["amount"] for row in recent_account
-            if row["customer_id"] == target["customer_id"]
-            and row["recipient_customer_id"] is not None
-            and type(row["amount"]) is int
-        )
-        incoming = sum(
-            row["amount"] for row in recent_account
-            if row["recipient_customer_id"] == target["customer_id"]
-            and type(row["amount"]) is int
-        )
-        prior_account_activity = [
-            _parse_timestamp(row["created_at"])
-            for row in prior
-            if row["customer_id"] == recipient_id or row["recipient_customer_id"] == recipient_id
-        ] if is_transfer else []
-        recipient = customers.get(recipient_id) if is_transfer else None
-        recipient_created = _parse_timestamp(recipient["event_at"]) if recipient else None
-        sender = customers.get(target["customer_id"])
-        sender_created = _parse_timestamp(sender["event_at"]) if sender else None
-        sender_age_days = (
-            (current_at - sender_created).total_seconds() / 86_400
-            if sender_created is not None
-            else -1.0
-        )
-        recipient_age_days = (
-            (current_at - recipient_created).total_seconds() / 86_400
-            if recipient_created is not None
-            else -1.0
-        )
-        dormant_cutoff = current_at - timedelta(days=30)
-        new_or_dormant = bool(
-            is_transfer
-            and (
-                recipient_created is None
-                or recipient_created > dormant_cutoff
-                or not prior_account_activity
-                or max(prior_account_activity) <= dormant_cutoff
-            )
-        )
-        amount = target["amount"]
         target_labels.append(labels_by_id[target["txn_id"]])
-        values = {
-            "new_device_to_sender": float(target["device_id"] is not None and not device_seen),
-            "first_transfer_to_counterparty": float(is_transfer and not pair_seen),
-            "recipient_fan_in_7d": float(fan_in),
-            "older_sender_share_7d": float(older_senders / fan_in if fan_in else 0.0),
-            "account_outflow_ratio_24h": float(outgoing / incoming if incoming else 0.0),
-            "new_or_dormant_recipient": float(new_or_dormant),
-            "sender_account_age_days": sender_age_days,
-            "recipient_account_age_days": recipient_age_days,
-            "transaction_id_hash_format": float(
-                re.fullmatch(r"txn-[0-9a-f]{64}", target["txn_id"]) is not None
-            ),
-            "customer_id_six_digit_format": float(
-                re.fullmatch(r"customer-[0-9]{6}", target["customer_id"]) is not None
-            ),
-            "amount_near_10m_vnd": float(
-                type(amount) is int and near_min <= amount <= near_max
-            ),
-            "created_at_second_zero": float(current_at.second == 0),
-        }
-        features_by_id[target["txn_id"]] = values
-        for name, value in values.items():
+        for name, value in features_by_id[target["txn_id"]].items():
             feature_scores[name].append(value)
     aucs = {
         feature: _auc(scores, target_labels)

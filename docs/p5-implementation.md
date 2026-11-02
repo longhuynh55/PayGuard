@@ -114,4 +114,17 @@ python -m payguard lock policy --profile smoke --policy rule_agent_fake --out da
 
 Vị trí state directory, binding trong harness manifest và schema cost/role/lock ledger được định nghĩa tại [data.md §9](data.md#9-p51-harness-artifacts). Cost ledger append-only dùng reservations/settlements cùng file lock; reservation chưa settle sau crash vẫn tính vào ngân sách. LLM client reserve ước lượng trần input/output theo payload và sampling trước từng lần gọi, gồm retry; khi không đủ ngân sách thì không gửi request. Fake provider ghi chi phí 0. `configs/llm.yaml` giữ nguyên cap $1 cho P4; harness dùng cap benchmark $10 từ `configs/benchmark.yaml`, không cộng hai cap thành $11. Mọi lần reserve trong ledger phải ghi cùng cap; cap khác bị từ chối. Settlement cao hơn reservation được ghi là overrun trong ledger và policy report.
 
+`--profile pilot` dùng cùng harness: BASE được sinh bằng `simulator generate --profile pilot` bên trong root. Root ghi `profile` vào `harness-manifest.json`, `base/generation-manifest.json` và `base/base-manifest.json`; root smoke và pilot không dùng lẫn, lock pilot nằm ở namespace `benchmark`. Trước lock, harness chỉ triage và chấm `development`; `--analysis-role calibration|test` bị từ chối khi lock tương ứng chưa có.
+
+Lệnh dựng run dir pilot cho `triage measure` (agent `fake`, không gọi LLM thật): chép BASE đã đóng băng sang thư mục standalone nằm ngoài mọi harness root, rồi đo:
+
+```bash
+python -m payguard run --profile pilot --policy rule_human --out data/p5-pilot
+mkdir -p data/p5-pilot-measure/operational
+cp data/p5-pilot/base/operational/observations.sqlite data/p5-pilot-measure/operational/
+python -m triage measure --run data/p5-pilot-measure --agent-provider fake --incidents 3 --out data/p5-pilot-measure/measure.json
+```
+
+Run dir này chưa có agent decision và chỉ dùng cho một lần đo. `measure` đọc `development` trước; nếu thiếu ca đủ điều kiện thì fallback sang `calibration` bị lock guard từ chối trước khi lock tồn tại.
+
 Standalone `python -m triage run`/`measure` trên policy directory xác nhận state directory, current code/config/prompt/sampling hashes, BASE fingerprint và policy identity trước khi thao tác DB hoặc ghi output. Khi resume, decision rows hiện có phải giữ đúng `policy_version`; agent rows cũng phải đúng `model_slug` trong manifest. Lệch identity hoặc mixed rows thì từ chối với exit 2. Harness root hiện không có process lock: chạy tuần tự các lệnh trên cùng root. Chi tiết CLI evaluator và triage được mô tả tại [evaluation.md, mục 9](evaluation.md#9-cli-cham-decisions-va-chon-cap-p45-p51) và [triage.md, mục 9](triage.md#9-cli-trong-p51-harness).
