@@ -59,7 +59,7 @@
 | ★ Luồng mỏng (cuối tuần 3) | snapshot → score → một monitor → một rule → gate → `decisions` → evaluator; thêm agent một bước (1 SQL, không UQ); đo token trên 3 case | Ra bảng kết quả dù còn xấu; có số token thật |
 | **P4** Triage (10 ngày) | P4a 4 runbook checklist theo metric + quyền đóng theo runbook (2 ngày) · P4b `run_sql` N = 3 + bộ câu hỏi + DB phản ví dụ (4 ngày) · P4c agent K = 3, phân nhánh đóng/routing/recheck (4 ngày) | Xem [triage.md](docs/triage.md) mục Xong khi |
 | **P5** Đánh giá (4 ngày) | 4 baseline + hai phép so sánh agent; utility + độ nhạy; ablation có công khai chi phí | Bảng và biểu đồ cuối cho README, kể cả kết quả âm tính |
-| **P6** Đóng gói (5 ngày) | FastAPI, Streamlit, Docker Compose, pytest + CI, README, video | `docker compose up` chạy được demo |
+| **P6** Đóng gói (5 ngày) | FastAPI, Streamlit, Docker Compose, pytest + CI, README, video; thêm (người dùng duyệt 02/11) orchestration Prefect/Dagster bọc harness + LLM tracing (Langfuse/OpenTelemetry) | `docker compose up` chạy được demo |
 
 Nâng cấp sau (không chặn): Kafka/Spark/Airflow · ensemble epistemic · user simulator · Next.js · user study nhỏ.
 
