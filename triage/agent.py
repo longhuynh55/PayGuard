@@ -18,7 +18,7 @@ from triage.llm import (
     load_llm_config,
 )
 from triage.cost_ledger import DurableCostLedger
-from triage.tools import run_sql
+from triage.tools import SnapshotCache, run_sql
 
 
 CAUSES = frozenset(
@@ -93,6 +93,7 @@ class OneStepAgent:
     def __init__(self, operational_db: str | Path, client: LLMClient) -> None:
         self.operational_db = Path(operational_db).expanduser().resolve()
         self.client = client
+        self.snapshot_cache = SnapshotCache()
         self.last_call_reports: list[dict[str, Any]] = []
 
     @property
@@ -125,6 +126,7 @@ class OneStepAgent:
             as_of_time,
             operational_db=self.operational_db,
             client=self.client,
+            snapshot_cache=self.snapshot_cache,
         )
 
         proposal_context = {

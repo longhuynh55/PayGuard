@@ -580,6 +580,34 @@ def test_missing_incident_source_metrics_are_insufficient_not_historical_evidenc
         store.close()
 
 
+def test_runbook_read_cache_serves_later_incidents_of_one_block_without_rereading(
+    tmp_path, monkeypatch
+) -> None:
+    store, incident = _fixture(tmp_path, before_amount=10_000, after_amount=1_000_000)
+    reads: list[str] = []
+    original_read_as_of = runbook_module.read_as_of
+
+    def counting_read_as_of(connection, table, **kwargs):
+        reads.append(table)
+        return original_read_as_of(connection, table, **kwargs)
+
+    monkeypatch.setattr(runbook_module, "read_as_of", counting_read_as_of)
+    try:
+        uncached = check_unit_or_null_change(store.operational, incident)
+        reads.clear()
+        cache = runbook_module.RunbookReadCache()
+        first = check_unit_or_null_change(store.operational, incident, read_cache=cache)
+        first_reads = sorted(reads)
+        reads.clear()
+        second = check_unit_or_null_change(store.operational, incident, read_cache=cache)
+
+        assert first == second == uncached
+        assert first_reads == ["alerts", "customers", "daily_metrics", "incidents", "transactions"]
+        assert reads == []
+    finally:
+        store.close()
+
+
 def test_candidate_with_less_than_one_full_post_change_day_is_insufficient(tmp_path) -> None:
     store, incident = _fixture(
         tmp_path,

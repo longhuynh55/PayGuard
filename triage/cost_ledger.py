@@ -223,8 +223,15 @@ class DurableCostLedger:
         model_slug: str,
         policy: str | None,
         conservative: bool = False,
+        conservative_reason: str | None = None,
     ) -> None:
         amount = _money(amount_usd)
+        if conservative != (conservative_reason is not None):
+            raise CostLedgerError(
+                "conservative settlements must name a reason and measured settlements must not"
+            )
+        if conservative_reason is not None and not conservative_reason.strip():
+            raise CostLedgerError("conservative_reason must be non-empty text")
         with self._locked():
             _, _, settled, *_ = self._state_locked()
             events = self._events_locked()
@@ -243,6 +250,7 @@ class DurableCostLedger:
                     model_slug=model_slug,
                     policy=policy,
                     conservative=conservative,
+                    conservative_reason=conservative_reason,
                     overrun=amount > reservations[reservation_id],
                 )
             )

@@ -130,6 +130,23 @@ def test_same_input_reproduces_alert_rows_and_neutral_ids() -> None:
     assert "truth" not in first.alerts[0]["alert_id"]
 
 
+def test_metric_that_becomes_available_after_its_snapshot_is_refused_not_alerted() -> None:
+    """A3: a daily metric is readable only at its own snapshot; a late row raises, never alerts."""
+    on_time = _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.9)
+    result = compute_alerts(
+        [on_time], episode_id="ep-a", as_of_time="2026-02-10T16:59:59.999999Z"
+    )
+    assert len(result.alerts) == 1
+    alert = result.alerts[0]
+    assert alert["available_at"] == on_time["available_at"] == alert["as_of_time"]
+
+    late = _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.9)
+    late["available_at"] = "2026-02-11T16:59:59.999999Z"
+    for cutoff in ("2026-02-10T16:59:59.999999Z", "2026-02-11T17:00:00.000000Z"):
+        with pytest.raises(MonitoringSignalsError, match="available_at"):
+            compute_alerts([late], episode_id="ep-a", as_of_time=cutoff)
+
+
 def test_mixed_episode_rows_are_rejected() -> None:
     with pytest.raises(MonitoringSignalsError, match="expected 'ep-a'"):
         compute_alerts(

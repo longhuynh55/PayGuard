@@ -18,7 +18,7 @@ from simulator.storage import StorageError, utc_timestamp
 from triage.agent import AgentProposalProvider, UnconfiguredAgent
 from triage.decisions import persist_decisions
 from triage.gate import GateConfig, evaluate_gate
-from triage.runbooks import check_unit_or_null_change, load_triage_config
+from triage.runbooks import RunbookReadCache, check_unit_or_null_change, load_triage_config
 
 
 @contextmanager
@@ -328,6 +328,9 @@ def run_triage(
                     if row["status"] in {"open", "recheck"}
                     and row["available_at"] == as_of_time
                 ]
+                # Runbook reads are shared by this (episode, cutoff) block: the loop below
+                # writes only decisions, which the unit/NULL runbook does not read.
+                runbook_reads = RunbookReadCache()
                 for incident in current_open:
                     checklists = check_unit_or_null_change(
                         operational,
@@ -335,6 +338,7 @@ def run_triage(
                         as_of_time=as_of_time,
                         simulator_config=simulator_config,
                         triage_config=triage_config,
+                        read_cache=runbook_reads,
                     )
                     source_hint = (
                         "rule" if _unit_or_null_rule_applies(checklists) else "agent"

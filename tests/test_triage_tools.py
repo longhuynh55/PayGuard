@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
+import pytest
 import sqlite3
 
+from simulator.storage import StorageError, insert_operational_record
 from triage.llm import FakeLLMClient
-from triage.tools import run_sql
+from triage.tools import SnapshotCache, run_sql
 
 
 AS_OF = "2026-02-02T00:00:00Z"
@@ -244,3 +247,122 @@ def test_duplicate_aliases_never_overwrite_an_existing_alias(p1_2_store) -> None
 
     assert result.ok
     assert result.rows == [{"x": 1, "x_3": 2, "x_2": 3}]
+
+
+_TRANSACTIONS_AS_OF_SQL_CASES = (
+    "SELECT txn_id FROM asof.transactions WHERE amount = '125000' ORDER BY txn_id",
+    "SELECT txn_id FROM asof.transactions WHERE amount IN ('125000', '175000') ORDER BY txn_id",
+    "SELECT txn_id FROM asof.transactions WHERE amount > '150000' ORDER BY txn_id",
+    "SELECT COUNT(*) AS n FROM asof.transactions WHERE channel = 'qr'",
+)
+
+
+def _same_sql_on_asof_source_rows(operational_path: Path, sql: str) -> list[tuple]:
+    """Answer ``sql`` over as-of views of the source tables, keeping their declared affinity."""
+    reference = sqlite3.connect(":memory:", uri=True)
+    try:
+        reference.execute(
+            "ATTACH DATABASE ? AS src",
+            (f"{operational_path.resolve().as_uri()}?mode=ro",),
+        )
+        reference.execute("ATTACH DATABASE ':memory:' AS asof")
+        # CREATE TABLE ... AS SELECT keeps each column's affinity from the source column.
+        reference.execute(
+            "CREATE TABLE asof.transactions AS SELECT * FROM src.transactions "
+            "WHERE available_at <= '2026-02-02T00:00:00.000000Z' "
+            "AND ((episode_id = 'base' AND event_at < '2026-01-31T17:00:00.000000Z') "
+            "OR episode_id = 'ep-a') ORDER BY event_at, rowid"
+        )
+        return reference.execute(sql).fetchall()
+    finally:
+        reference.close()
+
+
+def test_sql_through_run_sql_returns_the_rows_the_same_sql_returns_on_the_asof_source(
+    p1_2_store,
+) -> None:
+    # Declared affinity matters: the source stores amount as INTEGER, so the text literal
+    # '125000' matches it. A snapshot that stores every column as BLOB returns nothing.
+    for sql in _TRANSACTIONS_AS_OF_SQL_CASES:
+        expected = _same_sql_on_asof_source_rows(p1_2_store.operational_path, sql)
+        result = _run(p1_2_store, sql)
+
+        assert result.ok, (sql, result.error)
+        assert [tuple(row.values()) for row in result.rows] == expected, sql
+    assert _same_sql_on_asof_source_rows(
+        p1_2_store.operational_path, _TRANSACTIONS_AS_OF_SQL_CASES[0]
+    ) == [("txn-base-before-t0",)]
+
+
+def test_snapshot_cache_builds_once_per_cutoff_until_a_commit_changes_the_data(p1_2_store) -> None:
+    listing = "SELECT txn_id FROM asof.transactions ORDER BY txn_id"
+    path = p1_2_store.operational_path
+    cache = SnapshotCache()
+
+    def ask(question: str, *, snapshot_cache: SnapshotCache | None = None):
+        # FakeLLMClient serves one response per instance, so each question gets its own client.
+        return run_sql(
+            question,
+            "ep-a",
+            AS_OF,
+            operational_db=path,
+            client=FakeLLMClient(response={"sql": listing}),
+            snapshot_cache=snapshot_cache,
+        )
+
+    first = ask("List visible transactions", snapshot_cache=cache)
+    second = ask("List visible transactions again", snapshot_cache=cache)
+    uncached = ask("List visible transactions")
+
+    assert uncached.ok, uncached.error
+    assert (cache.builds, cache.reuses) == (1, 1)
+    assert first.rows == second.rows == uncached.rows
+    assert first.trace.data_snapshot == second.trace.data_snapshot == uncached.trace.data_snapshot
+
+    insert_operational_record(
+        p1_2_store.operational,
+        "transactions",
+        {
+            "txn_id": "txn-a-committed-later",
+            "episode_id": "ep-a",
+            "customer_id": "customer-base",
+            "merchant_id": "merchant-base",
+            "created_at": "2026-02-01T12:00:00.000000Z",
+            "event_at": "2026-02-01T12:00:00.000000Z",
+            "available_at": "2026-02-01T12:00:00.000000Z",
+            "amount": 333000,
+            "channel": "qr",
+        },
+    )
+    p1_2_store.operational.commit()
+
+    after_commit = ask("List visible transactions", snapshot_cache=cache)
+
+    assert (cache.builds, cache.reuses) == (2, 1)
+    assert "txn-a-committed-later" in {row["txn_id"] for row in after_commit.rows}
+    assert after_commit.trace.data_snapshot != first.trace.data_snapshot
+
+
+@pytest.mark.parametrize(
+    ("injected", "expected_code"),
+    [
+        (sqlite3.OperationalError("unable to open database file: /var/secret/leak.sqlite"), "snapshot_source_unavailable"),
+        (StorageError("episode is not registered: '/var/secret/leak'"), "snapshot_scope_invalid"),
+        (RuntimeError("unexpected state at /var/secret/leak"), "snapshot_internal_error"),
+    ],
+)
+def test_snapshot_build_failures_are_classified_without_exposing_details(
+    p1_2_store, monkeypatch, injected: Exception, expected_code: str
+) -> None:
+    def fail_on_read(connection, table, **kwargs):
+        raise injected
+
+    monkeypatch.setattr("triage.tools.read_as_of", fail_on_read)
+    result = _run(p1_2_store, "SELECT 1 AS one")
+    serialized = json.dumps(result.trace.as_dict())
+
+    assert result.error and result.error.code == expected_code
+    assert result.rows == []
+    assert result.trace.llm is None
+    assert "/var/secret/leak" not in serialized
+    assert str(p1_2_store.operational_path) not in serialized
