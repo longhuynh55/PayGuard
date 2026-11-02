@@ -506,6 +506,7 @@ def _scope_amount_transactions(
     policy: _UnitOrNullPolicy,
     t0_date: date,
     as_of_local_date: date,
+    daily_by_segment: dict[str, dict[str, dict[date, _DailyAmounts]]] | None = None,
 ) -> dict[str, Any]:
     feature = incident["feature"]
     segment = incident["segment"]
@@ -550,13 +551,17 @@ def _scope_amount_transactions(
         )
     window_start, window_end = incident_window
 
-    daily_by_channel = _daily_amounts(
-        transactions,
-        customers,
-        episode_id=str(incident["episode_id"]),
-        segment=segment,
-        zone=zone,
-    )
+    daily_by_channel = None if daily_by_segment is None else daily_by_segment.get(segment)
+    if daily_by_channel is None:
+        daily_by_channel = _daily_amounts(
+            transactions,
+            customers,
+            episode_id=str(incident["episode_id"]),
+            segment=segment,
+            zone=zone,
+        )
+        if daily_by_segment is not None:
+            daily_by_segment[segment] = daily_by_channel
     comparisons: list[dict[str, Any]] = []
     observed_days_by_channel: dict[str, list[date]] = {}
     for channel, daily in sorted(daily_by_channel.items()):
@@ -907,6 +912,58 @@ def _fraud_signal_check(
     )
 
 
+class RunbookReadCache:
+    """Share the as-of reads and per-segment groupings of one (episode, cutoff) block.
+
+    The unit/NULL runbook reads incidents, transactions, customers, daily metrics, and alerts.
+    The triage runner writes decisions inside a block, and decisions are not among these reads,
+    so these rows stay identical until the block ends. Create one cache per (episode, cutoff)
+    block and do not reuse it after any write to these tables.
+    """
+
+    def __init__(self) -> None:
+        self._rows: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+        self._daily: dict[tuple[str, str, str, str], dict[str, dict[str, dict[date, _DailyAmounts]]]] = {}
+
+    def rows(
+        self,
+        operational: sqlite3.Connection,
+        table: str,
+        *,
+        episode_id: str,
+        t0: str,
+        as_of_time: str,
+    ) -> list[dict[str, Any]]:
+        key = (table, episode_id, t0, as_of_time)
+        rows = self._rows.get(key)
+        if rows is None:
+            rows = read_as_of(
+                operational,
+                table,
+                episode_id=episode_id,
+                t0=t0,
+                as_of_time=as_of_time,
+            )
+            self._rows[key] = rows
+        return rows
+
+    def daily_by_segment(
+        self, *, episode_id: str, t0: str, as_of_time: str, zone_key: str
+    ) -> dict[str, dict[str, dict[date, _DailyAmounts]]]:
+        return self._daily.setdefault((episode_id, t0, as_of_time, zone_key), {})
+
+
+def _rows_for(
+    read_cache: RunbookReadCache | None,
+    operational: sqlite3.Connection,
+    table: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    if read_cache is None:
+        return read_as_of(operational, table, **kwargs)
+    return read_cache.rows(operational, table, **kwargs)
+
+
 def check_unit_or_null_change(
     operational: sqlite3.Connection,
     incident_snapshot: Mapping[str, Any],
@@ -914,13 +971,15 @@ def check_unit_or_null_change(
     as_of_time: str | None = None,
     simulator_config: SimulatorConfig | None = None,
     triage_config: Mapping[str, Any] | None = None,
+    read_cache: RunbookReadCache | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return gate-compatible P4.2 checklists from one operational incident snapshot.
 
     The incident is revalidated through ``read_as_of``. All transaction,
     customer, metric, and alert rows are read through that same API using the
     incident episode and its exact ``available_at`` snapshot cutoff. An
-    explicitly supplied cutoff must match the incident snapshot.
+    explicitly supplied cutoff must match the incident snapshot. ``read_cache``
+    (see ``RunbookReadCache``) lets incidents of one block share those reads.
     """
 
     try:
@@ -954,7 +1013,8 @@ def check_unit_or_null_change(
         t0_date = sim_config.timeline.t0_business_date.value
         t0 = _business_start(t0_date, zone)
 
-        snapshots = read_as_of(
+        snapshots = _rows_for(
+            read_cache,
             operational,
             "incidents",
             episode_id=episode_id,
@@ -975,10 +1035,17 @@ def check_unit_or_null_change(
             raise ValueError("incident snapshot is not an operational row available at as_of_time")
 
         read_kwargs = {"episode_id": episode_id, "t0": t0, "as_of_time": as_of}
-        transactions = read_as_of(operational, "transactions", **read_kwargs)
-        customers = read_as_of(operational, "customers", **read_kwargs)
-        metrics = read_as_of(operational, "daily_metrics", **read_kwargs)
-        alerts = read_as_of(operational, "alerts", **read_kwargs)
+        transactions = _rows_for(read_cache, operational, "transactions", **read_kwargs)
+        customers = _rows_for(read_cache, operational, "customers", **read_kwargs)
+        metrics = _rows_for(read_cache, operational, "daily_metrics", **read_kwargs)
+        alerts = _rows_for(read_cache, operational, "alerts", **read_kwargs)
+        daily_by_segment = (
+            None
+            if read_cache is None
+            else read_cache.daily_by_segment(
+                episode_id=episode_id, t0=t0, as_of_time=as_of, zone_key=zone.key
+            )
+        )
         as_of_local_date = _utc_datetime(as_of, "as_of_time").astimezone(zone).date()
 
         return {
@@ -993,6 +1060,7 @@ def check_unit_or_null_change(
                 policy=policy,
                 t0_date=t0_date,
                 as_of_local_date=as_of_local_date,
+                daily_by_segment=daily_by_segment,
             ),
             "fraud_signal": _fraud_signal_check(
                 verified,
@@ -1014,4 +1082,9 @@ def check_unit_or_null_change(
         return _error_checklists(str(exc))
 
 
-__all__ = ["RunbookConfigError", "check_unit_or_null_change", "load_triage_config"]
+__all__ = [
+    "RunbookConfigError",
+    "RunbookReadCache",
+    "check_unit_or_null_change",
+    "load_triage_config",
+]
