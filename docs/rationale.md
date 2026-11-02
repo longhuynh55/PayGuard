@@ -1,6 +1,6 @@
 # Rationale — nghiên cứu và lý do thiết kế
 
-> Vì sao chọn các phương pháp trong docs. Lập luận và phản ví dụ chi tiết của các vòng review: [archive/PLAN_REVIEW.md](../archive/PLAN_REVIEW.md); ví dụ chạy được: `python3 review/verify_plan_claims.py`.
+> Vì sao chọn các phương pháp trong docs. Lập luận và phản ví dụ chi tiết của các vòng review: archive/PLAN_REVIEW.md; ví dụ chạy được: `python3 review/verify_plan_claims.py`.
 
 ## 1. Định vị
 

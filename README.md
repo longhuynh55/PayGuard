@@ -88,8 +88,7 @@ payguard/     benchmark harness, run identity, locks
 configs/      YAML configuration (simulator, episodes, model, triage, LLM)
 docs/         design documents (one topic per file, see below)
 tests/        functional tests (≈450)
-review/       independent review findings and protocol checks
-archive/      superseded plans, read-only
+review/       protocol checks (verify_plan_claims.py, check_links.py)
 ```
 
 ## Documentation
@@ -128,5 +127,5 @@ a benchmark result.
 Development used an AI-assisted multi-agent workflow: a planner/orchestrator writes task
 specs with testable acceptance criteria, implementer agents write code in isolated git
 worktrees, and a fresh reviewer agent checks each change against the specs and invariants
-before merge. Review findings are kept in [`review/findings/`](review/findings/), and the
-coordination log is in [docs/orchestration.md](docs/orchestration.md).
+before merge. The coordination log, including each review outcome, is in
+[docs/orchestration.md](docs/orchestration.md).

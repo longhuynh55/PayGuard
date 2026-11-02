@@ -1,4 +1,4 @@
-"""Reproduce counterexamples used in archive/PLAN_REVIEW.md and docs/.
+"""Reproduce counterexamples used in the (archived) plan review and docs/.
 
 These are mathematical examples, NOT tests of the absent PayGuard implementation.
 Run from the project root: python3 review/verify_plan_claims.py

@@ -1,8 +1,0 @@
-== uv run pytest
-........................................................................ [ 64%]
-........................................                                 [100%]
-112 passed in 140.60s (0:02:20)
-== verify_plan_claims
-Verified 19 illustrative examples. Results: /home/lieu_hoai_phuc/.herdr/worktrees/Aiagent/slice-p3-3/review/verification_results.json
-== check_links
-Checked 14 files, 0 broken links.
