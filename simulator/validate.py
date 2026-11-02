@@ -1886,6 +1886,12 @@ def _validate_reports(run_dir: Path, profile: str | None) -> str:
         _fail(f"{profile} report is unreadable or invalid JSON: {exc}")
     if public_report.get("profile") != profile or public_report.get("report_version") != 1:
         _fail(f"public {profile} report has an unsupported version/profile")
+    if (
+        not isinstance(private_report, dict)
+        or private_report.get("profile") != profile
+        or private_report.get("report_version") != 1
+    ):
+        _fail(f"private {profile} report has an unsupported version/profile")
     if not {
         "as_of_time",
         "label_policy_version",
@@ -1961,6 +1967,30 @@ _ROLE_TEMPLATE_ROW_KEYS = {
 }
 
 
+_HELD_OUT_SCORE_KEY_RE = re.compile(r"auc|score|metric|alert|signal|diagnos", re.IGNORECASE)
+
+
+def _held_out_score_paths(value: Any, held_out: set[str], path: tuple[str, ...] = ()) -> list[str]:
+    """Return key paths below a held-out episode ID that name a score-like field.
+
+    Only key names are inspected; values under held-out episodes are never read here.
+    """
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key)
+            nested_path = (*path, key_text)
+            if (
+                any(part in held_out for part in path) or key_text in held_out
+            ) and _HELD_OUT_SCORE_KEY_RE.search(key_text):
+                found.append(".".join(nested_path))
+            found.extend(_held_out_score_paths(nested, held_out, nested_path))
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            found.extend(_held_out_score_paths(nested, held_out, (*path, str(index))))
+    return found
+
+
 def _validate_pilot_report_contract(
     run_dir: Path,
     operational: sqlite3.Connection,
@@ -1968,8 +1998,9 @@ def _validate_pilot_report_contract(
 ) -> str:
     """Pilot-only held-out rule: diagnostics stop at development; counts match the lock.
 
-    Reads only episode roles and the private report's diagnostic keys and count rows.
-    It never queries daily_metrics, alerts, incidents, or model_scores.
+    Reads episode roles, the key structure of both pilot reports, and the private count
+    rows. It never queries daily_metrics, alerts, incidents, or model_scores, and it never
+    reads values stored under calibration or test episodes.
     """
     private_path = _report_paths(run_dir, "pilot")[1]
     if not private_path.is_file():
@@ -1978,7 +2009,26 @@ def _validate_pilot_report_contract(
         report = json.loads(private_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         _fail(f"pilot private truth report is unreadable or invalid JSON: {exc}")
+    public_path = _report_paths(run_dir, "pilot")[0]
+    try:
+        public_report = json.loads(public_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(f"pilot operational report is unreadable or invalid JSON: {exc}")
     roles = {row[0]: row[1] for row in operational.execute("SELECT episode_id, role FROM episodes")}
+    held_out_ids = {
+        episode_id for episode_id, role in roles.items() if role in {"calibration", "test"}
+    }
+    leaked = sorted(
+        {
+            *_held_out_score_paths(public_report, held_out_ids),
+            *_held_out_score_paths(report, held_out_ids),
+        }
+    )
+    if leaked:
+        _fail(
+            "pilot reports carry score, metric, alert, or diagnostic fields under held-out "
+            f"episodes: {leaked[:5]}"
+        )
     development = {episode_id for episode_id, role in roles.items() if role == "development"}
     diagnostics = report.get("p1_4_feature_diagnostics")
     if not isinstance(diagnostics, dict):

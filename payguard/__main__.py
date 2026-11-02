@@ -6,7 +6,7 @@ import argparse
 import sys
 from typing import Sequence
 
-from payguard.harness import BENCHMARK_COST_CAP_USD, HarnessError, run_benchmark
+from payguard.harness import BENCHMARK_COST_CAP_USD, HARNESS_PROFILES, HarnessError, run_benchmark
 from payguard.identity import (
     LOCK_PROFILE_CHOICES,
     POLICY_PROVIDERS,
@@ -21,9 +21,9 @@ def _parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser(
         "run",
-        help="run the smoke pipeline and one selected policy on an isolated DB copy",
+        help="run the smoke or pilot pipeline and one selected policy on an isolated DB copy",
     )
-    run_parser.add_argument("--profile", choices=("smoke",), default="smoke")
+    run_parser.add_argument("--profile", choices=HARNESS_PROFILES, default="smoke")
     run_parser.add_argument("--policy", choices=tuple(POLICY_PROVIDERS), required=True)
     run_parser.add_argument("--out", required=True, help="benchmark root; reuse to resume/add policies")
     run_parser.add_argument(
@@ -72,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     print("PayGuard benchmark run completed")
+    print(f"profile={report['profile']}")
     print(f"policy={report['policy_name']}")
     print(f"analysis_role={report['evaluation']['episode_role']}")
     print(f"base_fingerprint={report['base_fingerprint']}")

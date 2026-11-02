@@ -42,7 +42,7 @@ from payguard.identity import (
 from payguard.run_identity import verify_harness_policy_run
 
 
-PROFILE = "smoke"
+HARNESS_PROFILES = ("smoke", "pilot")
 BENCHMARK_COST_CAP_USD = load_benchmark_cost_cap()
 MODEL_RUN_ID = "payguard-p5"
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,13 +105,19 @@ def _ensure_harness_root(
     root: Path,
     identity_hashes: Mapping[str, Any],
     state_dir: Path,
+    profile: str,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "harness-manifest.json"
     if manifest_path.exists():
         manifest = _read_json(manifest_path)
-        if manifest.get("schema_version") != 1 or manifest.get("profile") != PROFILE:
-            raise HarnessError("existing output directory belongs to another harness/profile")
+        if manifest.get("schema_version") != 1:
+            raise HarnessError(f"existing harness manifest has an unsupported schema: {manifest_path}")
+        if manifest.get("profile") != profile:
+            raise HarnessError(
+                f"existing output directory belongs to profile {manifest.get('profile')!r}, "
+                f"not {profile!r}; use a separate benchmark root for each profile"
+            )
         assert_harness_state_directory(root, manifest)
         manifest_hashes = manifest.get("hashes")
         differences = (
@@ -134,15 +140,25 @@ def _ensure_harness_root(
         manifest_path,
         {
             "schema_version": 1,
-            "profile": PROFILE,
+            "profile": profile,
             "state_dir": str(state_dir),
             "hashes": dict(identity_hashes),
         },
     )
 
 
-def _validate_static_identity(path: Path, expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
+def _validate_static_identity(
+    path: Path,
+    expected: Mapping[str, Any],
+    *,
+    label: str,
+    profile: str,
+) -> dict[str, Any]:
     manifest = _read_json(path)
+    if manifest.get("profile") != profile:
+        raise HarnessError(
+            f"{label} belongs to profile {manifest.get('profile')!r}, not {profile!r}: {path}"
+        )
     manifest_hashes = manifest.get("hashes")
     differences = (
         identity_hash_mismatches(manifest_hashes, expected)
@@ -157,14 +173,14 @@ def _validate_static_identity(path: Path, expected: Mapping[str, Any], *, label:
     return manifest
 
 
-def _run_simulator_generation(building_dir: Path) -> None:
+def _run_simulator_generation(building_dir: Path, profile: str) -> None:
     command = [
         sys.executable,
         "-m",
         "simulator",
         "generate",
         "--profile",
-        PROFILE,
+        profile,
         "--out",
         str(building_dir),
         "--config",
@@ -185,10 +201,14 @@ def _run_simulator_generation(building_dir: Path) -> None:
     )
     if result.returncode != 0:
         details = (result.stderr or result.stdout).strip()
-        raise HarnessError(f"simulator smoke generation failed: {details}")
+        raise HarnessError(f"simulator {profile} generation failed: {details}")
 
 
-def _ensure_generated_base(root: Path, identity_hashes: Mapping[str, Any]) -> Path:
+def _ensure_generated_base(
+    root: Path,
+    identity_hashes: Mapping[str, Any],
+    profile: str,
+) -> Path:
     base_dir = root / "base"
     generation_manifest = base_dir / "generation-manifest.json"
     if base_dir.exists():
@@ -200,6 +220,7 @@ def _ensure_generated_base(root: Path, identity_hashes: Mapping[str, Any]) -> Pa
             generation_manifest,
             identity_hashes,
             label="base generation",
+            profile=profile,
         )
         return base_dir
 
@@ -208,12 +229,12 @@ def _ensure_generated_base(root: Path, identity_hashes: Mapping[str, Any]) -> Pa
         raise HarnessError(
             f"incomplete simulator output exists at {building_dir}; remove it before retrying"
         )
-    _run_simulator_generation(building_dir)
+    _run_simulator_generation(building_dir, profile)
     _write_json(
         building_dir / "generation-manifest.json",
         {
             "schema_version": 1,
-            "profile": PROFILE,
+            "profile": profile,
             "hashes": dict(identity_hashes),
         },
     )
@@ -256,7 +277,7 @@ def _episode_roles(database_path: Path) -> dict[str, tuple[str, ...]]:
             raise HarnessError(f"operational episode has an unknown role: {role!r}")
         roles[role].append(str(row["episode_id"]))
     if set(roles) != set(ROLES):
-        raise HarnessError("smoke base must contain development, calibration, and test episodes")
+        raise HarnessError("base must contain development, calibration, and test episodes")
     return {role: tuple(episode_ids) for role, episode_ids in sorted(roles.items())}
 
 
@@ -329,7 +350,11 @@ def _prepare_model_monitoring(base_dir: Path) -> dict[str, Any]:
     }
 
 
-def _freeze_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+def _freeze_base(
+    base_dir: Path,
+    identity_hashes: Mapping[str, Any],
+    profile: str,
+) -> tuple[str, dict[str, Any]]:
     operational_path = base_dir / "operational" / "observations.sqlite"
     pipeline_result = _prepare_model_monitoring(base_dir)
     artifact_dir = artifact_directory_for_run(
@@ -341,7 +366,7 @@ def _freeze_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[st
     manifest_path = base_dir / "base-manifest.json"
     manifest = {
         "schema_version": 1,
-        "profile": PROFILE,
+        "profile": profile,
         "freeze_point": "after model_scores, daily_metrics, alerts; before incidents and decisions",
         "hashes": dict(identity_hashes),
         "input_fingerprint": fingerprint,
@@ -349,7 +374,12 @@ def _freeze_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[st
         "pipeline": pipeline_result,
     }
     if manifest_path.exists():
-        previous = _validate_static_identity(manifest_path, identity_hashes, label="BASE")
+        previous = _validate_static_identity(
+            manifest_path,
+            identity_hashes,
+            label="BASE",
+            profile=profile,
+        )
         if previous.get("input_fingerprint") != fingerprint:
             raise RunIdentityError("BASE input fingerprint changed while resuming the harness")
         if previous.get("model_artifacts") != artifact_identity:
@@ -361,10 +391,19 @@ def _freeze_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[st
     return fingerprint, pipeline_result
 
 
-def _ensure_frozen_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+def _ensure_frozen_base(
+    base_dir: Path,
+    identity_hashes: Mapping[str, Any],
+    profile: str,
+) -> tuple[str, dict[str, Any]]:
     manifest_path = base_dir / "base-manifest.json"
     if manifest_path.exists():
-        manifest = _validate_static_identity(manifest_path, identity_hashes, label="BASE")
+        manifest = _validate_static_identity(
+            manifest_path,
+            identity_hashes,
+            label="BASE",
+            profile=profile,
+        )
         artifacts = base_dir.parent / "artifacts" / MODEL_RUN_ID / "model"
         required = (
             "metadata.json",
@@ -397,7 +436,7 @@ def _ensure_frozen_base(base_dir: Path, identity_hashes: Mapping[str, Any]) -> t
             str(manifest["input_fingerprint"]),
         )
         return fingerprint, dict(manifest.get("pipeline", {}))
-    return _freeze_base(base_dir, identity_hashes)
+    return _freeze_base(base_dir, identity_hashes, profile)
 
 
 def _copy_database(source: Path, destination: Path) -> None:
@@ -555,6 +594,7 @@ def _policy_run(
     identity_hashes: Mapping[str, Any],
     policy_name: str,
     analysis_role: str,
+    profile: str,
 ) -> dict[str, Any]:
     identity = current_run_identity(policy_name, benchmark_root=root)
     hash_differences = identity_hash_mismatches(identity["hashes"], identity_hashes)
@@ -663,7 +703,7 @@ def _policy_run(
     cost_summary = ledger.snapshot()
     report = {
         "schema_version": 1,
-        "profile": PROFILE,
+        "profile": profile,
         "policy_name": policy_name,
         "policy_version": manifest["policy_version"],
         "model_slug": manifest["model_slug"],
@@ -697,8 +737,8 @@ def run_benchmark(
     output_dir: str | Path,
     analysis_role: str = "development",
 ) -> dict[str, Any]:
-    if profile != PROFILE:
-        raise HarnessError("P5.1 currently supports only --profile smoke")
+    if profile not in HARNESS_PROFILES:
+        raise HarnessError(f"unsupported harness profile: {profile!r}; use smoke or pilot")
     if policy_name not in POLICY_PROVIDERS:
         raise HarnessError(f"unsupported policy: {policy_name!r}")
     if analysis_role not in ROLES:
@@ -707,9 +747,9 @@ def run_benchmark(
     root = Path(output_dir).expanduser().resolve()
     state_dir = benchmark_state_directory(root, create=False)
     hashes = current_hashes(benchmark_root=root)
-    _ensure_harness_root(root, hashes, state_dir)
-    base_dir = _ensure_generated_base(root, hashes)
-    base_fingerprint, base_pipeline = _ensure_frozen_base(base_dir, hashes)
+    _ensure_harness_root(root, hashes, state_dir, profile)
+    base_dir = _ensure_generated_base(root, hashes, profile)
+    base_fingerprint, base_pipeline = _ensure_frozen_base(base_dir, hashes, profile)
     roles = _episode_roles(base_dir / "operational" / "observations.sqlite")
     record_role_touches(
         root,
@@ -735,6 +775,7 @@ def run_benchmark(
         hashes,
         policy_name,
         analysis_role,
+        profile,
     )
 
     summary_path = root / "harness-report.json"
@@ -743,7 +784,7 @@ def run_benchmark(
     else:
         summary = {
             "schema_version": 1,
-            "profile": PROFILE,
+            "profile": profile,
             "base_fingerprint": base_fingerprint,
             "policies": {},
         }

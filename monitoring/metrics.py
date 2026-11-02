@@ -635,8 +635,15 @@ def compute_daily_metrics(
             if _parse_timestamp(str(row["available_at"]))
             > _parse_timestamp(str(row["created_at"]))
         ]
+        # Same predicate as above, evaluated per row: avoids the O(R^2) list
+        # membership test and keeps the original row order.
         available_reference_targets = [
-            row for row in reference_targets if row not in reference_targets_unavailable
+            row
+            for row in reference_targets
+            if not (
+                _parse_timestamp(str(row["available_at"]))
+                > _parse_timestamp(str(row["created_at"]))
+            )
         ]
         reference_features = build_score_feature_matrix(
             operational,
@@ -655,6 +662,23 @@ def compute_daily_metrics(
         episode_snapshot = read_as_of(
             operational,
             "transactions",
+            episode_id=episode_id,
+            t0=t0_utc,
+            as_of_time=last_as_of,
+        )
+        # Each day's snapshot is the last snapshot restricted to
+        # ``available_at <= day as-of``: same episode scope, same ordering.
+        # Reading once avoids one full table read per business day.
+        calendar_last_snapshot = read_as_of(
+            operational,
+            "business_calendar",
+            episode_id=episode_id,
+            t0=t0_utc,
+            as_of_time=last_as_of,
+        )
+        score_last_snapshot = read_as_of(
+            operational,
+            "model_scores",
             episode_id=episode_id,
             t0=t0_utc,
             as_of_time=last_as_of,
@@ -690,12 +714,8 @@ def compute_daily_metrics(
             window_start = business_date - timedelta(days=monitoring_config.window_days - 1)
             complete_window = window_start >= t0_date
 
-            transaction_snapshot = read_as_of(
-                operational,
-                "transactions",
-                episode_id=episode_id,
-                t0=t0_utc,
-                as_of_time=as_of_time,
+            transaction_snapshot = _rows_available_by(
+                episode_snapshot, utc_timestamp(as_of_time)
             )
             episode_sources = [
                 row
@@ -718,12 +738,8 @@ def compute_daily_metrics(
             unavailable_target_count = sum(
                 txn_id in episode_targets_unavailable for txn_id in window_target_ids
             )
-            calendar_snapshot = read_as_of(
-                operational,
-                "business_calendar",
-                episode_id=episode_id,
-                t0=t0_utc,
-                as_of_time=as_of_time,
+            calendar_snapshot = _rows_available_by(
+                calendar_last_snapshot, utc_timestamp(as_of_time)
             )
             calendar_rows = [
                 row for row in calendar_snapshot if row["episode_id"] == episode_id
@@ -843,12 +859,8 @@ def compute_daily_metrics(
                 )
             )
 
-            score_snapshot = read_as_of(
-                operational,
-                "model_scores",
-                episode_id=episode_id,
-                t0=t0_utc,
-                as_of_time=as_of_time,
+            score_snapshot = _rows_available_by(
+                score_last_snapshot, utc_timestamp(as_of_time)
             )
             window_scores = [
                 row
@@ -893,6 +905,19 @@ def compute_daily_metrics(
                 )
 
     return metric_rows
+
+
+def _rows_available_by(rows: list[dict[str, Any]], as_of_utc: str) -> list[dict[str, Any]]:
+    """Keep rows with ``available_at <= as_of_utc``, preserving order.
+
+    ``rows`` must come from ``read_as_of`` for the same episode at a later or
+    equal as-of time; the predicate matches the SQL bound in that reader.
+    """
+    return [
+        row
+        for row in rows
+        if row["available_at"] is not None and str(row["available_at"]) <= as_of_utc
+    ]
 
 
 def metrics_csv(rows: list[dict[str, Any]]) -> str:

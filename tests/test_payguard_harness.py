@@ -456,6 +456,57 @@ def test_lock_profile_must_match_root_and_pilot_maps_to_benchmark(
     assert json.loads(lock_path.read_text(encoding="utf-8"))["profile"] == "benchmark"
 
 
+def test_pilot_profile_run_is_isolated_from_smoke_roots_and_refuses_held_out_without_locks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "pilot-benchmark"
+    smoke_generation = harness._run_simulator_generation
+    requested_profiles: list[str] = []
+
+    def bounded_generation(building_dir: Path, profile: str) -> None:
+        # The locked 60-episode pilot is too large for the suite. This stand-in records the
+        # profile the harness asked for and fills the pilot-labelled base with smoke data.
+        requested_profiles.append(profile)
+        smoke_generation(building_dir, "smoke")
+
+    monkeypatch.setattr(harness, "_run_simulator_generation", bounded_generation)
+
+    assert payguard_main(
+        ["run", "--profile", "pilot", "--policy", "rule_human", "--out", str(root)]
+    ) == 0
+    assert "profile=pilot" in capsys.readouterr().out
+    assert requested_profiles == ["pilot"]
+    for manifest_path in (
+        root / "harness-manifest.json",
+        root / "base" / "generation-manifest.json",
+        root / "base" / "base-manifest.json",
+    ):
+        assert json.loads(manifest_path.read_text(encoding="utf-8"))["profile"] == "pilot"
+
+    assert payguard_main(
+        ["run", "--profile", "smoke", "--policy", "rule_human", "--out", str(root)]
+    ) == 2
+    assert "belongs to profile 'pilot'" in capsys.readouterr().err
+
+    assert payguard_main(
+        [
+            "run",
+            "--profile",
+            "pilot",
+            "--policy",
+            "rule_human",
+            "--out",
+            str(root),
+            "--analysis-role",
+            "test",
+        ]
+    ) == 2
+    assert "lock marker is missing" in capsys.readouterr().err
+    assert requested_profiles == ["pilot"]
+
+
 def test_standalone_openrouter_triage_uses_durable_benchmark_ledger(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
