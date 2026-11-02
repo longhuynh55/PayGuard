@@ -88,6 +88,32 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
 - **A3 (nên sửa):** `compute_alerts` không kiểm `available_at` của metric (`monitoring/signals.py:281`, `:418`). Sửa: metric có `available_at` > cutoff bị loại hoặc báo lỗi theo hợp đồng `data.md`; alert không được có `available_at` sớm hơn metric nguồn. Test API với metric đến trễ.
 - **B2 (thêm 02/11 sau audit lượt 2, người dùng duyệt):** `evaluation` chạy standalone ghi report truth ra đường dẫn `--out` tùy ý và có thể ghi đè file có sẵn (`evaluation/decisions.py:483`, `evaluation/__main__.py:209`). Sửa: chỉ cho ghi dưới thư mục private reports của run, từ chối ghi đè artifact đầu vào; test functional.
 - **Nghiệm thu:** 4 test functional mới (A1, A2, A3, B2) đỏ trên main, xanh sau sửa; output smoke harness (`model_scores`, `daily_metrics`, `alerts`, decisions) không đổi; docs (`data.md`/`evaluation.md`) sửa cùng nếu hợp đồng đổi; full suite một lần; không gọi API thật.
+- **Bàn giao AUDIT-FIX-1 (Claude Haiku 5.5, 02/11/2026):** chưa commit (orchestrator commit sau test); không sửa MASTER. A1, A2, A3, B2 đã sửa.
+  - **Sửa:**
+    - A1: `evaluation/matcher.py` thêm `assert_operational_roles_match_private_manifest`. CLI `python -m evaluation decisions` đối chiếu mọi episode đăng ký trong operational DB với `episode_manifest.role` trước `assert_role_access` và trước khi đọc truth; thiếu hoặc lệch thì exit 2. `evaluate_operational_decisions` đối chiếu các episode được chọn trước khi đọc truth.
+    - A2: `triage/llm.py` `_measured_usd`: chỉ settle theo `cost` hữu hạn ≥ 0 (số JSON, không nhận bool hay chuỗi), hoặc khi cả hai bộ đếm token là số nguyên ≥ 0. Còn lại giữ reservation với `conservative = true` và `conservative_reason`. `triage/cost_ledger.py` `settle()` ghi `conservative_reason` và từ chối cặp conservative/reason không khớp.
+    - A3: `monitoring/signals.py` `compute_alerts` báo lỗi khi dòng daily_metrics thiếu `available_at` hoặc `available_at` ≠ `as_of_time`; alert lấy `available_at` của metric nguồn.
+    - B2: `evaluation/decisions.py` `_truth_report_path`: báo cáo truth chỉ ghi dưới `<private>/reports/`; từ chối nếu đường dẫn resolve ra ngoài hoặc trùng artifact đầu vào (operational DB, private DB, kể cả hard link/symlink). Báo cáo cũ cùng đường dẫn vẫn được thay thế.
+  - **Test mới (viết trước; đỏ trên code cũ, xanh sau sửa):**
+    - A1 `tests/test_evaluation_decisions.py::test_decisions_cli_refuses_operational_role_relabel_before_truth_or_report`: trước sửa `assert 0 == 2`; evaluator vẫn chạy trên episode bị relabel.
+    - B2 `tests/test_evaluation_decisions.py::test_standalone_decisions_report_stays_under_private_reports_and_never_overwrites_inputs`: trước sửa exit 0 và ghi báo cáo ra ngoài thư mục private reports.
+    - A2 `tests/test_triage_llm.py::test_settlement_uses_only_measured_usage_and_marks_the_rest_conservative`: trước sửa cost `"0.02"` được settle `0.020000000000` thay vì reservation `0.000073340000`.
+    - A3 `tests/test_monitoring_signals.py::test_metric_that_becomes_available_after_its_snapshot_is_refused_not_alerted`: trước sửa không raise, alert được tạo từ metric đến trễ.
+  - **Hợp đồng đổi (docs cùng thay đổi):** `docs/data.md` §9 (settle event có `conservative_reason`, quy tắc settle đo được); `docs/evaluation.md` §9 (CLI: `--out` standalone phải nằm dưới `private/reports/`; đối chiếu role trước khi đọc truth và ghi ledger).
+  - **Quyết định implementer (orchestrator có thể đổi):**
+    1. A3 chọn báo lỗi thay vì loại dòng: spec cho phép cả hai; hợp đồng `daily_metrics` đã khóa `event_at = available_at = as_of_time` nên không đổi docs đã khóa.
+    2. Đối chiếu role: CLI kiểm mọi episode đăng ký; library kiểm các episode được chọn.
+    3. "Artifact đầu vào" = operational DB và private evaluator DB. Báo cáo cùng đường dẫn vẫn được thay thế, vì test harness hiện có dựa vào điều đó.
+    4. Cap trong bộ nhớ (`_spent_cost_usd`) dùng cùng số đo với ledger: usage không đo được cộng mức reservation bảo thủ (trước đây cộng 0 hoặc chỉ phần token đọc được).
+  - **Kiểm chứng:**
+    - Full suite, một lần: `452 passed, 1 xfailed` (448 theo MASTER cho main + 4 test mới).
+    - Test liên quan chạy riêng lẻ, đều pass: LLM usage/ceiling/retry; ledger harness (overrun, retry, cap, OpenRouter standalone); P4 episode role; support role mismatch; evaluator report; monitoring as-of; triage agent usage; harness hai policy và held-out.
+    - Smoke mới `/var/tmp/payguard-af1/gen-smoke-new`: generate + validate 21 passed, 0 failed, fingerprint `0bf373c5…`.
+    - Smoke harness (`rule_human`, `rule_agent_fake`) trong worktree và `/var/tmp/payguard-baselines/main-wt` (chạy `--no-sync`): `base_fingerprint` đều `8358392b…`; `decisions.json` của hai policy byte-identical. `run_fingerprint` khác nhau; không thuộc danh sách output cần giữ, chưa tách riêng nguyên nhân (dự kiến do hash code đã đổi). Smoke development không có decision nào (0 ở cả hai), nên so sánh decisions chỉ mang tính tầm thường.
+    - `python3 review/verify_plan_claims.py`: 20 ví dụ. `python3 review/check_links.py`: 0 link hỏng.
+    - Không gọi API thật; không đụng `simulator/reports.py`, `model/features.py`, `payguard/harness.py`, `simulator/validate.py`.
+  - **Ghi chú:** `model evaluate` không đổi (đã đối chiếu role theo HARDEN-2); CLI `support` đã đối chiếu từ trước.
+- **Trạng thái:** ✅ merge 02/11/2026 (review Opus r1 PASS, findings ngoài repo; full suite 452 passed + 1 xfailed). Backlog không chặn: F1 `--out` ghi đè được report private khác (ví dụ `smoke_truth.json`) — chỉ cho thay report decisions do evaluator tạo; F2 cap trong bộ nhớ cộng 0 khi response không phải object và khi lần thử lỗi trước retry; F3 `cost`/token quá lớn gây `OverflowError` bị gắn nhãn `transport_error`; ghi chú: `cost` sai kiểu nhưng đủ hai bộ đếm token thì settle theo token (đúng chữ spec); `LLMCallRecord.cost_usd` chưa có cờ `conservative`.
 
 ### Sau HARNESS-PILOT — từ audit Terra lượt 2 (người dùng duyệt 02/11/2026)
 - **DORMANT-FIX (B1):** `new_or_dormant` (`simulator/recipient_features.py:111`) tính hoạt động gần nhất gồm cả giao dịch đang xét → tài khoản ngủ lâu tái hoạt động không được nhận ra. Sửa: trạng thái ngủ xác định từ hoạt động trước giao dịch đang xét (as-of); test API. Đổi feature → score/alert smoke có thể đổi: liệt kê baseline cũ → mới theo quy tắc 29/10, gate smoke giữ.

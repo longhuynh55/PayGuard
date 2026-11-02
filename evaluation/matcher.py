@@ -464,6 +464,55 @@ def load_private_evaluation_data(
     )
 
 
+def assert_operational_roles_match_private_manifest(
+    private_db_path: str | Path, operational_roles: Mapping[str, str]
+) -> None:
+    """Refuse operational role labels that disagree with the private episode manifest.
+
+    Every episode in ``operational_roles`` must exist in the private
+    ``episode_manifest`` with the same role. Callers run this before any truth
+    read, report write, or role-ledger touch, so a relabeled operational row
+    cannot steer the evaluator toward held-out truth.
+    """
+    if not operational_roles:
+        return
+    database_path = Path(private_db_path).expanduser().resolve()
+    if not database_path.is_file():
+        raise EvaluationMatcherError(f"private evaluator database does not exist: {database_path}")
+    episode_ids = tuple(sorted(str(episode_id) for episode_id in operational_roles))
+    placeholders = ", ".join("?" for _ in episode_ids)
+    try:
+        connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT episode_id, role FROM episode_manifest "
+                f"WHERE episode_id IN ({placeholders})",
+                episode_ids,
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise EvaluationMatcherError(
+            f"could not read private episode_manifest roles: {exc}"
+        ) from exc
+    private_roles = {str(row[0]): str(row[1]) for row in rows}
+    differences: list[str] = []
+    for episode_id in episode_ids:
+        operational_role = str(operational_roles[episode_id])
+        private_role = private_roles.get(episode_id)
+        if private_role is None:
+            differences.append(f"{episode_id}: operational={operational_role}, private=missing")
+        elif private_role != operational_role:
+            differences.append(
+                f"{episode_id}: operational={operational_role}, private={private_role}"
+            )
+    if differences:
+        raise EvaluationMatcherError(
+            "operational episode roles disagree with the private episode_manifest.role: "
+            + "; ".join(differences)
+        )
+
+
 def _json_text_array(value: Any, *, field: str, truth_id: str) -> tuple[str, ...]:
     if isinstance(value, str):
         try:

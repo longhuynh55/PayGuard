@@ -9,6 +9,7 @@ import sys
 from typing import Sequence
 
 from evaluation.decisions import evaluate_operational_decisions
+from evaluation.matcher import assert_operational_roles_match_private_manifest
 from evaluation.support import run_development_support
 from payguard.identity import (
     assert_role_access,
@@ -183,6 +184,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 policy_version=policy_version,
                 model_slug=model_slug,
             )
+        assert_operational_roles_match_private_manifest(
+            private_path,
+            {str(episode_id): str(role) for episode_id, role in role_rows},
+        )
         if harness_root is not None or any(
             role != "development" for role in selected_roles
         ):

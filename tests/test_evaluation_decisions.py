@@ -1008,6 +1008,99 @@ def test_p4_cli_honors_episode_role_and_defaults_to_development(
         store.close()
 
 
+def test_decisions_cli_refuses_operational_role_relabel_before_truth_or_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A1: an operational episode relabeled to development is refused before any truth read."""
+    monkeypatch.setenv("PAYGUARD_BENCHMARK_STATE_DIR", str(tmp_path / "benchmark-state"))
+    store = _store(tmp_path)
+    relabeled_id = "ep-relabeled-test"
+    try:
+        insert_operational_record(
+            store.operational,
+            "episodes",
+            {"episode_id": relabeled_id, "role": "development"},
+        )
+        insert_private_record(store.private, "private_episodes", {"episode_id": relabeled_id})
+        insert_private_record(
+            store.private,
+            "episode_manifest",
+            {
+                "episode_id": relabeled_id,
+                "role": "test",
+                "seed": 789,
+                "template": "data_pipeline",
+                "content_fingerprint": "e" * 64,
+                "config_fingerprint": "f" * 64,
+                "config_json": json.dumps(
+                    _manifest_config(), sort_keys=True, separators=(",", ":")
+                ),
+            },
+        )
+        _persist_operational(
+            store, [_decision("dev-row", "2026-02-06T00:00:00.000000Z", "data_ticket")]
+        )
+    finally:
+        store.close()
+
+    run_dir = tmp_path / "evaluation-run"
+    evaluator_calls: list[tuple] = []
+    real_evaluator = evaluation_cli.evaluate_operational_decisions
+
+    def tracked_evaluator(*args, **kwargs):
+        evaluator_calls.append(args)
+        return real_evaluator(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation_cli, "evaluate_operational_decisions", tracked_evaluator)
+
+    assert evaluation_main(["decisions", "--run", str(run_dir)]) == 2
+    assert "roles disagree with the private episode_manifest.role" in capsys.readouterr().err
+    assert evaluator_calls == []
+    assert not (run_dir / "private" / "reports" / "p4_5_decisions.json").exists()
+
+
+def test_standalone_decisions_report_stays_under_private_reports_and_never_overwrites_inputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """B2: standalone --out stays under the run's private reports dir and never aliases inputs."""
+    store = _store(tmp_path)
+    try:
+        _persist_operational(
+            store, [_decision("dev-row", "2026-02-06T00:00:00.000000Z", "data_ticket")]
+        )
+    finally:
+        store.close()
+    run_dir = tmp_path / "evaluation-run"
+    operational_db = run_dir / "operational" / "observations.sqlite"
+    private_db = run_dir / "private" / "evaluator.sqlite"
+    reports_dir = run_dir / "private" / "reports"
+    operational_before = operational_db.read_bytes()
+    private_before = private_db.read_bytes()
+
+    outside = tmp_path / "elsewhere" / "report.json"
+    assert evaluation_main(["decisions", "--run", str(run_dir), "--out", str(outside)]) == 2
+    assert not outside.exists()
+    assert evaluation_main(["decisions", "--run", str(run_dir), "--out", str(operational_db)]) == 2
+    assert evaluation_main(["decisions", "--run", str(run_dir), "--out", str(private_db)]) == 2
+    assert operational_db.read_bytes() == operational_before
+    assert private_db.read_bytes() == private_before
+
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    alias = reports_dir / "alias-of-operational.sqlite"
+    os.link(operational_db, alias)
+    assert evaluation_main(["decisions", "--run", str(run_dir), "--out", str(alias)]) == 2
+    assert operational_db.read_bytes() == operational_before
+    capsys.readouterr()
+
+    allowed = reports_dir / "custom-decisions.json"
+    assert evaluation_main(["decisions", "--run", str(run_dir), "--out", str(allowed)]) == 0
+    report = json.loads(allowed.read_text(encoding="utf-8"))
+    assert report["decision_counts"]["total"] == 1
+
+
 def test_single_provider_db_is_reported_without_selector(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
