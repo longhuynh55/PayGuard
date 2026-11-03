@@ -54,6 +54,7 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
 - **Phụ thuộc:** tình trạng seasonal-volume-match / benign support theo quyết định người dùng 31/10 được ghi tại [bàn giao P3.7](p3-implementation.md).
 
 - **Trạng thái:** ✅ merge 31/10 (r1, r2 PASS); N1–N4 không chặn chuyển vào HARDEN-1. Trên smoke development chỉ có ep-0001 clean → mọi số 0; số có nghĩa chờ pilot.
+- **Kết quả pilot development (03/11/2026, main `7a1882b`, root `/var/tmp/payguard-bench3/root`, policy `rule_human`; chỉ development):** 12 episode, 10 truth duy nhất (6 cần can thiệp, 4 benign) ở 8 episode; rule coverage 8/10. Monitoring chỉ phát hiện **1/10 truth**: toàn bộ 22 alert và 22 incident nằm ở `ep-0009` (`data_pipeline`, 22/22 `matched`, mỗi alert thành một incident riêng); `fraud_surge` (4 episode), `seasonal` (3), `new_fraud`, `legit_business_spike` không sinh alert nào. 22 incident đều tới agent; `seasonal_calendar` checklist chưa có ở runtime vòng 1. Cửa sổ metric: 216/1440 snapshot chưa đủ (ba metric PSI/review rate, không phải volume). Fingerprint dữ liệu pilot và `pilot_truth.json` giống `bench2` (đối chiếu F2 PERF-STORAGE). Thời gian: `rule_human` 51 phút (gồm sinh pilot), `rule_agent_fake` 5,5 phút, support 1 phút. → Benchmark hiện gần như không có tín hiệu cho agent; chờ người dùng chốt hướng (độ nhạy monitoring/gom incident trên development) trước P5.0d/P4 vòng 2.
 
 ### HARDEN-1 — Guard role/lock và danh tính harness trước pilot
 - **Bối cảnh:** audit 31/10 mục A2, A3, B1, B2, C1, C5b.
