@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 
 from model.features import FEATURE_LOOKBACK_DAYS
+from simulator.common import TimestampParseError, parse_timestamp
 from simulator.storage import utc_timestamp
 from simulator.validate import RUN_METADATA_KEY
 
@@ -45,15 +46,11 @@ class PrivateEvaluationData:
 
 
 def _parse_timestamp(value: Any, *, field: str) -> tuple[datetime, str]:
-    if not isinstance(value, str):
-        raise EvaluationMatcherError(f"{field} must be a timezone-aware timestamp")
     try:
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("timezone is missing")
-        utc_value = parsed.astimezone(UTC)
-    except (TypeError, ValueError) as exc:
+        utc_value = parse_timestamp(value)
+    except TimestampParseError as exc:
+        if exc.reason == "not_text":
+            raise EvaluationMatcherError(f"{field} must be a timezone-aware timestamp") from None
         raise EvaluationMatcherError(
             f"{field} must be a valid timezone-aware timestamp: {value!r}"
         ) from exc

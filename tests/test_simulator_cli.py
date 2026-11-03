@@ -66,7 +66,6 @@ def _assert_smoke_data_ticket_baseline(
 
 def _cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    environment["UV_CACHE_DIR"] = "/tmp/payguard-uv-cache"
     return subprocess.run(
         [sys.executable, "-m", "simulator", *arguments],
         cwd=ROOT,
@@ -80,7 +79,6 @@ def _cli(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 def _module_cli(module: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    environment["UV_CACHE_DIR"] = "/tmp/payguard-uv-cache"
     return subprocess.run(
         [sys.executable, "-m", module, *arguments],
         cwd=ROOT,

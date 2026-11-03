@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Iterator, Literal, MutableMapping
 from zoneinfo import ZoneInfo
 
+from simulator.common import parse_timestamp
 from simulator.config import SimulatorConfig
 from simulator.fraud import generate_other_fraud_mechanisms, sample_card_testing_timing
 from simulator.identifiers import transaction_id
@@ -72,10 +73,6 @@ def _business_midnight(day: date, config: SimulatorConfig) -> datetime:
     return datetime.combine(day, time.min, tzinfo=timezone).astimezone(UTC)
 
 
-def _utc_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-
-
 def _check_truth_id(value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("incident_truth_id must be a non-empty string")
@@ -108,7 +105,7 @@ def _write_truth(
     if not affected_transaction_ids:
         raise ValueError("incident truth requires at least one affected transaction")
     effect_available_at = min(available_times)
-    intervention_start = _utc_datetime(effect_available_at)
+    intervention_start = parse_timestamp(effect_available_at)
     insert_private_record(
         private,
         "incident_truth",
@@ -1413,8 +1410,8 @@ def inject_two_cause_fraud_seasonal(
         ).fetchone()
         if fraud_truth is None or seasonal_truth is None:
             raise ValueError("two-cause injection did not write both component truths")
-        fraud_start, fraud_end = map(_utc_datetime, fraud_truth)
-        seasonal_start, seasonal_end = map(_utc_datetime, seasonal_truth)
+        fraud_start, fraud_end = map(parse_timestamp, fraud_truth)
+        seasonal_start, seasonal_end = map(parse_timestamp, seasonal_truth)
         if fraud_start > seasonal_end or seasonal_start > fraud_end:
             raise ValueError("two-cause fraud and seasonal effect windows must overlap")
         private.execute("RELEASE SAVEPOINT p1_6_two_cause_private")

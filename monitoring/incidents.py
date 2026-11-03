@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 import csv
 import hashlib
 import io
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from monitoring.signals import ALERT_COLUMNS
 from simulator.asof import read_as_of
+from simulator.common import TimestampParseError, parse_timestamp
 from simulator.storage import utc_timestamp
 
 
@@ -155,17 +156,13 @@ class _IncidentState:
 
 
 def _parse_timestamp(value: Any, *, field_name: str) -> tuple[datetime, str]:
-    if not isinstance(value, str):
-        raise MonitoringIncidentsError(
-            f"{field_name} must be a timezone-aware timestamp"
-        )
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("timezone is missing")
-        utc_value = parsed.astimezone(UTC)
-    except (TypeError, ValueError) as exc:
+        utc_value = parse_timestamp(value)
+    except TimestampParseError as exc:
+        if exc.reason == "not_text":
+            raise MonitoringIncidentsError(
+                f"{field_name} must be a timezone-aware timestamp"
+            ) from None
         raise MonitoringIncidentsError(
             f"{field_name} must be a valid timezone-aware timestamp: {value!r}"
         ) from exc

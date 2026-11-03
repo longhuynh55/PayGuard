@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from simulator.common import canonical_json
 from triage.llm import (
     DEFAULT_CONFIG_PATH,
     FakeLLMClient,
@@ -116,7 +117,7 @@ class OneStepAgent:
             "Use this incident snapshot and the code-computed rule checklist as context; "
             "only query facts visible in the supplied as-of snapshot. Return a compact "
             "result that may help classify the cause. Context: "
-            + _canonical_json(
+            + canonical_json(
                 {"incident": safe_incident, "rule_checklist_results": safe_checklists}
             )
         )
@@ -151,9 +152,9 @@ class OneStepAgent:
             "Do not include evidence_status, close_score, "
             "scope, checklist results, or tool trace IDs. A failed SQL result or missing "
             "evidence should lead to human_review.\n\nContext:\n"
-            + _canonical_json(proposal_context)
+            + canonical_json(proposal_context)
         )
-        snapshot_material = _canonical_json(
+        snapshot_material = canonical_json(
             {
                 "tool_snapshot": sql_result.trace.data_snapshot,
                 "incident": safe_incident,
@@ -432,6 +433,3 @@ def _aggregate_usage(records: list[LLMCallRecord]) -> dict[str, int | float] | N
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
 
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)

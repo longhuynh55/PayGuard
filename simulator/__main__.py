@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import sys
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from model.data import load_model_config
+from simulator.common import canonical_sha256
 from simulator.config import (
     load_episode_config,
     load_simulator_config,
@@ -31,13 +31,6 @@ from simulator.validate import RUN_METADATA_KEY, validate_run
 
 CODE_VERSION = "p1.8-smoke-pilot-round2-v1"
 SCHEMA_VERSION = 1
-
-
-def _canonical_hash(value: Any) -> str:
-    payload = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _git_commit() -> str | None:
@@ -84,7 +77,7 @@ def _generate(args: argparse.Namespace) -> int:
         "episodes": episode_config.model_dump(mode="json"),
         "model_support": support_config,
     }
-    config_fingerprint = _canonical_hash(resolved_config)
+    config_fingerprint = canonical_sha256(resolved_config)
     started_at = datetime.now(UTC)
     started_monotonic = time.monotonic()
     with create_export_stores(output) as stores:

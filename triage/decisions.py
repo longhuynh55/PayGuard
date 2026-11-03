@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 import json
 import math
 import sqlite3
 from typing import Any
 
+from simulator.common import TimestampParseError, parse_timestamp
 from simulator.storage import StorageError, insert_operational_record
 
 
@@ -70,16 +71,16 @@ def normalize_decision_real_columns(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _utc_timestamp(value: Any, field_name: str) -> datetime:
-    if not isinstance(value, str):
-        raise DecisionSchemaError(f"{field_name} must be a UTC timestamp")
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise DecisionSchemaError(f"{field_name} must be a valid timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise DecisionSchemaError(f"{field_name} must be timezone-aware UTC")
-    return parsed.astimezone(UTC)
+        return parse_timestamp(value, utc=True)
+    except TimestampParseError as exc:
+        messages = {
+            "not_text": "must be a UTC timestamp",
+            "invalid": "must be a valid timestamp",
+            "naive": "must be timezone-aware UTC",
+            "not_utc": "must be timezone-aware UTC",
+        }
+        raise DecisionSchemaError(f"{field_name} {messages[exc.reason]}") from exc
 
 
 def _nonempty_text(value: Any, field_name: str) -> None:

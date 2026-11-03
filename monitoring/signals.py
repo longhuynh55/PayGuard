@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import io
 import json
@@ -16,6 +15,7 @@ from typing import Any, TextIO
 import yaml
 
 from monitoring.metrics import DAILY_METRIC_COLUMNS
+from simulator.common import TimestampParseError, parse_timestamp
 from simulator.storage import utc_timestamp
 
 
@@ -60,18 +60,15 @@ class SignalResult:
 
 
 def _parse_as_of(value: Any, *, field: str) -> str:
-    if not isinstance(value, str):
-        raise MonitoringSignalsError(f"{field} must be a timezone-aware timestamp")
     try:
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("timezone is missing")
-        return utc_timestamp(parsed.astimezone(UTC))
-    except (ValueError, TypeError) as exc:
+        parsed = parse_timestamp(value)
+    except TimestampParseError as exc:
+        if exc.reason == "not_text":
+            raise MonitoringSignalsError(f"{field} must be a timezone-aware timestamp") from None
         raise MonitoringSignalsError(
             f"{field} must be a valid timezone-aware timestamp: {value!r}"
         ) from exc
+    return utc_timestamp(parsed)
 
 
 def _load_signal_config(path: str | Path) -> _SignalConfig:

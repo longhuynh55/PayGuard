@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from model.config import load_pipeline_config
 from model.data import InsufficientSplitSupportError, ModelConfig, build_splits, load_model_config
 from simulator.asof import read_as_of
+from simulator.common import parse_timestamp
 from simulator.config import EpisodeConfig, SimulatorConfig
 from simulator.labels import label_delay_report, label_truth_metadata_key, snapshot_labels
 from simulator.storage import utc_timestamp
@@ -30,10 +31,6 @@ REPORT_PROFILES = ("smoke", "pilot")
 LABEL_STATES = ("confirmed_fraud", "confirmed_legit", "matured_negative", "pending")
 
 
-def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-
-
 def _t0_timestamp(config: SimulatorConfig, timezone_name: str) -> datetime:
     return datetime.combine(
         config.timeline.t0_business_date.value,
@@ -43,7 +40,7 @@ def _t0_timestamp(config: SimulatorConfig, timezone_name: str) -> datetime:
 
 
 def _business_date(value: str, timezone_name: str) -> date:
-    return _parse_timestamp(value).astimezone(ZoneInfo(timezone_name)).date()
+    return parse_timestamp(value).astimezone(ZoneInfo(timezone_name)).date()
 
 
 def _date_interval_from_model_doc(path: str | Path) -> tuple[date, date]:
@@ -176,7 +173,7 @@ def _distribution(rows: list[dict[str, Any]], timezone_name: str) -> dict[str, A
     by_channel = Counter(str(row["channel"]) for row in rows)
     by_date = Counter(_business_date(row["event_at"], timezone_name).isoformat() for row in rows)
     by_hour = Counter(
-        f"{_parse_timestamp(row['event_at']).astimezone(ZoneInfo(timezone_name)).hour:02d}"
+        f"{parse_timestamp(row['event_at']).astimezone(ZoneInfo(timezone_name)).hour:02d}"
         for row in rows
     )
     return {
@@ -199,14 +196,14 @@ def _completeness(
         complete_count = 0
         for transaction in transactions:
             customer = customers_by_id.get(transaction["customer_id"])
-            created_at = _parse_timestamp(transaction["created_at"])
+            created_at = parse_timestamp(transaction["created_at"])
             if customer is None or customer["episode_id"] not in {"base", episode_id}:
                 continue
-            if _parse_timestamp(customer["available_at"]) > created_at:
+            if parse_timestamp(customer["available_at"]) > created_at:
                 continue
             observed_from = max(
-                _parse_timestamp(customer["event_at"]),
-                _parse_timestamp(customer["available_at"]),
+                parse_timestamp(customer["event_at"]),
+                parse_timestamp(customer["available_at"]),
             )
             if observed_from <= created_at - duration:
                 complete_count += 1
@@ -299,7 +296,7 @@ def _p14_point_in_time_features(
     removed from its own prior history by position, so it still counts toward the windows
     exactly when it is part of its history.
     """
-    created = [_parse_timestamp(row["created_at"]) for row in rows]
+    created = [parse_timestamp(row["created_at"]) for row in rows]
     entering_at = [max(row["created_at"], row["available_at"]) for row in rows]
     pending = sorted(range(len(rows)), key=entering_at.__getitem__)
     device_counts: Counter[tuple[str, str | None]] = Counter()
@@ -383,9 +380,9 @@ def _p14_point_in_time_features(
                     last_prior_activity = activity_at
                     break
         recipient = customers.get(recipient_id) if is_transfer else None
-        recipient_created = _parse_timestamp(recipient["event_at"]) if recipient else None
+        recipient_created = parse_timestamp(recipient["event_at"]) if recipient else None
         sender = customers.get(customer)
-        sender_created = _parse_timestamp(sender["event_at"]) if sender else None
+        sender_created = parse_timestamp(sender["event_at"]) if sender else None
         sender_age_days = (
             (current_at - sender_created).total_seconds() / 86_400
             if sender_created is not None
@@ -510,7 +507,7 @@ def _p14_feature_diagnostics(
                 outgoing = transactions_by_id.get(outgoing_id)
                 if incoming is None or outgoing is None:
                     continue
-                delay = _parse_timestamp(outgoing["created_at"]) - _parse_timestamp(
+                delay = parse_timestamp(outgoing["created_at"]) - parse_timestamp(
                     incoming["created_at"]
                 )
                 delays_seconds.append(int(delay.total_seconds()))
@@ -859,7 +856,7 @@ def build_profile_reports(
                 as_of_time=utc_timestamp(monitoring_end),
             )
             if row["episode_id"] == episode_id
-            and t0 <= _parse_timestamp(row["event_at"]) < monitoring_end
+            and t0 <= parse_timestamp(row["event_at"]) < monitoring_end
         ]
         # The shared customer records are queried through the same episode/as-of boundary.
         observed_customers = read_as_of(
@@ -886,7 +883,7 @@ def build_profile_reports(
             }
         )
         last_transaction = max(
-            (_parse_timestamp(row["event_at"]) for row in observed_transactions),
+            (parse_timestamp(row["event_at"]) for row in observed_transactions),
             default=None,
         )
         label_as_of = (

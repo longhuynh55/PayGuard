@@ -14,6 +14,7 @@ from typing import Any, Iterator, Mapping
 
 import yaml
 
+from simulator.common import canonical_json_bytes
 from triage.llm import load_llm_config
 from triage.runbooks import load_triage_config
 
@@ -93,12 +94,6 @@ def benchmark_state_directory(
     return state_dir
 
 
-def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-
-
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -147,7 +142,7 @@ def _runtime_code_hash(root: Path) -> str:
                 raise RunIdentityError(f"could not hash runtime source {relative!r}") from exc
     if not files:
         raise RunIdentityError("no runtime Python source files were found")
-    return _sha256(_canonical(files))
+    return _sha256(canonical_json_bytes(files))
 
 
 def current_hashes(*, benchmark_root: str | Path | None = None) -> dict[str, Any]:
@@ -193,7 +188,7 @@ def current_hashes(*, benchmark_root: str | Path | None = None) -> dict[str, Any
 
     try:
         llm_raw = yaml.safe_load((root / "configs/llm.yaml").read_text(encoding="utf-8"))
-        sampling_hash = _sha256(_canonical(llm_raw["sampling"]))
+        sampling_hash = _sha256(canonical_json_bytes(llm_raw["sampling"]))
     except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
         raise RunIdentityError("configs/llm.yaml sampling section is missing or invalid") from exc
 
@@ -201,9 +196,9 @@ def current_hashes(*, benchmark_root: str | Path | None = None) -> dict[str, Any
         "git_head": head,
         "git_dirty": dirty,
         "code_hash": _runtime_code_hash(root),
-        "config_hash": _sha256(_canonical(config_hashes)),
+        "config_hash": _sha256(canonical_json_bytes(config_hashes)),
         "config_hashes": config_hashes,
-        "prompt_hash": _sha256(_canonical(prompt_hashes)),
+        "prompt_hash": _sha256(canonical_json_bytes(prompt_hashes)),
         "prompt_hashes": prompt_hashes,
         "sampling_hash": sampling_hash,
     }
@@ -354,7 +349,7 @@ def run_fingerprint(identity: Mapping[str, Any], *, base_fingerprint: str) -> st
     hashes = material.get("hashes")
     if isinstance(hashes, Mapping):
         material["hashes"] = lock_identity_hashes(hashes)
-    return _sha256(_canonical({"identity": material, "base_fingerprint": base_fingerprint}))
+    return _sha256(canonical_json_bytes({"identity": material, "base_fingerprint": base_fingerprint}))
 
 
 def _lock_file(
@@ -580,14 +575,14 @@ def record_role_touches(
     entry_material = {
         "benchmark_root": str(root),
         "code_identity_hash": _sha256(
-            _canonical(lock_identity_hashes(current_hashes(benchmark_root=root)))
+            canonical_json_bytes(lock_identity_hashes(current_hashes(benchmark_root=root)))
         ),
         "operation": operation,
         "policy_name": policy_name,
         "roles": roles,
         "usage": usage,
     }
-    entry_id = _sha256(_canonical(entry_material))
+    entry_id = _sha256(canonical_json_bytes(entry_material))
     with _role_ledger_lock(state_dir):
         if path.exists():
             try:

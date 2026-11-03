@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -14,6 +13,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from simulator.asof import read_as_of
+from simulator.common import canonical_sha256, primary_key_columns
 from simulator.config import (
     validate_episode_config,
     validate_episode_duration_match,
@@ -135,13 +135,6 @@ class ValidationError(ValueError):
 
 def _fail(message: str) -> None:
     raise ValidationError(message)
-
-
-def _canonical_json_hash(value: Any) -> str:
-    payload = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _open_readonly(path: Path) -> sqlite3.Connection:
@@ -284,7 +277,7 @@ def _validate_metadata(
         "model_support",
     } <= set(resolved):
         _fail("run metadata must retain resolved simulator, episode, and P2 support configs")
-    if _canonical_json_hash(resolved) != metadata["config_fingerprint"]:
+    if canonical_sha256(resolved) != metadata["config_fingerprint"]:
         _fail("resolved configuration fingerprint does not match its metadata")
     for name in ("simulator", "episodes"):
         if not isinstance(resolved[name], dict):
@@ -393,7 +386,7 @@ def _validate_episode_manifest(
         ):
             _fail(f"episode seed differs from its root seed, profile, and ID: {episode_id}")
         config_text = entry["config_json"]
-        if _canonical_json_hash(json.loads(config_text)) != entry["config_fingerprint"]:
+        if canonical_sha256(json.loads(config_text)) != entry["config_fingerprint"]:
             _fail(f"episode config fingerprint mismatch: {episode_id}")
         fingerprint = canonical_episode_fingerprint(
             operational, episode_id=episode_id, t0=T0_UTC_TEXT
@@ -1433,7 +1426,7 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
             "feature": row["feature"],
             "segment": row["segment"],
         }
-        expected_id = "alert-" + _canonical_json_hash(identity)[:24]
+        expected_id = "alert-" + canonical_sha256(identity)[:24]
         if alert_id != expected_id:
             violations.append(f"alert {alert_id} is not the neutral ID for its episode and scope")
         metric_key = (
@@ -1527,7 +1520,7 @@ def _validate_monitoring_outputs(operational: sqlite3.Connection) -> str:
                 "segment": row["segment"],
                 "parent_incident_id": row["parent_incident_id"],
             }
-            expected_id = "incident-" + _canonical_json_hash(identity)[:24]
+            expected_id = "incident-" + canonical_sha256(identity)[:24]
             if incident_id != expected_id:
                 violations.append(f"incident {incident_id} is not the neutral ID for its scope")
         if row["parent_incident_id"] is not None:
@@ -1651,7 +1644,7 @@ def _validate_decisions(operational: sqlite3.Connection) -> str:
                 {key: row[key] for key in decision_columns if key != "decision_id"}
             ),
         }
-        expected_id = "decision-" + _canonical_json_hash(identity)[:24]
+        expected_id = "decision-" + canonical_sha256(identity)[:24]
         if decision_id != expected_id:
             violations.append(f"decision {decision_id} does not match its neutral operational content")
         if not operational.execute(
@@ -1779,7 +1772,9 @@ def _validate_asof(operational: sqlite3.Connection) -> str:
                         _fail(f"as-of reader returned base {table} data at/after T0")
                     if row["episode_id"] == episode_id and row["event_at"] < t0:
                         _fail(f"as-of reader returned episode {table} data before T0")
-                primary_key = _primary_key(operational, table)
+                primary_key = primary_key_columns(operational, table)
+                if not primary_key:
+                    _fail(f"as-of table {table} must have a primary key")
                 selected_keys = ", ".join(f'"{column}"' for column in primary_key)
                 expected = {
                     tuple(row[column] for column in primary_key)
@@ -1804,18 +1799,6 @@ def _validate_asof(operational: sqlite3.Connection) -> str:
     if attached:
         _fail(f"operational connection has attached databases: {attached}")
     return f"read_as_of passed availability and episode isolation across {compared} table snapshots"
-
-
-def _primary_key(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
-    columns = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
-    primary = tuple(
-        row["name"]
-        for row in sorted(columns, key=lambda item: item["pk"])
-        if row["pk"]
-    )
-    if not primary:
-        _fail(f"as-of table {table} must have a primary key")
-    return primary
 
 
 def _validate_pending(private: sqlite3.Connection, metadata: dict[str, Any], operational: sqlite3.Connection) -> str:
