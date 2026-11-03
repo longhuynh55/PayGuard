@@ -107,6 +107,12 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 
   **Quyết định người dùng 31/10:** seasonal-volume-match acceptance và benign support counting được defer tới pilot 60 / P1.6 vòng 2. Smoke hiện tại không phân biệt được residual seasonal 3,0 (`ep-0003`) và 3,5 (`ep-0005`) với clean max residual 4,25 (`ep-0001`); giữ ngưỡng 4,25.
 
+### MON-RECAL — Hiệu chỉnh lại ngưỡng trên pilot development (người dùng duyệt 03/11/2026, sau SIM-SCALE)
+- **Bối cảnh:** ngưỡng volume 4,25 và PSI 0,25 được chọn trên smoke clean `ep-0001`; trên pilot development (MON-TUNE-A) nhiễu clean volume max 0,201, PSI max 0,0098 — ngưỡng cao ~21–26 lần nhiễu. Quyết định 31/10 "không hạ ngưỡng có điều kiện" áp cho smoke; đây là áp lại **cùng quy tắc đã ghi** ([monitoring.md](monitoring.md) mục 1: vượt nghiêm ngặt max clean development) trên dữ liệu đúng quy mô.
+- **Việc:** ngưỡng `volume_relative_change_threshold` và `psi_threshold` theo **profile** (smoke giữ 4,25/0,25; pilot hiệu chỉnh trên 4 episode clean development của pilot sau SIM-SCALE), khóa trước calibration/test; ghi giá trị, thống kê và provenance trong `configs/monitoring.yaml` và monitoring.md. Không đổi số bin, cửa sổ, `minimum_sample_count`.
+- **Nghiệm thu:** bảng development (chỉ development): phát hiện theo truth, alert trên clean = 0 theo cấu trúc (ghi rõ in-sample), alert benign; chạy lại harness pilot + P5.0b.
+- **Quyết định đi kèm (03/11):** velocity/cửa sổ dưới ngày cho `fraud_surge` và feature phía người nhận cho `new_fraud` để P3 vòng 2, ghi kết quả âm tính (mục 3 monitoring.md cho phép). Luật gộp incident §2 giữ (22 incident con ở `ep-0009` đúng hợp đồng; báo như workload). Matcher ghép theo feature + thời gian, không theo nguyên nhân: nêu rõ trong báo cáo recall.
+
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.
 - [x] Incident con hoạt động đúng; không mở lại incident đã quyết định.
