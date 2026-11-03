@@ -269,7 +269,7 @@ def sample_card_testing_timing(
         minutes=start_rng.randint(0, jitter.maximum_minute_offset.value),
         seconds=start_rng.randint(1, jitter.maximum_second_offset.value),
     )
-    base_spacing = mechanism.window_minutes.value * 60 // mechanism.attempts_per_card.value
+    base_spacing = mechanism.window_minutes.value * 60 // attempts_per_card
     spacings = tuple(
         base_spacing
         + keyed_rng(

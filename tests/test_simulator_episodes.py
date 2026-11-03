@@ -255,6 +255,7 @@ def test_new_fraud_pipeline_passes_random_keys_to_labels_and_standard_smoke_vali
         seed,
         world,
         transaction_random_keys,
+        volume,
     ):
         summary = original_inject_template(
             operational,
@@ -266,6 +267,7 @@ def test_new_fraud_pipeline_passes_random_keys_to_labels_and_standard_smoke_vali
             seed,
             world,
             transaction_random_keys,
+            volume,
         )
         if episode_id == "ep-0002":
             injected["summary"] = inject_new_fraud(

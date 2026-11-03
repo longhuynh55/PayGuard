@@ -21,6 +21,7 @@ from simulator.identifiers import customer_id as generate_customer_id
 from simulator.identifiers import transaction_id
 from simulator.incidents import (
     IncidentSummary,
+    card_testing_burst_size,
     inject_data_pipeline,
     inject_fraud_surge,
     inject_legit_business_spike,
@@ -41,6 +42,13 @@ from simulator.transactions import (
     device_id_for_transaction,
     generate_episode_transactions,
     generate_transactions,
+)
+from simulator.volume import (
+    ReferenceWindow,
+    VolumeBaselines,
+    injected_transaction_count,
+    load_reference_window,
+    reference_volume_baselines,
 )
 from simulator.world import (
     ACCOUNT_PROFILE_METADATA_KEY,
@@ -122,6 +130,7 @@ def _episode_config_snapshot(
         template_config = {
             "date": episode_config.templates.fraud_calendar.model_dump(mode="json"),
             "calendar": episode_config.templates.seasonal.model_dump(mode="json"),
+            "fraud": episode_config.templates.fraud_surge.model_dump(mode="json"),
         }
     elif assignment.template == "two_cause_fraud_seasonal":
         template_config = {
@@ -153,6 +162,29 @@ def _episode_config_snapshot(
     }
 
 
+def seasonal_injection_count(
+    simulator_config: SimulatorConfig, episode_config: EpisodeConfig, volume: VolumeBaselines
+) -> int:
+    """Seasonal traffic on the event channel: floor or the amplitude times that channel's median."""
+    seasonal = episode_config.templates.seasonal
+    return injected_transaction_count(
+        minimum=seasonal.additional_transaction_count.value,
+        relative_amplitude=seasonal.relative_amplitude.value,
+        baseline=volume.channel(simulator_config.transactions.channel.value),
+    )
+
+
+def fraud_surge_injection_count(
+    simulator_config: SimulatorConfig, episode_config: EpisodeConfig, volume: VolumeBaselines
+) -> int:
+    """Card-testing burst rows: the smoke burst size or the amplitude times the total median."""
+    return injected_transaction_count(
+        minimum=card_testing_burst_size(simulator_config),
+        relative_amplitude=episode_config.templates.fraud_surge.relative_amplitude.value,
+        baseline=volume.total,
+    )
+
+
 def _inject_template(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
@@ -163,6 +195,7 @@ def _inject_template(
     seed: int,
     world_summary: WorldSummary,
     transaction_random_keys: dict[str, str],
+    volume: VolumeBaselines,
 ) -> IncidentSummary | tuple[IncidentSummary, IncidentSummary] | None:
     if assignment.template == "clean":
         return None
@@ -177,6 +210,7 @@ def _inject_template(
         )
     t0 = simulator_config.timeline.t0_business_date.value
     seasonal = episode_config.templates.seasonal
+    event_channel = simulator_config.transactions.channel.value
     if assignment.template == "seasonal":
         business_date = t0 + timedelta(days=seasonal.date_offset_days.value)
         return inject_seasonal(
@@ -187,8 +221,10 @@ def _inject_template(
             incident_truth_id=f"truth-{episode_id}-seasonal",
             business_date=business_date,
             event_name=seasonal.event_name.value,
-            additional_transaction_count=seasonal.additional_transaction_count.value,
-            expected_relative_change=seasonal.expected_relative_change.value,
+            additional_transaction_count=seasonal_injection_count(
+                simulator_config, episode_config, volume
+            ),
+            calendar_scope_baseline=volume.channel(event_channel),
             seed=seed,
             customer_ids=world_summary.customer_ids,
             transaction_random_keys=transaction_random_keys,
@@ -206,6 +242,9 @@ def _inject_template(
             business_date=business_date,
             seed=seed,
             transaction_random_keys=transaction_random_keys,
+            injected_transaction_count=fraud_surge_injection_count(
+                simulator_config, episode_config, volume
+            ),
         )
     if assignment.template == "fraud_calendar":
         business_date = t0 + timedelta(
@@ -220,9 +259,12 @@ def _inject_template(
             business_date=business_date,
             seed=seed,
             transaction_random_keys=transaction_random_keys,
+            injected_transaction_count=fraud_surge_injection_count(
+                simulator_config, episode_config, volume
+            ),
             calendar_event_name=seasonal.event_name.value,
-            calendar_channel=simulator_config.transactions.channel.value,
-            calendar_expected_relative_change=seasonal.expected_relative_change.value,
+            calendar_channel=event_channel,
+            calendar_scope_baseline=volume.channel(event_channel),
         )
     if assignment.template == "two_cause_fraud_seasonal":
         business_date = t0 + timedelta(days=seasonal.date_offset_days.value)
@@ -236,8 +278,13 @@ def _inject_template(
             parent_scenario=f"scenario-{episode_id}",
             business_date=business_date,
             event_name=seasonal.event_name.value,
-            seasonal_additional_transaction_count=seasonal.additional_transaction_count.value,
-            seasonal_expected_relative_change=seasonal.expected_relative_change.value,
+            seasonal_additional_transaction_count=seasonal_injection_count(
+                simulator_config, episode_config, volume
+            ),
+            seasonal_calendar_scope_baseline=volume.channel(event_channel),
+            fraud_injected_transaction_count=fraud_surge_injection_count(
+                simulator_config, episode_config, volume
+            ),
             seed=seed,
             customer_ids=world_summary.customer_ids,
             transaction_random_keys=transaction_random_keys,
@@ -541,12 +588,15 @@ def generate_episodes(
     episode_config: EpisodeConfig,
     *,
     profile: ProfileName = "smoke",
+    volume_window: ReferenceWindow | None = None,
 ) -> EpisodeGenerationSummary:
     """Generate one shared base history and a profile's locked episodes.
 
     A fresh store pair is required. The base world and pre-T0 data are inserted
     once. Each episode then receives an ID-derived seed and an isolated 30-day
     future; only its own role is exposed in the operational ``episodes`` table.
+    Count-scaled templates read their reference medians from the shared base history
+    over ``volume_window`` (default: the monitoring reference in configs/monitoring.yaml).
     """
     if operational is private:
         raise ValueError("episode generation requires separate operational and private stores")
@@ -634,6 +684,11 @@ def generate_episodes(
             episode_id="base",
             transaction_random_keys=transaction_random_keys,
         )
+        volume = reference_volume_baselines(
+            operational,
+            simulator_config,
+            volume_window if volume_window is not None else load_reference_window(),
+        )
 
         generated: list[GeneratedEpisode] = []
         for assignment in assignments:
@@ -697,6 +752,7 @@ def generate_episodes(
                 episode_seed,
                 base_world,
                 transaction_random_keys,
+                volume,
             )
             # Preserve the P1.6 effect scope. N7 activity is legitimate data
             # arriving after the template event, not part of its injected rows.
