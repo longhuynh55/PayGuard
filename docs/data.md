@@ -92,10 +92,12 @@ Các tên cột trong bảng dưới đây là interface schema, không phải q
 - Aggregate theo cửa sổ (ví dụ cash-out 24 h) chỉ dùng khi đã quan sát đủ cửa sổ, hoặc đánh dấu censored.
 - Mọi score, alert, truy vấn và kết luận lưu `as_of_time` và phiên bản snapshot.
 
+**Chỉ mục đọc as-of:** `transactions`, `customers`, `label_events`, `model_scores`, `daily_metrics`, `alerts`, `incidents` và `decisions` có chỉ mục `<table>_episode_asof` trên `(episode_id, event_at, available_at)`. Chỉ mục chỉ đổi kế hoạch truy vấn: `read_as_of` giữ nguyên điều kiện lọc, `ORDER BY event_at, rowid`, cột và kết quả; không đổi khóa, dữ liệu hay fingerprint. `transaction_events`, `merchants` và `business_calendar` chưa có chỉ mục as-of (xem bàn giao PERF-STORAGE trong [p5-implementation.md](p5-implementation.md)).
+
 ### Timestamp, ngày nghiệp vụ, tiền và lịch sử episode chung
 
 - Timestamp (`created_at`, `event_at`, `available_at`, `reported_at` và các timestamp tương tự) được lưu dưới dạng UTC. Ngày/giờ cấu hình cho nghiệp vụ được diễn giải trong `Asia/Ho_Chi_Minh` rồi quy đổi sang UTC khi tạo timestamp.
-- T0 là đầu ngày nghiệp vụ `2026-02-01` tại `Asia/Ho_Chi_Minh` (`2026-01-31T17:00:00Z`). `business_calendar` lưu ngày nghiệp vụ theo lịch Việt Nam. Ngày chạy job monitoring hằng ngày, ngày lương và ngày khuyến mãi `11/11` đều được xác định theo `Asia/Ho_Chi_Minh`, không theo ngày UTC.
+- T0 là đầu ngày nghiệp vụ `2026-02-01` tại `Asia/Ho_Chi_Minh` (`2026-01-31T17:00:00Z`). T0 là hằng số hợp đồng: validate cấu hình từ chối `timeline.t0_business_date` khác `2026-02-01`, vì trigger `transaction_events_episode_boundary` và snapshot triage dùng cùng T0 cố định. `business_calendar` lưu ngày nghiệp vụ theo lịch Việt Nam. Ngày chạy job monitoring hằng ngày, ngày lương và ngày khuyến mãi `11/11` đều được xác định theo `Asia/Ho_Chi_Minh`, không theo ngày UTC.
 - `amount` khi có giá trị là số nguyên VND; NULL được giữ nguyên để biểu diễn sự cố pipeline. Không nhân/chia ngầm theo nghìn hay triệu. Ví dụ, ngưỡng 10 triệu đồng biểu diễn là `10000000`.
 - Lịch sử chung trước T0 chỉ lưu một lần với `episode_id = 'base'`; không sao chép theo episode. Khi đọc episode `e`, chỉ hàm as-of ở trên được hợp lịch sử base trước T0 với dữ liệu của `e`, đồng thời giới hạn khả dụng bằng `available_at <= as_of_time` trên cả hai nhánh. `e` là ID episode, không dùng giá trị dành riêng `'base'`.
 

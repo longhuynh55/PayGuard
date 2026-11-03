@@ -95,6 +95,15 @@ def test_invalid_timeline_schedule_is_rejected() -> None:
         validate_simulator_config(data)
 
 
+@pytest.mark.parametrize("t0_business_date", ["2026-01-31", "2026-02-02"])
+def test_t0_other_than_the_locked_mvp_value_is_rejected(t0_business_date: str) -> None:
+    data = _yaml_mapping(ROOT / "configs" / "simulator.yaml")
+    data["timeline"]["t0_business_date"]["value"] = t0_business_date
+
+    with pytest.raises(ConfigValidationError, match="t0_business_date is locked to the MVP T0"):
+        validate_simulator_config(data)
+
+
 def test_episode_ids_must_not_encode_template_or_role() -> None:
     data = _yaml_mapping(ROOT / "configs" / "episodes.yaml")
     data["profiles"]["smoke"]["assignments"][1]["episode_id"] = (

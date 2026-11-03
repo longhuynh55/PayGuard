@@ -289,6 +289,9 @@ OPERATIONAL_DDL: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS model_scores_episode_asof
     ON model_scores (episode_id, event_at, available_at)
     """,
+    "CREATE INDEX IF NOT EXISTS transactions_episode_asof ON transactions (episode_id, event_at, available_at)",
+    "CREATE INDEX IF NOT EXISTS customers_episode_asof ON customers (episode_id, event_at, available_at)",
+    "CREATE INDEX IF NOT EXISTS label_events_episode_asof ON label_events (episode_id, event_at, available_at)",
     """
     CREATE TRIGGER IF NOT EXISTS model_scores_decision_matches_transaction
     BEFORE INSERT ON model_scores

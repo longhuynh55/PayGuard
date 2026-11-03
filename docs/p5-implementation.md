@@ -158,6 +158,30 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
     - **Còn mở, không chặn:** O4 chỉ có lợi khi K>1 (3 câu/cutoff: 92 → 34 ms/lời gọi). Tăng tốc luồng K=1 không cần đổi hợp đồng: có thể chỉ dựng lại bảng `decisions` (và phần hash của nó) mà snapshot/hash/trace giữ nguyên (review r1 F4); quyết định sau khi đo `run_sql` trên pilot. Pilot chưa đo.
 - **Trạng thái:** ✅ merge 03/11/2026 (review Opus r1 PASS; full suite 458 passed + 1 xfailed). Backlog không chặn: F1 cache có thể trả snapshot cũ nếu file DB bị ghi đè ngoài SQLite mà change counter trùng (ghi chú hoặc thêm size/mtime vào identity); F2 connection dò của cache mở suốt đời agent, chưa an toàn đa luồng (xử lý khi K>1 song song); F3 thêm test O6 hai incident khác segment.
 - **PERF-STORAGE (sau HARNESS-PILOT):** (O5) index as-of cho `transactions`/`customers`/`label_events` theo `EXPLAIN QUERY PLAN` thực tế; (O7) cache cột `PRAGMA table_info` theo connection trong `simulator/storage.py:167`, batch insert nếu giữ byte-identical; (C2) validate từ chối config T0 khác T0 đã khóa. Nghiệm thu: fingerprint smoke/pilot không đổi, đo thời gian generate trước–sau.
+  - **Bàn giao PERF-STORAGE (Claude Haiku 5.5, 03/11/2026):** chưa commit (orchestrator commit sau test); không sửa MASTER; không chạm `triage/`, `monitoring/`, `payguard/`, `model/`; không batch insert (xem O7).
+    - **Sửa:**
+      - O5: thêm ba chỉ mục `<table>_episode_asof` trên `(episode_id, event_at, available_at)` cho `transactions`, `customers`, `label_events` (`simulator/schema.py`, cùng kiểu năm chỉ mục as-of đã có); hợp đồng ở [data.md](data.md) mục 2. `EXPLAIN QUERY PLAN` của SQL `read_as_of` đổi từ `SCAN` sang `MULTI-INDEX OR` (`SEARCH … USING INDEX`) trên smoke sinh mới và trên bản sao pilot.
+      - O7: `simulator/storage.py` memoize `PRAGMA table_info` theo bảng cho connection mở bởi `_connect` (subclass `sqlite3.Connection`, vì `sqlite3.Connection` không hỗ trợ weakref). Connection khác vẫn truy vấn mỗi lần; bảng chưa tồn tại không được memoize.
+      - C2: `simulator/config.py` `TimelineConfig` từ chối `timeline.t0_business_date` khác T0 đã khóa (`T0_UTC_TEXT`, cùng hằng số với trigger `transaction_events_episode_boundary` và snapshot triage).
+      - Test functional qua `validate_simulator_config`: `tests/test_simulator_config.py::test_t0_other_than_the_locked_mvp_value_is_rejected` (hai giá trị `2026-01-31`, `2026-02-02`). Đỏ trên HEAD (`DID NOT RAISE`), xanh sau sửa.
+      - Docs: `data.md` mục 2 (chỉ mục as-of; T0 là hằng số hợp đồng).
+    - **Đo O5** (bản sao `/var/tmp/payguard-ps/pilot/observations.sqlite` của `payguard-hp/bench2/base/operational/`; bản gốc không đổi; 12 episode development; trung vị 3 lần; thời gian của `read_as_of`, tổng 12 lượt đọc):
+
+      | Bảng | Cutoff T0+11 ngày: trước → sau | Cutoff đầy đủ: trước → sau |
+      |---|---|---|
+      | `transactions` (469 625 / 509 353 dòng trả về) | 5,15 s → 4,40 s (−15 %) | 5,70 s → 4,85 s (−15 %) |
+      | `label_events` (274 539 / 406 557 dòng trả về) | 3,05 s → 2,36 s (−23 %) | 4,77 s → 3,67 s (−23 %) |
+      | `customers` (1 182 dòng cả bảng) | 0,046 s → 0,043 s | 0,041 s → 0,043 s (trong nhiễu) |
+
+      - Chi phí: ba chỉ mục +46,2 MB trên file 684,6 MB (+6,7 %); tạo chỉ mục ~1,4 s trên bản sao.
+      - Tương đương kết quả: `read_as_of` của ba bảng trên 12 episode development, hai cutoff: 0 episode khác nhau (SHA-256 JSON canonical, gồm thứ tự dòng).
+      - Lợi ích giới hạn: phần lớn dòng trả về là lịch sử `base` dùng chung (mọi lượt đọc đều phải lấy), nên chi phí còn lại là dựng dict Python theo dòng; index chỉ bỏ quét dòng của episode khác.
+    - **Đo O7:** micro-benchmark 30 000 insert vào `merchants` (cùng tiến trình, xen kẽ ba vòng): 40,7 µs → 22,6 µs mỗi dòng (−44 %). Smoke generate (gồm validate), ba lần mỗi bên: HEAD 5,05 / 5,24 / 5,03 s (trung vị 5,05 s); sau sửa 5,21 / 4,84 / 4,76 s (trung vị 4,84 s, trong nhiễu). Lần HEAD đầu tiên (10,1 s, khởi động lạnh) không dùng để so sánh.
+    - **Acceptance:** fingerprint smoke `0bf373c5…` giữ nguyên ở mọi lần sinh (7 lần); `reports/smoke.json` `3d1703e1…` và `private/reports/smoke_truth.json` `113f15e9…` giữ nguyên (6 lần kiểm tra, cả HEAD lẫn sau sửa); validate smoke 21/21.
+    - **Hash schema:** manifest và report không ghi hash DDL nào (fingerprint chỉ băm nội dung dòng), nên điều kiện dừng về schema hash không kích hoạt. `code_hash` đổi vì sửa `simulator/`: harness root tạo trước thay đổi này bị từ chối resume, như mọi thay đổi code khác.
+    - **Không làm:** batch insert (O7): gom dòng sẽ đổi thứ tự ghi giữa các bảng mà trigger tham chiếu (ví dụ `label_events` cần `transactions` đã ghi), chưa chứng minh byte-identical, và phần còn lại trên pilot nhỏ so với tổng thời gian sinh. Không đụng O1–O4, O6, C3.
+    - **Kiểm chứng:** test đích (`simulator/config`, as-of, integrity, catalog, features/monitoring allowlist, CLI smoke + SHA + fingerprint, reproducibility) đều xanh; full suite một lần: **463 passed, 1 xfailed** (493 s, exit 0; HEAD ghi 461 passed + 1 xfailed ở bàn giao HARNESS-PILOT, phần chênh là 2 test C2 mới); `review/verify_plan_claims.py`: 20 ví dụ, `review/verification_results.json` không đổi; `review/check_links.py`: 16 file, 0 link hỏng.
+    - **CÂU HỎI CHO ORCHESTRATOR (chưa làm):** `transaction_events` là bảng as-of đắt nhất và vẫn `SCAN` (706 K dòng trên pilot). `triage/tools.py` `_build_snapshot` đọc mọi `AS_OF_TABLES`, nên mỗi snapshot triage đọc bảng này. Bullet chỉ liệt kê ba bảng. Đo thử trên bản sao (cùng kiểu DDL): 10,08 s → 8,68 s (cutoff sớm), 11,01 s → 9,22 s (cutoff đầy đủ), +51,4 MB. `merchants` (102 dòng) và `business_calendar` (20 dòng) cũng `SCAN` nhưng không đáng kể. Có thêm chỉ mục cho `transaction_events` không? Hiện chưa thêm.
 - **O3** (monitoring membership O(R²), đọc lại snapshot mỗi ngày) chuyển cho HARNESS-PILOT phần 2.
 
 ### P5.0d — Khả thi chi phí pilot 60
