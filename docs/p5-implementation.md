@@ -164,6 +164,7 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
     - **Backlog (không chặn):**
       - ID alert/incident không khớp khi feature/segment không phải ASCII: `simulator/validate.py:1429` và `:1523` băm bằng `canonical_sha256` (`ensure_ascii=False`), còn producer `monitoring/signals.py:208` và `monitoring/incidents.py:330` dùng `json.dumps` mặc định (`ensure_ascii=True`). Hai bên chỉ khớp khi feature/segment là ASCII. Lỗi có sẵn trước CLEANUP-1 (`_canonical_json_hash` cũng dùng `ensure_ascii=False`); chưa sửa, cần chọn bên nào đổi.
       - Các `json.dumps` trực tiếp còn lại: liệt kê trong [data.md](data.md) §2; chưa chuyển sang helper chung (không đổi hành vi trong CLEANUP-1).
+  - **Trạng thái: merge 03/11/2026** (review Opus r1 PASS; F1 7 import thừa mới và F2 data.md nói quá phạm vi JSON canonical đã sửa trước merge, không review lại; full suite 468 passed + 1 xfailed). B1 neo theo quyết định orchestrator 03/11: giao dịch đến đầu tiên trong 24 giờ trước `as_of`. Backlog: các đường hash còn tự `json.dumps` (liệt kê ở data.md mục 2); `simulator/validate.py` tính lại ID alert/incident với `ensure_ascii=False` trong khi bên sinh dùng `True` (chỉ khớp khi `feature`/`segment` ASCII; gom thì phải người dùng chốt vì đổi ID); 2 import thừa trong test (`tests/test_monitoring_store.py`, `tests/test_simulator_labels.py`).
 - **Hoãn (B9):** đổi tên định danh theo vòng (`p1_4_feature_diagnostics`, `p14`, …) — đổi khóa artifact đã lưu, làm khi có lý do đổi hợp đồng.
 
 ### Từ audit Terra lượt 3 (người dùng duyệt 02/11/2026)
