@@ -1,200 +1,196 @@
 <div align="center">
 
-# 🛡️ PayGuard
+# PayGuard
 
-**Uncertainty-aware triage of fraud-model drift alerts when labels arrive late**
+**A leakage-safe benchmark for triaging fraud-model drift alerts when fraud labels arrive 30–90 days late**
 
-![Python](https://img.shields.io/badge/python-3.12-blue)
-![LightGBM](https://img.shields.io/badge/model-LightGBM-green)
-![LLM](https://img.shields.io/badge/LLM-Qwen%203.7%20Flash-purple)
-![Tests](https://img.shields.io/badge/tests-448%20passing-brightgreen)
-![Status](https://img.shields.io/badge/status-research%20WIP-orange)
-![Data](https://img.shields.io/badge/data-synthetic-lightgrey)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![uv](https://img.shields.io/badge/env-uv-6340ac)
+![Data: synthetic](https://img.shields.io/badge/data-synthetic-lightgrey)
+![Status: research WIP](https://img.shields.io/badge/status-research%20WIP-orange)
 
 </div>
 
 > **Research question.** Does a hybrid of code-based runbooks and an LLM investigation agent with
-> uncertainty quantification resolve fraud-model drift alerts better than rules alone —
-> **for which incident types, and at what cost?**
-
-PayGuard answers that on a synthetic payment world where every incident has a known ground truth,
-so both correct closures *and* missed or wrongly-closed incidents can be counted honestly.
+> uncertainty quantification resolve fraud-model drift alerts better than rules alone, for which
+> incident types, and at what cost?
 
 > [!NOTE]
-> **Status (Nov 2026): work in progress.** The full pipeline runs end to end on the smoke profile,
-> and the 60-episode pilot benchmark is generated and validated. **No benchmark results are
-> published yet** — they will come only from locked, held-out runs (see the Roadmap section).
+> **Status (November 2026): work in progress, no benchmark results yet.** The pipeline runs end to
+> end on the 60-episode pilot. Development runs show that monitoring is not yet sensitive enough
+> (see [Current status](#current-status-and-honest-findings)). Results will be published only from
+> locked, held-out runs, including negative results.
 
----
+## In 30 seconds
 
-## 📌 The problem
+- **The problem.** A production fraud model raises many drift alerts. Most are harmless: holidays,
+  promotions, a new large merchant. Fraud labels take 30–90 days to arrive, so nobody can check
+  an alert right away, and each investigation costs an analyst hours. Teams start to ignore alerts
+  and miss the real ones.
+- **What PayGuard does.** It turns each alert into an incident, checks it with code-based runbooks,
+  sends the rest to an LLM agent with a read-only, point-in-time SQL tool, and routes each
+  incident to `close`, `recheck`, `data_ticket`, `fraud_ops` or `human_review`.
+- **How it is measured.** Every incident comes from a synthetic payment world with a known
+  injected cause. An isolated evaluator counts correct closures, wrong closures and incidents
+  that monitoring never raised.
+- **Why it is hard.** Ground truth is late, benign and harmful causes can overlap in time (fraud
+  on a holiday), and any leak of future data or truth into the agent would make the results
+  meaningless.
 
-```mermaid
-flowchart LR
-    A["Fraud model<br/>in production"] -->|"PSI / volume shifts"| B["Many drift alerts"]
-    B --> C{"Harmful?"}
-    C -->|"mostly no:<br/>seasonality, promos,<br/>new merchant,<br/>pipeline unit change"| D["Analyst wastes hours"]
-    C -->|"sometimes yes:<br/>fraud surge,<br/>new fraud pattern"| E["Must act fast"]
-    F["Fraud labels arrive<br/>30–90 days later"] -.->|"cannot verify now"| C
-    D --> G(["Alert fatigue → real fraud gets missed"])
-```
-
-Drift detectors say *that* something changed. The hard, expensive step is deciding **why**, how
-strong the evidence is, and **who should act**. PayGuard automates that step and measures it.
-
-## 🏗️ Architecture
-
-```mermaid
-flowchart LR
-    subgraph SIM["🧪 Simulator"]
-        W["Payment world<br/>QR · e-wallet · card<br/>refunds · A2A transfers"]
-        INJ["Incident injectors<br/>10 scenario templates"]
-    end
-
-    subgraph OPS["🗄️ Operational store (as-of)"]
-        TX[("transactions · customers<br/>merchants · label_events<br/>business_calendar")]
-    end
-
-    subgraph PRIV["🔒 Private store"]
-        TR[("incident truth<br/>injector params<br/>episode manifest")]
-    end
-
-    W --> TX
-    INJ --> TX
-    INJ --> TR
-
-    TX --> M["🤖 Fraud model<br/>LightGBM + isotonic<br/>+ Mondrian conformal"]
-    M -->|model_scores| MON["📈 Monitoring<br/>daily metrics → signals<br/>→ alerts → incidents"]
-    TX --> MON
-    MON --> TRI["🧭 Triage<br/>runbooks + gate<br/>+ LLM agent (run_sql)"]
-    TX -.->|"read-only, as-of SQL"| TRI
-    TRI -->|decisions| EV["⚖️ Evaluator"]
-    TR ==>|"only reader of truth"| EV
-    EV --> R(["Results: utility · workload<br/>missed incidents · cost"])
-```
-
-| Layer | Package | What it does |
-|---|---|---|
-| Simulator | `simulator/` | Synthetic payment world with `event_at` / `available_at` timestamps, 4-state delayed labels, a business calendar, and injected incidents. |
-| Fraud model | `model/` | As-of features, LightGBM, isotonic calibration, Mondrian conformal prediction on raw scores; uncertain transactions go to human review. |
-| Monitoring | `monitoring/` | Daily metrics, PSI and robust-baseline volume signals, alerts grouped into incidents (child incidents after a decision). |
-| Triage | `triage/` | Four code-based runbooks with a gate; an LLM agent with a sandboxed `run_sql` tool investigates the rest. |
-| Evaluation | `evaluation/` | Matches incidents to truth (`matched` / `ambiguous_match` / `unmatched`), scores decisions, reports support. |
-| Harness | `payguard/` | One command per policy, with run-identity hashes, role locks and a persistent USD cost ledger. |
-
-## 🧭 How an incident is triaged
-
-```mermaid
-flowchart TD
-    I["Incident (alert group)"] --> RB{"Matches a<br/>known runbook?"}
-    RB -->|yes| CK["Run runbook checklist<br/>on the incident snapshot"]
-    RB -->|"no / unknown"| AG["LLM agent<br/>K = 3 investigations<br/>N = 3 SQL samples each"]
-    AG --> CK
-    CK --> ES["evidence_status<br/>(computed by code,<br/>never by the LLM)"]
-    ES --> G{"Gate"}
-    G -->|"benign checklist passes<br/>+ closing authority<br/>+ agent agreement ≥ τ"| CL["✅ close"]
-    G -->|"unit / NULL change,<br/>no fraud conflict"| DT["🛠️ data_ticket"]
-    G -->|"fraud signals"| FO["🚨 fraud_ops"]
-    G -->|"window not complete"| RC["⏳ recheck (≤ 2)"]
-    G -->|"insufficient or<br/>conflicting evidence"| HR["👤 human_review"]
-```
-
-Agent uncertainty is **black-box self-consistency**: `close_score = min(v_benign, min_sql_consistency)`,
-where `v_benign` is the share of the 3 investigations concluding benign and SQL consistency is the
-agreement between the results of 3 sampled queries. The agent may only close inside existing benign
-runbooks; anything uncertain is escalated.
-
-| Cause | Meaning | Candidate routing |
-|---|---|---|
-| `seasonal` | holiday, promotion, payday | benign → close via gate |
-| `legit_business_change` | legitimate change with evidence | benign → close via gate |
-| `no_material_change` | nothing material changed | benign → close via gate |
-| `data_pipeline` | unit change, mass NULLs | `data_ticket` |
-| `fraud_surge` | known fraud pattern spikes | `fraud_ops` |
-| `new_fraud` | unseen pattern (e.g. social engineering via mule accounts) | `human_review` + retrain proposal |
-
-## 🔒 Leakage-safe by construction
+## Overview
 
 ```mermaid
 flowchart LR
-    subgraph AGENT["What the agent can see"]
-        Q["run_sql(query, as_of_time, episode_id)"] --> V[("operational views<br/>available_at ≤ as_of_time<br/>same episode only")]
-    end
-    subgraph NO["What it can never see"]
-        T[("truth · injector params<br/>episode roles and templates<br/>future rows")]
-    end
-    V -. "no path" .- T
+    SIM["Simulator<br/>shared history + 60 episodes<br/>with injected incidents"] --> OPS[("Operational DB<br/>event_at / available_at")]
+    SIM --> PRIV[("Private DB<br/>truth, injector params,<br/>episode roles")]
+    OPS --> MOD["Fraud model<br/>LightGBM + isotonic<br/>+ Mondrian conformal"]
+    MOD -->|"model_scores"| MON["Monitoring<br/>metrics, signals,<br/>alerts, incidents"]
+    OPS --> MON
+    MON -->|"incidents"| TRI["Triage<br/>runbooks, gate,<br/>LLM agent"]
+    OPS -.->|"read-only, as-of SQL"| TRI
+    TRI -->|"decisions"| EV["Evaluator"]
+    PRIV ==>|"only reader of truth"| EV
+    EV --> REP(["Reports: routing, wrong closures,<br/>missed incidents, workload, cost"])
 ```
 
-| Invariant | How it is enforced |
+One command (`python -m payguard run`) runs the whole chain for one policy on an isolated copy
+of the data.
+
+## How it works
+
+| Layer | Package | What it does | Design doc |
+|---|---|---|---|
+| Simulator | `simulator/` | Payment world (QR, e-wallet, card, A2A transfers, refunds); card testing, account takeover, collusion, social engineering with mule cash-out; 4-state delayed labels; public `business_calendar`; 60 parallel episodes | [data](docs/data.md) |
+| Fraud model | `model/` | As-of features, deterministic LightGBM, isotonic calibration, Mondrian conformal sets on the raw score (uncertain transactions go to review) | [model](docs/model.md) |
+| Monitoring | `monitoring/` | Daily metrics, then signals, then alerts, grouped into incidents; a new alert after a final decision creates a child incident | [monitoring](docs/monitoring.md) |
+| Triage | `triage/` | Runbook checklists in code, an action gate, and an LLM agent with a sandboxed `run_sql` tool | [triage](docs/triage.md) |
+| Evaluation | `evaluation/` | Matches incidents to truth, scores each decision at its own `decision_at`, reports development support | [evaluation](docs/evaluation.md) |
+| Harness | `payguard/` | Runs a policy end to end, with content-hash run identity, role locks and a persistent cost ledger | [p5 sub-plan](docs/p5-implementation.md) |
+
+All design docs are in Vietnamese.
+
+### Simulator and episodes
+
+All episodes share one history before T0 = 2026-02-01. After T0, each episode regenerates 30 days
+under its own seed and injects 0–2 incidents. Each transaction has an `event_at` (when it
+happened) and an `available_at` (when the system can see it). Labels are `pending` until resolved.
+
+| Scenario | dev | cal | test | Expected handling |
+|---|---:|---:|---:|---|
+| clean | 4 | 8 | 8 | no action |
+| two causes: fraud + seasonal | 2 | 4 | 4 | human review |
+| fraud on a calendar day | 1 | 2 | 2 | fraud ops |
+| seasonal | 1 | 2 | 2 | benign, close only through the gate |
+| `data_pipeline` (amount ×100, mass NULLs) | 1 | 2 | 2 | data ticket |
+| `fraud_surge` | 1 | 2 | 2 | fraud ops |
+| `new_fraud` (social engineering via mules) | 1 | 1 | 1 | human review + retrain proposal |
+| `legit_business_spike` | 1 | 1 | 1 | benign; human review (no benign runbook) |
+| new sparse merchant | 0 | 1 | 1 | no material change; must not auto-close |
+| silent concept drift | 0 | 1 | 1 | hard case |
+| **Total** | **12** | **24** | **24** | |
+
+The mix is chosen to test hard cases. It does not match a natural distribution, so results are
+always reported per group. Source: [data.md §4](docs/data.md#4-episode--thế-giới-song-song).
+
+### Fraud model
+
+- Three time-based splits: fit (Jul–Sep 2025), validation (late Sep), calibration (Oct). Every
+  label cohort is at least 90 days old at T0.
+- Isotonic calibration gives readable probabilities. The class-conditional (Mondrian) conformal
+  sets are computed on the **raw** score, with α_legit = 0.005 and α_fraud = 0.20 as starting
+  values. Empty or two-label sets go to review.
+
+### Monitoring
+
+| Stage | Implemented now (round 1) |
 |---|---|
-| **As-of everywhere** | Features and agent SQL only read rows with `available_at <= as_of_time` in the right episode; tests check that adding later data never changes an earlier answer. |
-| **Truth isolation** | Truth lives in a separate private database; only the evaluator opens it. |
-| **Pending ≠ negative** | Labels have four states; unresolved labels are never counted as legitimate. |
-| **No tuning on test** | The episode manifest is locked before tuning; calibration/test analysis needs a recorded lock, and the harness refuses otherwise. |
-| **Honest statistics** | Every error rate is reported with its denominator and an interval; a pilot is never presented as a near-zero-risk guarantee. |
+| Metrics | PSI with 2 quantile bins on `txn_count_24h` and `amount_avg_7d` (7-day window); daily volume against a reference median; model review rate (computed, no signal yet) |
+| Signals | PSI > 0.25; volume residual against the calendar's expected change > 4.25 |
+| Incidents | Alerts on the same feature/segment within 2 days of an open incident are merged; after a final decision they open a child incident |
 
-## 🧪 Benchmark design
+KS tests, Benjamini–Hochberg and CBPE (label-free performance estimation) are in the design but
+not implemented yet. Values: [`configs/monitoring.yaml`](configs/monitoring.yaml).
 
-Episodes share one pre-T0 history and diverge after T0 under their own seeds.
+### Triage
 
-```mermaid
-gantt
-    title One episode (illustrative dates)
-    dateFormat YYYY-MM-DD
-    axisFormat %b %d
-    section History
-    Shared base world, model train/calibrate :done, 2025-10-01, 2026-01-31
-    section Episode
-    Future window with injected incident     :active, 2026-02-01, 30d
-    Incident effect                          :crit, 2026-02-09, 7d
-    section Labels
-    Labels still pending (30–90 days)        :2026-02-01, 90d
-```
+| Component | Design (MVP) | Implemented now (round 1) |
+|---|---|---|
+| Runbooks | 4 code checklists: `seasonal_calendar`, `unit_or_null_change`, `small_sample`, `segment_concentration` | `unit_or_null_change` → `data_ticket`, with a `small_sample` guard (`n_min = 2`) |
+| `evidence_status` | `sufficient` / `insufficient` / `conflicting`, **computed by code from tool output, never by the LLM** | same |
+| Gate | separate branches for close, routing, recheck (≤ 2, ≥ 24 h apart) and human review | same; no runbook has close authority yet |
+| Agent | K = 3 investigations, N = 3 SQL samples each, `close_score = min(v_benign, min_sql_consistency)`, `tau_agent ∈ {2/3, 1}` chosen on calibration | one `run_sql` + one JSON proposal, no UQ; the agent can never close |
+| `run_sql` | read-only SQL on an as-of snapshot of one episode | same; schema `asof` only, timeouts, row and byte limits |
+| LLM | Qwen 3.7 Flash via OpenRouter | a deterministic fake provider for tests and a real OpenRouter provider |
 
-```mermaid
-pie showData
-    title Pilot: 60 episodes by scenario
-    "clean (background noise)" : 20
-    "two causes: fraud + seasonal" : 10
-    "fraud on a calendar day" : 5
-    "seasonal" : 5
-    "data pipeline" : 5
-    "fraud surge" : 5
-    "new fraud (mules)" : 3
-    "legit business spike" : 3
-    "new sparse merchant" : 2
-    "silent concept drift" : 2
-```
+Agent uncertainty is black-box self-consistency: `v_benign` is the share of the 3 investigations
+that conclude benign, and SQL consistency is the agreement between the results of 3 sampled
+queries. The agent may close only inside an existing benign runbook. Anything uncertain is
+escalated.
 
-Roles: **12 development / 24 calibration / 24 test**, split at episode level (a two-cause episode is
-one unit). Calibration and test seeds are disjoint from the smoke profile.
+### Evaluation
 
-- **Policies compared:** four baselines plus two agent variants (K = N = 1 vs. K = N = 3) on the same locked episodes.
-- **Metrics:** utility, analyst workload, timely routing, missed incidents (including those monitoring never surfaced), wrong closures, and cost per incident, with episode-level bootstrap intervals.
-- **Budget:** hard cap of **USD 10** for the whole benchmark, enforced by a persistent ledger.
+- **Matcher.** Each incident is `matched`, `ambiguous_match` or `unmatched` to injected truth,
+  using time (metric window + feature lookback), segment and feature. Unmatched never counts as benign.
+- **Decision-time scoring.** A decision is judged only against truth already effective at its
+  `decision_at`, so a correct early closure is not penalised for fraud that starts later.
+- **Primary risk metric.** Unsafe truth rate: required-intervention incidents with at least one
+  wrong closure, divided by all required-intervention incidents on a fixed truth set.
+- **Also reported.** Detection recall, timely routing recall (correct action within the deadline,
+  D = 7 days), benign automation, workload, cost, with episode-level bootstrap intervals.
+- **Policies.** Rule + human (main baseline), rule + agent without UQ, rule + agent with UQ, always
+  human; plus two agent ablations (UQ gate on/off; K = N = 1 vs K = N = 3).
 
-## 🚀 Quickstart
+## Leakage-safe benchmark design
 
-Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
+| Rule | How it is enforced | Why it matters |
+|---|---|---|
+| **As-of reads** | Features, metrics and agent SQL read only rows with `available_at <= as_of_time` in the same `episode_id`; tests check that later data never changes an earlier answer | No decision can use information from the future |
+| **Truth isolation** | Truth and injector parameters live in a separate private DB; only the evaluator opens it | The agent cannot look up the answer |
+| **Pending ≠ negative** | Labels have four states; unresolved labels are never treated as legitimate | Late fraud is not silently counted as clean |
+| **Locked manifest 12/24/24** | Episode roles are fixed at episode level before tuning; calibration/test seeds are disjoint from smoke seeds | The split cannot be reshuffled to look better |
+| **No tuning on test** | Rules, prompts and thresholds are tuned on development; close authority and `tau_agent` on calibration; test runs once | Reported numbers are out-of-sample |
+| **Identity hashes and locks** | Runs are keyed by content hashes of code, configs, prompts, sampling and model artifacts; calibration/test analysis requires a matching lock | A change after the lock is detected and refused |
+| **Evidence computed by code** | `evidence_status` comes from checklist code, not from the LLM | The model cannot talk its way into a closure |
+
+## Quickstart
+
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). No API key is needed.
 
 ```bash
 uv sync
 
 # Generate and validate the smoke profile (5 episodes)
-uv run python -m simulator generate --profile smoke --out data/smoke
-uv run python -m simulator validate --run data/smoke
+uv run python -m simulator generate --profile smoke --out data/p1-smoke
+uv run python -m simulator validate --run data/p1-smoke
 
-# End-to-end harness with the rule-only policy (no LLM calls)
+# End-to-end harness with the deterministic fake agent (no network calls).
+# The shared state dir (cost ledger, role locks) must be outside the benchmark root;
+# it defaults to ~/.payguard-benchmark.
 export PAYGUARD_BENCHMARK_STATE_DIR="$(mktemp -d)"
-uv run python -m payguard run --profile smoke --policy rule_human --out data/bench-smoke
+uv run python -m payguard run --profile smoke --policy rule_agent_fake --out data/bench-smoke
 
-# Tests
+# Tests (full suite takes several minutes)
 uv run pytest -q
 ```
 
+The harness generates its own data under `--out`, trains the model, runs monitoring and triage,
+and writes the evaluator report under `<out>/base/private/reports/`. `--profile pilot` runs the
+60-episode pilot and takes about an hour.
+
 <details>
-<summary>Module CLIs</summary>
+<summary>Policies and module CLIs</summary>
+
+| Policy (`--policy`) | Triage |
+|---|---|
+| `rule_human` | runbooks only; anything else goes to human review |
+| `rule_agent_fake` | runbooks + deterministic fake agent |
+| `rule_agent_openrouter_k1` | runbooks + real LLM agent (K = 1); **optional**, needs an API key |
+
+The real-LLM policy reads `OPENROUTER_API_KEY` from the environment or from a `.env` file at the
+repository root (git-ignored; never commit it). Every call is reserved against the persistent
+cost ledger before it is sent, and the harness refuses to exceed the configured cap.
+
+Each stage can also be run on its own (`--help` lists the options):
 
 ```bash
 python -m simulator  {generate,validate}
@@ -202,87 +198,117 @@ python -m model      {train,score,evaluate}
 python -m monitoring {metrics,signals,incidents}
 python -m triage     {run,measure}
 python -m evaluation {decisions,support}
-python -m payguard   {run,lock}
+python -m payguard   {run,lock}           # lock {prompt-rule,policy}
 ```
 
-Policies that call a real LLM (`rule_agent_openrouter_k1`) need `OPENROUTER_API_KEY` in `.env`;
-every call is reserved against the persistent cost ledger before it is sent.
+Outside the harness, commands that read truth only accept development episodes.
 
 </details>
 
-## 📊 Results
-
-> [!IMPORTANT]
-> **Pending.** Results will be filled in here only after calibration and test runs are locked,
-> including negative results if the agent does not beat rules alone.
-
-What has been measured so far is **cost**: on two development/calibration incidents, Qwen 3.7 Flash
-via OpenRouter used ~3.5k tokens per call, which extrapolates to **≈ USD 0.0075 per agent-routed
-incident** for the full design. This is an extrapolation, not a benchmark result.
-
-## 🗺️ Roadmap
+## Current status and honest findings
 
 | Stage | Scope | Status |
 |---|---|---|
-| P0 | Research and protocol design | ✅ |
-| P1 | Simulator, injectors, episodes, pilot-60 | ✅ |
-| P2 | Fraud model: features, LightGBM, calibration, conformal | ✅ round 1 |
-| P3 | Monitoring: metrics, signals, alerts, incidents | ✅ round 1 |
-| P4 | Triage: runbooks, gate, `run_sql`, agent | 🔄 round 2 pending |
-| P5 | Evaluation harness, matcher, support tables, cost ledger | 🔄 pilot harness in progress |
-| P6 | FastAPI, Streamlit dashboard, Docker Compose, CI, demo video | ⬜ |
+| P0 | Research and protocol design | done |
+| P1 | Simulator, injectors, episodes, 60-episode pilot | done (round 2) |
+| P2 | Features, LightGBM, calibration, conformal | round 1 done |
+| P3 | Metrics, signals, alerts, incidents | round 1 done |
+| P4 | Runbooks, gate, `run_sql`, agent | round 1 done; round 2 (full runbooks, K = N = 3 UQ) pending |
+| P5 | Harness, matcher, support tables, cost ledger | harness runs on pilot; report tables pending |
+| P6 | API, dashboard, Docker Compose, CI, demo | not started |
 
-## 📚 Related work
+**What works.** `payguard run --profile pilot` completes end to end on all 60 episodes with the
+rule-only and fake-agent policies. Calibration and test episodes have not been analysed.
 
-PayGuard combines pieces that exist separately; the full annotated list is in
-[docs/rationale.md](docs/rationale.md).
+**What the first development run showed** (12 development episodes, 10 injected truths;
+[P5.0b notes](docs/p5-implementation.md), Vietnamese):
 
-- **Fraud detection with delayed labels** — Dal Pozzolo et al., *Credit Card Fraud Detection: A Realistic Modeling and a Novel Learning Strategy* (IEEE TNNLS); Le Borgne et al., [*Fraud Detection Handbook*](https://github.com/Fraud-Detection-Handbook/fraud-detection-handbook).
-- **Monitoring without labels** — Rabanser et al., [*Failing Loudly*](https://arxiv.org/abs/1810.11953) (NeurIPS 2019); NannyML [CBPE](https://nannyml.readthedocs.io/en/main/how_it_works/performance_estimation.html).
-- **Conformal prediction and abstention** — Angelopoulos & Bates, [*A Gentle Introduction to Conformal Prediction*](https://arxiv.org/abs/2107.07511); Geifman & El-Yaniv, [*Selective Classification*](https://arxiv.org/abs/1705.08500); Angelopoulos et al., [*Learn then Test*](https://arxiv.org/abs/2110.01052).
-- **Uncertainty for LLM agents** — Kirchhof et al., [*Position: UQ Needs Reassessment for LLM Agents*](https://arxiv.org/abs/2505.22655) (ICML 2025); Ren et al., [*Robots That Ask For Help (KnowNo)*](https://proceedings.mlr.press/v229/ren23a.html) (CoRL 2023).
-- **Text-to-SQL confidence** — Maleki et al., [*Confidence Estimation for Text-to-SQL in LLMs*](https://arxiv.org/abs/2508.14056); [TrustSQL](https://arxiv.org/abs/2403.15879).
-- **Agentic investigation and point-in-time data** — Yao et al., [*ReAct*](https://arxiv.org/abs/2210.03629); [Feast point-in-time joins](https://docs.feast.dev/getting-started/concepts/point-in-time-joins).
+- Monitoring detected **1 of 10** injected causes. All 22 alerts came from the single
+  `data_pipeline` episode, and each alert became its own incident. `fraud_surge`, `seasonal`,
+  `new_fraud` and `legit_business_spike` raised no alerts.
+- The likely cause is scale. The monitoring thresholds were chosen on the 5-episode smoke profile
+  (for example, the volume threshold 4.25 is the largest residual on one clean smoke episode),
+  and the injection sizes were also set at smoke scale.
+- `seasonal_calendar`, the only runbook meant to close benign incidents, is not implemented yet.
 
-## ⚠️ Limitations
+As it stands, the benchmark gives the agent almost no signal to work with. **Next step:** a
+diagnosis on development episodes only (sensitivity per metric, clean noise, why each cause was
+missed, whether incident grouping is correct). Injection sizes will then be rescaled and
+thresholds recalibrated on development before anything is locked. Changing a locked threshold
+needs explicit approval and is logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
 
-- The data is **synthetic**. That is what makes exact ground truth possible, but conclusions hold for the simulated world, not for any real payment network.
-- 60 episodes is pilot-sized; intervals will be wide.
-- The agent's closing authority is deliberately narrow (existing benign runbooks only).
-- Not yet built: API service, dashboard, Docker demo, CI.
+## Roadmap
 
-## 🗂️ Repository layout
+- [x] Simulator with delayed labels, business calendar and 9 incident scenarios
+- [x] Fraud model with calibration and Mondrian conformal sets
+- [x] Monitoring round 1 (PSI, volume, incidents with child incidents)
+- [x] Triage round 1 (gate, `unit_or_null_change`, one-step agent)
+- [x] Harness with run identity, role locks and cost ledger; pilot runs end to end
+- [ ] Monitoring sensitivity: rescale injections, recalibrate thresholds on development
+- [ ] Triage round 2: all 4 runbooks, K = N = 3 agent with `close_score`, SQL question set
+- [ ] Report shell locked before calibration; calibration, then a single test run
+- [ ] FastAPI, Streamlit dashboard, Docker Compose, CI, demo video
+
+## Repository layout
 
 ```
-simulator/    synthetic world, injectors, episodes, validation, support reports
-model/        as-of features, LightGBM, calibration, conformal, scoring
+simulator/    synthetic payment world, injectors, episodes, labels, validation, support reports
+model/        as-of features, LightGBM, isotonic calibration, Mondrian conformal, scoring
 monitoring/   daily metrics, signals, alerts, incidents
-triage/       runbooks, gate, run_sql tool, LLM agent, measurement
-evaluation/   truth matching, decision scoring, support tables
-payguard/     benchmark harness, run identity, locks, cost ledger
-configs/      YAML configuration (simulator, episodes, model, triage, LLM)
-docs/         design documents (Vietnamese, one topic per file)
-tests/        functional tests
-review/       protocol checks (verify_plan_claims.py, check_links.py)
+triage/       runbooks, gate, run_sql tool, LLM agent, cost ledger, token measurement
+evaluation/   truth matcher, decision scoring, detection recall, development support
+payguard/     benchmark harness, run identity, role locks
+configs/      YAML configuration with provenance (simulator, episodes, model, monitoring, triage, LLM, benchmark)
+docs/         design docs, one topic per file (Vietnamese)
+tests/        functional tests (pytest)
+review/       protocol checks: verify_plan_claims.py, check_links.py
 ```
 
-Design docs: [MASTER_PLAN.md](MASTER_PLAN.md) (status, roadmap, decision log) ·
+Start with [MASTER_PLAN.md](MASTER_PLAN.md) (status, roadmap, decision log), then
 [overview](docs/overview.md) · [data](docs/data.md) · [model](docs/model.md) ·
 [monitoring](docs/monitoring.md) · [triage](docs/triage.md) · [evaluation](docs/evaluation.md) ·
-[rationale](docs/rationale.md).
+[rationale](docs/rationale.md). All are in Vietnamese.
 
-## 🤝 How it was built
+## Related work
 
-```mermaid
-flowchart LR
-    P["🧠 Planner / orchestrator<br/>writes specs with<br/>testable acceptance criteria"] --> C["⌨️ Implementer agents<br/>code in isolated<br/>git worktrees"]
-    C --> T["🧪 Tests<br/>targeted while coding,<br/>full suite once"]
-    T --> R["🔍 Fresh reviewer agent<br/>file:line findings,<br/>counterexamples"]
-    R -->|"changes required<br/>(max 2 rounds)"| C
-    R -->|pass| M["🔀 Merge + status update"]
-    R -->|"still blocked"| U["👤 Human decides"]
-```
+PayGuard combines methods that already exist. It does not claim a new method. Its aim is to
+measure honestly where an agent helps compared with rules. Annotated list:
+[docs/rationale.md](docs/rationale.md) (Vietnamese).
 
-Development used an AI-assisted multi-agent workflow, with a human making every scope, budget and
-protocol decision. The coordination log, including each review outcome, is in
-[docs/orchestration.md](docs/orchestration.md).
+| Topic | References | Used for |
+|---|---|---|
+| Fraud detection with delayed labels | Dal Pozzolo et al., [*Credit Card Fraud Detection: A Realistic Modeling and a Novel Learning Strategy*](https://boracchi.faculty.polimi.it/docs/2017_FraudsTNNLS.pdf) (IEEE TNNLS 2017); Le Borgne et al., [*Fraud Detection Handbook*](https://github.com/Fraud-Detection-Handbook/fraud-detection-handbook) | label snapshots; simulator design (rewritten) |
+| Monitoring without labels | Rabanser et al., [*Failing Loudly*](https://arxiv.org/abs/1810.11953) (NeurIPS 2019); NannyML [CBPE](https://nannyml.readthedocs.io/en/main/how_it_works/performance_estimation.html) | drift signals; CBPE baseline (planned) |
+| Conformal prediction and abstention | Angelopoulos & Bates, [*A Gentle Introduction to Conformal Prediction*](https://arxiv.org/abs/2107.07511); Geifman & El-Yaniv, [*Selective Classification*](https://arxiv.org/abs/1705.08500); Angelopoulos et al., [*Learn then Test*](https://arxiv.org/abs/2110.01052) | transaction conformal sets; risk on the closed subset; tune on calibration, test held out |
+| Uncertainty for LLM agents | Kirchhof et al., [*Position: UQ Needs Reassessment for LLM Agents*](https://arxiv.org/abs/2505.22655) (ICML 2025); Ren et al., [*Robots That Ask For Help (KnowNo)*](https://proceedings.mlr.press/v229/ren23a.html) (CoRL 2023) | black-box self-consistency; conformal agent as an extension |
+| Text-to-SQL confidence | Maleki et al., [*Confidence Estimation for Text-to-SQL in LLMs*](https://arxiv.org/abs/2508.14056); [TrustSQL](https://arxiv.org/abs/2403.15879); Zhong et al., [test-suite evaluation](https://aclanthology.org/2020.emnlp-main.29/) (EMNLP 2020) | execution consistency for `run_sql`; counterexample DBs |
+| Agents and point-in-time data | Yao et al., [*ReAct*](https://arxiv.org/abs/2210.03629); [Feast point-in-time joins](https://docs.feast.dev/getting-started/concepts/point-in-time-joins) | agent loop; as-of contract |
+
+## Limitations
+
+- **Synthetic data.** It makes exact ground truth possible, but conclusions apply to the simulated
+  world, not to a real payment network.
+- **Pilot size.** With 60 episodes (about 16 with incidents in test), intervals will be wide and
+  per-mechanism comparisons are weak. A pilot is never presented as a near-zero-risk guarantee.
+- **Narrow closing authority.** The agent may close only inside existing benign runbooks. A
+  correct benign diagnosis without a runbook still goes to a human.
+- **Monitoring sensitivity.** Not yet adequate at pilot scale (see above).
+- **Not built yet.** Full triage round 2, report tables, API, dashboard, Docker demo, CI.
+
+## How it was built
+
+Development used an AI-assisted multi-agent workflow. A human made every scope, protocol and
+threshold decision.
+
+| Role | Who | Responsibility |
+|---|---|---|
+| Planner / orchestrator | Claude Opus (Claude Code) | Writes task specs with testable acceptance criteria, dispatches work, merges, keeps status |
+| Implementers | Codex `gpt-6-luna`; Claude Haiku 5.5 for small tasks | Code and tests, each task in its own git worktree |
+| Reviewer | A fresh Claude Opus 5.5 sub-agent per review | Read-only review with `file:line` findings and counterexamples; at most 2 rounds, then the human decides |
+
+Rules for every agent are in [AGENTS.md](AGENTS.md). The coordination log is in
+[docs/orchestration.md](docs/orchestration.md) (Vietnamese).
+
+## License
+
+No license file has been added yet.
