@@ -224,18 +224,23 @@ rule-only and fake-agent policies. Calibration and test episodes have not been a
 [P5.0b notes](docs/p5-implementation.md), Vietnamese):
 
 - Monitoring detected **1 of 10** injected causes. All 22 alerts came from the single
-  `data_pipeline` episode, and each alert became its own incident. `fraud_surge`, `seasonal`,
-  `new_fraud` and `legit_business_spike` raised no alerts.
-- The likely cause is scale. The monitoring thresholds were chosen on the 5-episode smoke profile
-  (for example, the volume threshold 4.25 is the largest residual on one clean smoke episode),
-  and the injection sizes were also set at smoke scale.
+  `data_pipeline` episode. That they became 22 incidents is the documented grouping rule (the
+  rule-only policy closes each incident, so the next day's alert opens a child incident), so it
+  is a workload issue, not a grouping bug. `fraud_surge`, `seasonal`, `new_fraud` and
+  `legit_business_spike` raised no alerts.
+- A development-only diagnosis found the cause: **scale mismatch**. Injection sizes and
+  thresholds were set on the smoke profile (about 4 transactions per day); the pilot has about
+  174 per day. A fraud surge adds 9 transactions in 11 minutes (about 5% of a day), the volume
+  threshold is about 21 times the clean-episode noise, and the public calendar announced a
+  much larger seasonal effect than the one injected.
 - `seasonal_calendar`, the only runbook meant to close benign incidents, is not implemented yet.
 
-As it stands, the benchmark gives the agent almost no signal to work with. **Next step:** a
-diagnosis on development episodes only (sensitivity per metric, clean noise, why each cause was
-missed, whether incident grouping is correct). Injection sizes will then be rescaled and
-thresholds recalibrated on development before anything is locked. Changing a locked threshold
-needs explicit approval and is logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
+**Next steps (approved):** make volume-type injections relative to each episode's baseline and
+make the public calendar match the injected effect, regenerate the data with the same locked
+episode manifest, then recalibrate thresholds per profile on clean development episodes with the
+documented rule. Short fraud bursts (which need sub-day velocity metrics) and recipient-side
+signals for new fraud patterns are left for monitoring round 2 and will be reported as negative
+results. Decisions are logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
 
 ## Roadmap
 
@@ -244,7 +249,8 @@ needs explicit approval and is logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietn
 - [x] Monitoring round 1 (PSI, volume, incidents with child incidents)
 - [x] Triage round 1 (gate, `unit_or_null_change`, one-step agent)
 - [x] Harness with run identity, role locks and cost ledger; pilot runs end to end
-- [ ] Monitoring sensitivity: rescale injections, recalibrate thresholds on development
+- [x] Monitoring diagnosis on development (scale mismatch found)
+- [ ] Rescale volume injections, recalibrate thresholds per profile on development
 - [ ] Triage round 2: all 4 runbooks, K = N = 3 agent with `close_score`, SQL question set
 - [ ] Report shell locked before calibration; calibration, then a single test run
 - [ ] FastAPI, Streamlit dashboard, Docker Compose, CI, demo video
