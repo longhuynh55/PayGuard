@@ -74,8 +74,12 @@ class StorePair:
         self.close()
 
 
+class _StorageConnection(sqlite3.Connection):
+    """Connection opened by this module; only these may memoize per-table column lists."""
+
+
 def _connect(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, factory=_StorageConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
@@ -130,6 +134,29 @@ def _table_columns(connection: sqlite3.Connection, table: str) -> tuple[str, ...
     return tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{escaped_table}")'))
 
 
+_TABLE_COLUMNS_CACHE_ATTRIBUTE = "_payguard_table_columns"
+
+
+def _cached_table_columns(connection: sqlite3.Connection, table: str) -> frozenset[str]:
+    """Return a table's column names, memoized per connection opened by this module.
+
+    Tables are created before any row is written and this module never alters them, so a
+    memoized list cannot go stale on its connection. A missing table is not memoized because
+    it may be created later on the same connection. Other connections are queried every time.
+    """
+    if not isinstance(connection, _StorageConnection):
+        return frozenset(_table_columns(connection, table))
+    cache: dict[str, frozenset[str]] = connection.__dict__.setdefault(
+        _TABLE_COLUMNS_CACHE_ATTRIBUTE, {}
+    )
+    columns = cache.get(table)
+    if columns is None:
+        columns = frozenset(_table_columns(connection, table))
+        if columns:
+            cache[table] = columns
+    return columns
+
+
 def list_operational_schema(connection: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
     """List every user table and column in an operational export."""
     tables = connection.execute(
@@ -164,7 +191,7 @@ def _insert(
 ) -> None:
     if not record:
         raise StorageError("record must contain at least one column")
-    available_columns = set(_table_columns(connection, table))
+    available_columns = _cached_table_columns(connection, table)
     keys = tuple(record)
     unknown = set(keys) - available_columns
     if unknown:

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Annotated, Any, Generic, Literal, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from simulator.schema import T0_UTC_TEXT
+from simulator.storage import utc_timestamp
 
 
 T = TypeVar("T")
@@ -135,6 +138,12 @@ class TimelineConfig(StrictModel):
             raise ValueError("timeline t0_business_date must be within the configured date range")
         if not t0 < drift < end:
             raise ValueError("timeline drift_start_business_date must follow T0 and precede the end date")
+        t0_instant = datetime.combine(t0, time.min, tzinfo=ZoneInfo(self.business_timezone.value))
+        if utc_timestamp(t0_instant) != T0_UTC_TEXT:
+            raise ValueError(
+                f"timeline t0_business_date is locked to the MVP T0 {T0_UTC_TEXT}; "
+                "a different T0 changes the contract and is not a configuration value"
+            )
         return self
 
 
