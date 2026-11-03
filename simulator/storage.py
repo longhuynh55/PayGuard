@@ -10,6 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from simulator.common import (
+    TimestampParseError,
+    format_timestamp,
+    parse_timestamp,
+    table_columns,
+)
 from simulator.schema import (
     OPERATIONAL_DDL,
     OPERATIONAL_TABLES,
@@ -27,19 +33,19 @@ class StorageError(ValueError):
 def utc_timestamp(value: datetime | str) -> str:
     """Return a timezone-aware timestamp as fixed-width UTC text."""
     if isinstance(value, str):
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError as exc:
-            raise StorageError(f"invalid ISO timestamp: {value!r}") from exc
-    elif isinstance(value, datetime):
-        parsed = value
-    else:
+            return format_timestamp(parse_timestamp(value))
+        except TimestampParseError as exc:
+            if exc.reason == "invalid":
+                raise StorageError(f"invalid ISO timestamp: {value!r}") from exc
+            raise StorageError(
+                "naive timestamps are not allowed; provide an explicit UTC offset"
+            ) from exc
+    if not isinstance(value, datetime):
         raise StorageError("timestamp must be an aware datetime or ISO string with an offset")
-
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise StorageError("naive timestamps are not allowed; provide an explicit UTC offset")
-    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return format_timestamp(value)
 
 
 @dataclass
@@ -129,11 +135,6 @@ def create_export_stores(output_dir: str | Path) -> StorePair:
     )
 
 
-def _table_columns(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
-    escaped_table = table.replace('"', '""')
-    return tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{escaped_table}")'))
-
-
 _TABLE_COLUMNS_CACHE_ATTRIBUTE = "_payguard_table_columns"
 
 
@@ -145,13 +146,13 @@ def _cached_table_columns(connection: sqlite3.Connection, table: str) -> frozens
     it may be created later on the same connection. Other connections are queried every time.
     """
     if not isinstance(connection, _StorageConnection):
-        return frozenset(_table_columns(connection, table))
+        return frozenset(table_columns(connection, table))
     cache: dict[str, frozenset[str]] = connection.__dict__.setdefault(
         _TABLE_COLUMNS_CACHE_ATTRIBUTE, {}
     )
     columns = cache.get(table)
     if columns is None:
-        columns = frozenset(_table_columns(connection, table))
+        columns = frozenset(table_columns(connection, table))
         if columns:
             cache[table] = columns
     return columns
@@ -162,7 +163,7 @@ def list_operational_schema(connection: sqlite3.Connection) -> dict[str, tuple[s
     tables = connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).fetchall()
-    return {row[0]: _table_columns(connection, row[0]) for row in tables}
+    return {row[0]: table_columns(connection, row[0]) for row in tables}
 
 
 def insert_operational_record(

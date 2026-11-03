@@ -17,22 +17,21 @@ from payguard.identity import (
     identity_hash_mismatches,
     lock_identity_hashes,
     normalize_lock_profile,
-    policy_identity,
     policy_name_for_run,
     run_fingerprint,
     verify_role_locks,
 )
+from simulator.common import JsonFileError, read_json_object
 from simulator.reproducibility import canonical_run_fingerprint
 
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunIdentityError(f"run identity manifest is missing or invalid: {path}") from exc
-    if not isinstance(value, dict):
-        raise RunIdentityError(f"run identity manifest must be a JSON object: {path}")
-    return value
+        return read_json_object(path)
+    except JsonFileError as exc:
+        if exc.reason == "unreadable":
+            raise RunIdentityError(f"run identity manifest is missing or invalid: {path}") from exc
+        raise RunIdentityError(f"run identity manifest must be a JSON object: {path}") from exc
 
 
 def _fingerprint(database_path: Path) -> str:

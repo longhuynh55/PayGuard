@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from simulator.asof import read_as_of
+from simulator.common import parse_timestamp
 from simulator.storage import utc_timestamp
 
 
@@ -24,10 +25,6 @@ class RecipientSignals:
     first_counterparty_transfer_txn_ids: tuple[str, ...]
 
 
-def _parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-
-
 def derive_recipient_signals(
     operational: sqlite3.Connection,
     *,
@@ -41,11 +38,23 @@ def derive_recipient_signals(
     All inputs pass through ``read_as_of``. Amounts use the transaction rows that
     are available at the requested snapshot and have event times in the relevant
     trailing window; the function does not read labels or private metadata.
+
+    ``new_or_dormant`` is decided at an anchor, the transaction under evaluation:
+    the first incoming transfer to the account in the 24 hours up to
+    ``as_of_time`` (``as_of - 24h < created_at <= as_of``, earliest by
+    ``created_at`` then ``txn_id``). The account is new or dormant when it was
+    created within ``dormant_after_days`` before the anchor, or when no transaction
+    into or out of the account happened strictly before the anchor within
+    ``dormant_after_days`` before it. The anchor is excluded from that history, so
+    a burst of receipts after a long dormancy is flagged at its first receipt. An
+    account with no incoming transfer in that window has no transaction under
+    evaluation; its flag keeps the earlier rule, measured at ``as_of_time`` over all
+    snapshot activity.
     """
     if isinstance(dormant_after_days, bool) or not isinstance(dormant_after_days, int) or dormant_after_days <= 0:
         raise ValueError("dormant_after_days must be a positive integer")
     normalized_as_of = utc_timestamp(as_of_time)
-    as_of = _parse_time(normalized_as_of)
+    as_of = parse_timestamp(normalized_as_of)
     transactions = read_as_of(
         operational,
         "transactions",
@@ -82,12 +91,12 @@ def derive_recipient_signals(
         account_transfers = [row for row in transfers if row["recipient_customer_id"] == recipient_id]
         recent_incoming = [
             row for row in account_transfers
-            if trailing_24h < _parse_time(row["created_at"]) <= as_of
+            if trailing_24h < parse_timestamp(row["created_at"]) <= as_of
         ]
         recent_outgoing = [
             row for row in transactions
             if row["customer_id"] == recipient_id
-            and trailing_24h < _parse_time(row["created_at"]) <= as_of
+            and trailing_24h < parse_timestamp(row["created_at"]) <= as_of
             and row["recipient_customer_id"] is not None
         ]
         incoming_amount = sum(
@@ -98,7 +107,7 @@ def derive_recipient_signals(
         )
         recent_fan_in = [
             row for row in account_transfers
-            if trailing_7d < _parse_time(row["created_at"]) <= as_of
+            if trailing_7d < parse_timestamp(row["created_at"]) <= as_of
         ]
         fan_in = len({row["customer_id"] for row in recent_fan_in})
         sender_ids = {row["customer_id"] for row in recent_fan_in}
@@ -107,19 +116,36 @@ def derive_recipient_signals(
             for sender_id in sender_ids
         )
         customer = customers_by_id.get(recipient_id)
-        account_created_at = _parse_time(customer["event_at"]) if customer else None
-        recent_activity = [
-            _parse_time(row["created_at"])
+        account_created_at = parse_timestamp(customer["event_at"]) if customer else None
+        activity = [
+            parse_timestamp(row["created_at"])
             for row in transactions
             if row["customer_id"] == recipient_id or row["recipient_customer_id"] == recipient_id
         ]
-        last_activity = max(recent_activity, default=None)
-        new_or_dormant = (
-            account_created_at is None
-            or account_created_at > dormant_cutoff
-            or last_activity is None
-            or last_activity <= dormant_cutoff
-        )
+        if recent_incoming:
+            anchor = min(
+                recent_incoming,
+                key=lambda row: (parse_timestamp(row["created_at"]), row["txn_id"]),
+            )
+            anchor_at = parse_timestamp(anchor["created_at"])
+            anchor_cutoff = anchor_at - timedelta(days=dormant_after_days)
+            last_prior_activity = max(
+                (at for at in activity if at < anchor_at), default=None
+            )
+            new_or_dormant = (
+                account_created_at is None
+                or account_created_at > anchor_cutoff
+                or last_prior_activity is None
+                or last_prior_activity <= anchor_cutoff
+            )
+        else:
+            last_activity = max(activity, default=None)
+            new_or_dormant = (
+                account_created_at is None
+                or account_created_at > dormant_cutoff
+                or last_activity is None
+                or last_activity <= dormant_cutoff
+            )
         signals[recipient_id] = RecipientSignals(
             recipient_customer_id=recipient_id,
             fan_in_7d=fan_in,

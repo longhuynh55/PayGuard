@@ -10,6 +10,12 @@ import json
 import math
 from typing import Any
 
+from simulator.common import (
+    TimestampParseError,
+    canonical_json,
+    format_timestamp,
+    parse_timestamp,
+)
 from triage.decisions import (
     CHECKLIST_RESULT_STATUSES,
     normalize_decision_real_columns,
@@ -107,22 +113,16 @@ class GateConfig:
 
 
 def _parse_timestamp(value: Any, field_name: str) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a timezone-aware timestamp")
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must be a valid timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError(f"{field_name} must include a timezone")
-    if parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise ValueError(f"{field_name} must be UTC")
-    return parsed.astimezone(UTC)
-
-
-def _format_timestamp(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return parse_timestamp(value, utc=True)
+    except TimestampParseError as exc:
+        messages = {
+            "not_text": "must be a timezone-aware timestamp",
+            "invalid": "must be a valid timestamp",
+            "naive": "must include a timezone",
+            "not_utc": "must be UTC",
+        }
+        raise ValueError(f"{field_name} {messages[exc.reason]}") from exc
 
 
 def _normalize_prior_recheck_times(
@@ -396,23 +396,13 @@ def _usage_columns(value: Any) -> dict[str, int | float | None]:
     return columns
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
 def _fallback_incident_id(incident: Mapping[str, Any], *, episode_id: str, as_of: str) -> str:
     known = {
         field: incident.get(field)
         for field in sorted(_INCIDENT_FIELDS)
         if isinstance(incident.get(field), (str, type(None)))
     }
-    canonical = _canonical_json(
+    canonical = canonical_json(
         {"schema_version": 1, "episode_id": episode_id, "as_of_time": as_of, "snapshot": known}
     )
     return "incident-invalid-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
@@ -479,7 +469,7 @@ def evaluate_gate(
         as_of = _parse_timestamp(as_of_time, "as_of_time")
     except ValueError as exc:
         raise GateInputError(str(exc)) from exc
-    normalized_as_of = _format_timestamp(as_of)
+    normalized_as_of = format_timestamp(as_of)
     prior_recheck_times = _normalize_prior_recheck_times(
         prior_recheck_as_of_times, as_of=as_of
     )
@@ -780,7 +770,7 @@ def evaluate_gate(
         feature = None
         segment = None
         opened_at = None
-    scope_json = _canonical_json(
+    scope_json = canonical_json(
         {
             "feature": feature,
             "segment": segment,
@@ -788,8 +778,8 @@ def evaluate_gate(
             "end_at": normalized_as_of,
         }
     )
-    checklist_json = _canonical_json(normalized_checklists)
-    traces_json = _canonical_json(tool_trace_ids)
+    checklist_json = canonical_json(normalized_checklists)
+    traces_json = canonical_json(tool_trace_ids)
     conclusion = (
         f"cause={cause}; proposed_action={requested_action}; "
         f"action={decision_action}; evidence_status={evidence_status}"
@@ -819,7 +809,7 @@ def evaluate_gate(
     decision_payload = normalize_decision_real_columns(decision_payload)
     identity = {"schema_version": 1, "decision": decision_payload}
     decision_id = "decision-" + hashlib.sha256(
-        _canonical_json(identity).encode("utf-8")
+        canonical_json(identity).encode("utf-8")
     ).hexdigest()[:24]
     row = {"decision_id": decision_id, **decision_payload}
     return validate_decision_row(row)

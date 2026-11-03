@@ -11,6 +11,7 @@ from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
 from simulator.asof import read_as_of
+from simulator.common import parse_timestamp
 from simulator.config import SimulatorConfig
 from simulator.fraud import card_testing_metadata_key, mechanism_metadata_key
 from simulator.randomness import keyed_rng
@@ -40,10 +41,6 @@ class LabelSnapshot:
     state: SnapshotState
     label: str | None
     label_event_id: str | None
-
-
-def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def _t0_timestamp(config: SimulatorConfig) -> datetime:
@@ -227,7 +224,7 @@ def generate_label_events(
     minimum_delay = label_config.minimum_delay_days.value
     maximum_delay = label_config.maximum_delay_days.value
     horizon_days = label_config.maturity_horizon_days.value
-    last_transaction_at = max(_parse_timestamp(row["event_at"]) for row in transactions)
+    last_transaction_at = max(parse_timestamp(row["event_at"]) for row in transactions)
     tail_days = max(horizon_days, maximum_delay)
     label_tail_end_at = last_transaction_at + timedelta(days=tail_days)
 
@@ -258,7 +255,7 @@ def generate_label_events(
                 delay_rng = keyed_rng(run_seed, "p1.labels.delay_days", random_key)
                 delay_days = delay_rng.randint(minimum_delay, maximum_delay)
                 reported_at = utc_timestamp(
-                    _parse_timestamp(transaction["event_at"])
+                    parse_timestamp(transaction["event_at"])
                     + timedelta(days=delay_days)
                 )
                 # P1.5 does not model a separate source-ingestion lag.
@@ -343,7 +340,7 @@ def snapshot_labels(
 ) -> list[LabelSnapshot]:
     """Return the four MVP label states using the existing as-of reader."""
     normalized_as_of = utc_timestamp(as_of_time)
-    as_of = _parse_timestamp(normalized_as_of)
+    as_of = parse_timestamp(normalized_as_of)
     t0 = _t0_timestamp(config)
     transactions = read_as_of(
         operational,
@@ -375,7 +372,7 @@ def snapshot_labels(
         elif event is not None:
             state = "confirmed_legit"
             label = "legit"
-        elif as_of - _parse_timestamp(transaction["event_at"]) >= horizon:
+        elif as_of - parse_timestamp(transaction["event_at"]) >= horizon:
             state = "matured_negative"
             label = None
         else:
@@ -404,7 +401,7 @@ def label_delay_report(
 ) -> dict[str, Any]:
     """Report observable snapshot delays separately from private oracle outcomes."""
     normalized_as_of = utc_timestamp(as_of_time)
-    as_of = _parse_timestamp(normalized_as_of)
+    as_of = parse_timestamp(normalized_as_of)
     t0 = _t0_timestamp(config)
     snapshots = snapshot_labels(
         operational,
@@ -429,7 +426,7 @@ def label_delay_report(
         for state in ("confirmed_fraud", "confirmed_legit", "matured_negative", "pending")
     }
     visible_delay_days = [
-        (_parse_timestamp(event["reported_at"]) - _parse_timestamp(event["event_at"])).total_seconds()
+        (parse_timestamp(event["reported_at"]) - parse_timestamp(event["event_at"])).total_seconds()
         / 86400
         for event in visible_labels
     ]
@@ -507,10 +504,10 @@ def label_delay_report(
     reported_not_available = [
         outcome
         for outcome in outcomes
-        if outcome["reported"] and _parse_timestamp(outcome["available_at"]) > as_of
+        if outcome["reported"] and parse_timestamp(outcome["available_at"]) > as_of
     ]
     selected_last_transaction_at = max(
-        (_parse_timestamp(outcome["event_at"]) for outcome in outcomes),
+        (parse_timestamp(outcome["event_at"]) for outcome in outcomes),
         default=None,
     )
     tail_days = max(

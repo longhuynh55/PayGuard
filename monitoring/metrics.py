@@ -20,6 +20,7 @@ import yaml
 
 from model.features import ScoreFeatureMatrix, build_score_feature_matrix
 from simulator.asof import read_as_of
+from simulator.common import TimestampParseError, parse_timestamp
 from simulator.config import SimulatorConfig, load_simulator_config
 from simulator.storage import utc_timestamp
 
@@ -288,11 +289,12 @@ def _load_monitoring_config(path: str | Path) -> _MonitoringConfig:
 
 
 def _parse_timestamp(value: str) -> datetime:
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise MonitoringMetricsError(f"timestamp must include a timezone: {value!r}")
-    return parsed.astimezone(UTC)
+    try:
+        return parse_timestamp(value)
+    except TimestampParseError as exc:
+        if exc.reason == "naive":
+            raise MonitoringMetricsError(f"timestamp must include a timezone: {value!r}") from exc
+        raise
 
 
 def _local_date(value: str, timezone: ZoneInfo) -> date:

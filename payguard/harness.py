@@ -18,6 +18,7 @@ from model.train import artifact_directory_for_run
 from monitoring.metrics import compute_daily_metrics
 from monitoring.signals import compute_alerts
 from monitoring.store import persist_monitoring_rows
+from simulator.common import JsonFileError, read_json_object
 from simulator.reproducibility import canonical_run_fingerprint
 from triage.agent import build_agent_provider
 from triage.cost_ledger import DurableCostLedger
@@ -34,7 +35,6 @@ from payguard.identity import (
     current_hashes,
     current_run_identity,
     identity_hash_mismatches,
-    lock_identity_hashes,
     policy_identity,
     record_role_touches,
     run_fingerprint,
@@ -93,12 +93,11 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HarnessError(f"run manifest is missing or invalid: {path}") from exc
-    if not isinstance(value, dict):
-        raise HarnessError(f"run manifest must contain a JSON object: {path}")
-    return value
+        return read_json_object(path)
+    except JsonFileError as exc:
+        if exc.reason == "unreadable":
+            raise HarnessError(f"run manifest is missing or invalid: {path}") from exc
+        raise HarnessError(f"run manifest must contain a JSON object: {path}") from exc
 
 
 def _ensure_harness_root(

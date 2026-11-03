@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 from fractions import Fraction
 import json
 import math
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 
 from simulator.asof import read_as_of
+from simulator.common import TimestampParseError, format_timestamp, parse_timestamp
 from simulator.config import SimulatorConfig, load_simulator_config
 from simulator.storage import StorageError, utc_timestamp
 
@@ -209,20 +210,16 @@ def _load_fraud_allowlist(config: Mapping[str, Any]) -> tuple[_FraudMetric, ...]
 
 
 def _utc_datetime(value: Any, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise ValueError(f"{field} must be a UTC timestamp")
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ValueError(f"{field} must be a valid timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise ValueError(f"{field} must be timezone-aware UTC")
-    return parsed.astimezone(UTC)
-
-
-def _iso(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return parse_timestamp(value, utc=True)
+    except TimestampParseError as exc:
+        messages = {
+            "not_text": "must be a UTC timestamp",
+            "invalid": "must be a valid timestamp",
+            "naive": "must be timezone-aware UTC",
+            "not_utc": "must be timezone-aware UTC",
+        }
+        raise ValueError(f"{field} {messages[exc.reason]}") from exc
 
 
 def _business_start(day: date, zone: ZoneInfo) -> str:
@@ -993,9 +990,9 @@ def check_unit_or_null_change(
             raise ValueError("incident snapshot has an invalid episode_id")
         if not isinstance(incident_id, str) or not incident_id.strip():
             raise ValueError("incident snapshot has an invalid incident_id")
-        incident_as_of = _iso(_utc_datetime(as_of_raw, "incident.available_at"))
+        incident_as_of = format_timestamp(_utc_datetime(as_of_raw, "incident.available_at"))
         if as_of_time is not None:
-            supplied_as_of = _iso(_utc_datetime(as_of_time, "as_of_time"))
+            supplied_as_of = format_timestamp(_utc_datetime(as_of_time, "as_of_time"))
             if supplied_as_of != incident_as_of:
                 raise ValueError(
                     "as_of_time must equal the incident snapshot available_at"

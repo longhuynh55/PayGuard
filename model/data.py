@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from simulator.asof import read_as_of
+from simulator.common import parse_timestamp
 from simulator.config import SimulatorConfig
 from simulator.labels import LABEL_POLICY_VERSION, LabelSnapshot, SnapshotState, snapshot_labels
 from simulator.storage import utc_timestamp
@@ -227,10 +228,6 @@ def _snapshot_target(snapshot: LabelSnapshot) -> int | None:
     return target
 
 
-def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-
-
 def _snapshot_time(simulator_config: SimulatorConfig, timezone_name: str) -> datetime:
     local_t0 = datetime.combine(
         simulator_config.timeline.t0_business_date.value,
@@ -241,7 +238,7 @@ def _snapshot_time(simulator_config: SimulatorConfig, timezone_name: str) -> dat
 
 
 def _business_date(event_at: str, timezone_name: str) -> date:
-    return _parse_timestamp(event_at).astimezone(ZoneInfo(timezone_name)).date()
+    return parse_timestamp(event_at).astimezone(ZoneInfo(timezone_name)).date()
 
 
 def build_splits(
@@ -322,7 +319,7 @@ def build_splits(
 
         split_counts = counts[split_name]
         split_counts["candidate_count"] += 1
-        event_time = _parse_timestamp(transaction["event_at"])
+        event_time = parse_timestamp(transaction["event_at"])
         age = t0 - event_time
         if age < timedelta(0):
             raise ValueError(f"transaction {txn_id!r} occurs after the T0 label snapshot")

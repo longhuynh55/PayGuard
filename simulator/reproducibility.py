@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from collections.abc import Sequence
 from typing import Any
 
+from simulator.common import canonical_json, canonical_sha256
 from simulator.schema import OPERATIONAL_TABLES
 from simulator.storage import insert_private_record, utc_timestamp
 
@@ -66,13 +66,7 @@ def canonical_fingerprint(
     tables: Sequence[str] = P1_3_FINGERPRINT_TABLES,
 ) -> str:
     """Return SHA-256 of canonical row content, never the SQLite file bytes."""
-    payload = json.dumps(
-        canonical_content(connection, tables),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return canonical_sha256(canonical_content(connection, tables))
 
 
 def canonical_run_content(connection: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
@@ -113,13 +107,7 @@ def canonical_run_fingerprint(
     content = canonical_run_content(connection)
     for table in empty_tables:
         content[table] = []
-    payload = json.dumps(
-        content,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return canonical_sha256(content)
 
 
 def canonical_episode_content(
@@ -165,15 +153,9 @@ def canonical_episode_fingerprint(
     t0: str,
 ) -> str:
     """Return SHA-256 for one canonical operational episode view."""
-    payload = json.dumps(
-        canonical_episode_content(
-            operational, episode_id=episode_id, t0=t0
-        ),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return canonical_sha256(
+        canonical_episode_content(operational, episode_id=episode_id, t0=t0)
+    )
 
 
 def record_canonical_fingerprint(
@@ -189,7 +171,7 @@ def record_canonical_fingerprint(
         "tables": sorted(tables),
         "fingerprint": fingerprint,
     }
-    serialized = json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    serialized = canonical_json(metadata)
     existing = private.execute(
         "SELECT 1 FROM run_metadata WHERE key = ?", (FINGERPRINT_METADATA_KEY,)
     ).fetchone()

@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
+from simulator.common import canonical_json
 from simulator.storage import utc_timestamp
 from triage.cost_ledger import CostLimitExceeded, DurableCostLedger
 
@@ -201,10 +202,6 @@ def resolve_openrouter_api_key(
         return value
     root_env = Path(dotenv_path) if dotenv_path is not None else DEFAULT_CONFIG_PATH.parents[1] / ".env"
     return _read_dotenv_key(root_env)
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _json_without_nonstandard_constants(content: str) -> Any:
@@ -437,7 +434,7 @@ class LLMClient:
 
     def _maximum_request_cost(self, payload: Mapping[str, Any]) -> Decimal:
         """Reserve against the UTF-8 byte upper bound for prompt tokens."""
-        encoded_bytes = len(_canonical_json(payload).encode("utf-8")) + 16
+        encoded_bytes = len(canonical_json(payload).encode("utf-8")) + 16
         input_rate = Decimal(str(self.config.input_usd_per_million))
         output_rate = Decimal(str(self.config.output_usd_per_million))
         input_cost = Decimal(encoded_bytes) * input_rate / Decimal(1_000_000)
@@ -480,7 +477,7 @@ class LLMClient:
             "as_of_time": as_of_time,
             "data_snapshot": data_snapshot,
         }
-        return hashlib.sha256(_canonical_json(cache_payload).encode("utf-8")).hexdigest()
+        return hashlib.sha256(canonical_json(cache_payload).encode("utf-8")).hexdigest()
 
     def _empty_record(self, cache_key: str, started: float) -> LLMCallRecord:
         return LLMCallRecord(
