@@ -92,7 +92,7 @@ Các tên cột trong bảng dưới đây là interface schema, không phải q
 - Aggregate theo cửa sổ (ví dụ cash-out 24 h) chỉ dùng khi đã quan sát đủ cửa sổ, hoặc đánh dấu censored.
 - Mọi score, alert, truy vấn và kết luận lưu `as_of_time` và phiên bản snapshot.
 
-**Chỉ mục đọc as-of:** `transactions`, `customers`, `label_events`, `model_scores`, `daily_metrics`, `alerts`, `incidents` và `decisions` có chỉ mục `<table>_episode_asof` trên `(episode_id, event_at, available_at)`. Chỉ mục chỉ đổi kế hoạch truy vấn: `read_as_of` giữ nguyên điều kiện lọc, `ORDER BY event_at, rowid`, cột và kết quả; không đổi khóa, dữ liệu hay fingerprint. `transaction_events`, `merchants` và `business_calendar` chưa có chỉ mục as-of (xem bàn giao PERF-STORAGE trong [p5-implementation.md](p5-implementation.md)).
+**Chỉ mục đọc as-of:** `transactions`, `customers`, `label_events`, `model_scores`, `daily_metrics`, `alerts`, `incidents` và `decisions` có chỉ mục `<table>_episode_asof` trên `(episode_id, event_at, available_at)`. Chỉ mục chỉ đổi kế hoạch truy vấn: `read_as_of` giữ nguyên điều kiện lọc, `ORDER BY event_at, rowid`, cột và kết quả; không đổi khóa, dữ liệu hay fingerprint. Chỉ mục là một phần hợp đồng schema mà `simulator validate` kiểm (`_check_schema`): export sinh trước PERF-STORAGE (03/11/2026) không còn qua validate, phải sinh lại. `transaction_events`, `merchants` và `business_calendar` chưa có chỉ mục as-of (xem bàn giao PERF-STORAGE trong [p5-implementation.md](p5-implementation.md)).
 
 ### Timestamp, ngày nghiệp vụ, tiền và lịch sử episode chung
 

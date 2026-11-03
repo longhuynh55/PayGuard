@@ -166,6 +166,7 @@ Phân tích tĩnh theo luật đã khóa ([triage.md](triage.md) mục 2–5, [e
       - Test functional qua `validate_simulator_config`: `tests/test_simulator_config.py::test_t0_other_than_the_locked_mvp_value_is_rejected` (hai giá trị `2026-01-31`, `2026-02-02`). Đỏ trên HEAD (`DID NOT RAISE`), xanh sau sửa.
       - Docs: `data.md` mục 2 (chỉ mục as-of; T0 là hằng số hợp đồng).
     - **Đo O5** (bản sao `/var/tmp/payguard-ps/pilot/observations.sqlite` của `payguard-hp/bench2/base/operational/`; bản gốc không đổi; 12 episode development; trung vị 3 lần; thời gian của `read_as_of`, tổng 12 lượt đọc):
+  - **Trạng thái: merge 03/11/2026** (review Opus r1 PASS, full suite 463 passed + 1 xfailed). Backlog: F1 export trước PERF-STORAGE fail `validate` vì `_check_schema` so cả index (đã ghi trong data.md mục 2); F2 fingerprint pilot đối chiếu ở lượt harness pilot mới so với `bench2`; F3 test hai nhánh cache O7 (bảng chưa tồn tại, connection `sqlite3` thường); index as-of cho `transaction_events` (−15 %, +51 MB) chưa làm (orchestrator 03/11).
 
       | Bảng | Cutoff T0+11 ngày: trước → sau | Cutoff đầy đủ: trước → sau |
       |---|---|---|
