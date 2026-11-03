@@ -18,6 +18,7 @@ from simulator.identifiers import transaction_id
 from simulator.randomness import keyed_rng
 from simulator.storage import insert_operational_record, insert_private_record, utc_timestamp
 from simulator.transactions import card_token_for_customer, device_id_for_transaction
+from simulator.volume import calendar_relative_change
 from simulator.world import WorldSummary
 
 
@@ -562,6 +563,26 @@ def _episode_business_customers_and_merchants(
     return customers, merchants
 
 
+def card_testing_burst_size(config: SimulatorConfig) -> int:
+    """Smoke burst size: attempts per card plus the one follow-up transaction."""
+    return config.fraud.card_testing.attempts_per_card.value + 1
+
+
+def _burst_attempt_count(config: SimulatorConfig, injected_transaction_count: int | None) -> int:
+    """Small attempts before the follow-up; the burst window keeps its configured duration."""
+    if injected_transaction_count is None:
+        return config.fraud.card_testing.attempts_per_card.value
+    if (
+        isinstance(injected_transaction_count, bool)
+        or not isinstance(injected_transaction_count, int)
+        or injected_transaction_count < card_testing_burst_size(config)
+    ):
+        raise ValueError(
+            "injected_transaction_count must be an integer at least the card-testing burst size"
+        )
+    return injected_transaction_count - 1
+
+
 def inject_fraud_surge(
     operational: sqlite3.Connection,
     private: sqlite3.Connection,
@@ -573,12 +594,17 @@ def inject_fraud_surge(
     seed: int | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
     parent_scenario: str | None = None,
+    injected_transaction_count: int | None = None,
     calendar_event_name: str | None = None,
     calendar_channel: str | None = None,
-    calendar_expected_relative_change: float | None = None,
+    calendar_scope_baseline: float | None = None,
     overlap_start_at: datetime | None = None,
 ) -> IncidentSummary:
-    """Inject one new, known card-testing burst with an optional public calendar date."""
+    """Inject one new, known card-testing burst with an optional public calendar date.
+
+    ``injected_transaction_count`` counts every burst row, follow-up included. The calendar
+    expectation is the burst's in-scope rows over ``calendar_scope_baseline``.
+    """
     _require_episode(operational, private, episode_id)
     _check_truth_id(incident_truth_id)
     _require_business_date(business_date)
@@ -594,15 +620,16 @@ def inject_fraud_surge(
         if calendar_channel not in config.transactions.channel_weights.value:
             raise ValueError("calendar_channel must be a configured transaction channel")
         if (
-            isinstance(calendar_expected_relative_change, bool)
-            or not isinstance(calendar_expected_relative_change, (int, float))
-            or not math.isfinite(calendar_expected_relative_change)
-            or calendar_expected_relative_change <= 0
+            isinstance(calendar_scope_baseline, bool)
+            or not isinstance(calendar_scope_baseline, (int, float))
+            or not math.isfinite(calendar_scope_baseline)
+            or calendar_scope_baseline <= 0
         ):
-            raise ValueError("calendar expected relative change must be finite and positive")
+            raise ValueError("calendar scope baseline must be finite and positive")
 
     run_seed = config.seed.value if seed is None else seed
     mechanism = config.fraud.card_testing
+    attempt_count = _burst_attempt_count(config, injected_transaction_count)
     if overlap_start_at is None:
         local_start = datetime.combine(
             business_date,
@@ -615,7 +642,7 @@ def inject_fraud_surge(
             namespace="fraud_surge",
             keys=(episode_id, incident_truth_id),
             base_start=local_start,
-            attempts_per_card=mechanism.attempts_per_card.value,
+            attempts_per_card=attempt_count,
         )
     else:
         if (
@@ -635,7 +662,7 @@ def inject_fraud_surge(
             namespace="fraud_surge",
             keys=(episode_id, incident_truth_id),
             base_start=start_at,
-            attempts_per_card=config.fraud.card_testing.attempts_per_card.value,
+            attempts_per_card=attempt_count,
         )
     start_text = utc_timestamp(start_at)
     customers, merchants = _episode_business_customers_and_merchants(
@@ -647,7 +674,6 @@ def inject_fraud_surge(
     merchant_id = keyed_rng(
         run_seed, "p1.6.fraud_surge.merchant", episode_id, incident_truth_id
     ).choice(merchants)
-    attempt_count = mechanism.attempts_per_card.value
     attempt_offsets = [0]
     for spacing in spacing_intervals:
         attempt_offsets.append(attempt_offsets[-1] + spacing)
@@ -745,7 +771,11 @@ def inject_fraud_surge(
                 business_date=business_date,
                 event_name=calendar_event_name,
                 channel=calendar_channel,
-                expected_relative_change=calendar_expected_relative_change,
+                expected_relative_change=calendar_relative_change(
+                    affected_rows,
+                    channel=calendar_channel,
+                    scope_baseline=calendar_scope_baseline,
+                ),
                 seed=run_seed,
                 event_key=incident_truth_id,
             )
@@ -1251,7 +1281,6 @@ def inject_seasonal_unlisted(
     business_date: date,
     event_name: str,
     additional_transaction_count: int,
-    expected_relative_change: float,
     seed: int | None = None,
     customer_ids: tuple[str, ...] | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
@@ -1266,7 +1295,7 @@ def inject_seasonal_unlisted(
         business_date=business_date,
         event_name=event_name,
         additional_transaction_count=additional_transaction_count,
-        expected_relative_change=expected_relative_change,
+        calendar_scope_baseline=None,
         seed=seed,
         customer_ids=customer_ids,
         transaction_random_keys=transaction_random_keys,
@@ -1285,11 +1314,11 @@ def inject_fraud_surge_on_calendar_date(
     business_date: date,
     event_name: str = "Synthetic promotion event",
     channel: str | None = None,
-    expected_relative_change: float = 5.0,
+    calendar_scope_baseline: float,
     seed: int | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
 ) -> IncidentSummary:
-    """Publish a neutral calendar context and inject one fraud truth on that date."""
+    """Publish a calendar context on the surge date; its expectation is the surge's in-scope change."""
     return inject_fraud_surge(
         operational,
         private,
@@ -1301,7 +1330,7 @@ def inject_fraud_surge_on_calendar_date(
         transaction_random_keys=transaction_random_keys,
         calendar_event_name=event_name,
         calendar_channel=channel or config.transactions.channel.value,
-        calendar_expected_relative_change=expected_relative_change,
+        calendar_scope_baseline=calendar_scope_baseline,
     )
 
 
@@ -1317,7 +1346,8 @@ def inject_two_cause_fraud_seasonal(
     business_date: date,
     event_name: str,
     seasonal_additional_transaction_count: int,
-    seasonal_expected_relative_change: float,
+    seasonal_calendar_scope_baseline: float,
+    fraud_injected_transaction_count: int,
     seed: int | None = None,
     customer_ids: tuple[str, ...] | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
@@ -1337,7 +1367,7 @@ def inject_two_cause_fraud_seasonal(
             business_date=business_date,
             event_name=event_name,
             additional_transaction_count=seasonal_additional_transaction_count,
-            expected_relative_change=seasonal_expected_relative_change,
+            calendar_scope_baseline=seasonal_calendar_scope_baseline,
             seed=seed,
             customer_ids=customer_ids,
             transaction_random_keys=transaction_random_keys,
@@ -1368,7 +1398,7 @@ def inject_two_cause_fraud_seasonal(
             namespace="fraud_surge",
             keys=(episode_id, fraud_truth_id),
             base_start=local_start,
-            attempts_per_card=config.fraud.card_testing.attempts_per_card.value,
+            attempts_per_card=_burst_attempt_count(config, fraud_injected_transaction_count),
         )
         fraud_end = sampled_start + timedelta(
             minutes=config.fraud.card_testing.window_minutes.value,
@@ -1396,6 +1426,7 @@ def inject_two_cause_fraud_seasonal(
             seed=seed,
             transaction_random_keys=transaction_random_keys,
             parent_scenario=parent_scenario,
+            injected_transaction_count=fraud_injected_transaction_count,
             overlap_start_at=overlap_start_at,
         )
         fraud_truth = private.execute(
@@ -1528,7 +1559,7 @@ def _require_business_date(value: date) -> None:
 
 def _validate_seasonal_parameters(
     *, business_date: date, event_name: str, additional_transaction_count: int,
-    expected_relative_change: float,
+    publish_calendar: bool, calendar_scope_baseline: float | None,
 ) -> None:
     _require_business_date(business_date)
     if not isinstance(event_name, str) or not event_name.strip():
@@ -1539,13 +1570,13 @@ def _validate_seasonal_parameters(
         or additional_transaction_count <= 0
     ):
         raise ValueError("additional_transaction_count must be a positive integer")
-    if (
-        isinstance(expected_relative_change, bool)
-        or not isinstance(expected_relative_change, (int, float))
-        or not math.isfinite(expected_relative_change)
-        or expected_relative_change <= 0
+    if publish_calendar and (
+        isinstance(calendar_scope_baseline, bool)
+        or not isinstance(calendar_scope_baseline, (int, float))
+        or not math.isfinite(calendar_scope_baseline)
+        or calendar_scope_baseline <= 0
     ):
-        raise ValueError("expected_relative_change must be a finite positive number")
+        raise ValueError("calendar scope baseline must be a finite positive number")
 
 
 def inject_seasonal(
@@ -1558,7 +1589,7 @@ def inject_seasonal(
     business_date: date,
     event_name: str,
     additional_transaction_count: int,
-    expected_relative_change: float,
+    calendar_scope_baseline: float | None,
     seed: int | None = None,
     customer_ids: tuple[str, ...] | None = None,
     transaction_random_keys: MutableMapping[str, str] | None = None,
@@ -1566,14 +1597,19 @@ def inject_seasonal(
     rule_covered: bool = True,
     parent_scenario: str | None = None,
 ) -> IncidentSummary:
-    """Insert valid one-day business traffic and publish its expected metric."""
+    """Insert valid one-day business traffic and publish its injected change as the expectation.
+
+    The calendar's ``relative_change`` is the inserted rows over ``calendar_scope_baseline``
+    (the channel's reference median), so it equals the injected effect by construction.
+    """
     _require_episode(operational, private, episode_id)
     _check_truth_id(incident_truth_id)
     _validate_seasonal_parameters(
         business_date=business_date,
         event_name=event_name,
         additional_transaction_count=additional_transaction_count,
-        expected_relative_change=expected_relative_change,
+        publish_calendar=publish_calendar,
+        calendar_scope_baseline=calendar_scope_baseline,
     )
     if not isinstance(publish_calendar, bool) or not isinstance(rule_covered, bool):
         raise ValueError("publish_calendar and rule_covered must be booleans")
@@ -1763,7 +1799,13 @@ def inject_seasonal(
                     "expected_effect_json": {
                         "txn_count": {
                             "aggregation": "sum",
-                            "relative_change": float(expected_relative_change),
+                            "relative_change": float(
+                                calendar_relative_change(
+                                    inserted_rows,
+                                    channel=channels[0],
+                                    scope_baseline=calendar_scope_baseline,
+                                )
+                            ),
                         }
                     },
                     "scope_json": {"channel": channels},

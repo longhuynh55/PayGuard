@@ -19,7 +19,11 @@ from simulator.config import (
     validate_episode_duration_match,
     validate_simulator_config,
 )
-from simulator.episodes import derive_episode_seed
+from simulator.episodes import (
+    derive_episode_seed,
+    fraud_surge_injection_count,
+    seasonal_injection_count,
+)
 from simulator.labels import LABEL_POLICY_VERSION, snapshot_labels
 from simulator.randomness import keyed_rng
 from simulator.reports import REPORT_PROFILES
@@ -38,6 +42,11 @@ from simulator.schema import (
     T0_UTC_TEXT,
 )
 from simulator.storage import StorageError, utc_timestamp
+from simulator.volume import (
+    ReferenceWindow,
+    calendar_relative_change,
+    reference_volume_baselines,
+)
 from triage.decisions import normalize_decision_real_columns
 
 
@@ -470,6 +479,13 @@ def _validate_incident_truth(
     """Check private truth contracts against the operational effects they describe."""
     simulator_config = validate_simulator_config(metadata["resolved_config"]["simulator"])
     episode_config = validate_episode_config(metadata["resolved_config"]["episodes"])
+    volume = reference_volume_baselines(
+        operational,
+        simulator_config,
+        ReferenceWindow.from_json(metadata["resolved_config"]["volume_reference"]),
+    )
+    seasonal_count = seasonal_injection_count(simulator_config, episode_config, volume)
+    fraud_count = fraud_surge_injection_count(simulator_config, episode_config, volume)
     timezone = ZoneInfo(simulator_config.timeline.business_timezone.value)
     episode_start = datetime.combine(
         simulator_config.timeline.t0_business_date.value,
@@ -644,16 +660,20 @@ def _validate_incident_truth(
                 "affected_transaction_ids"
             ]
             calendar_placeholders = ", ".join("?" for _ in calendar_ids)
-            transaction_dates = {
-                datetime.fromisoformat(row[0].replace("Z", "+00:00"))
-                .astimezone(timezone)
-                .date()
-                .isoformat()
+            calendar_truth_rows = [
+                dict(row)
                 for row in operational.execute(
-                    "SELECT event_at FROM transactions "
+                    "SELECT txn_id, event_at, channel FROM transactions "
                     f"WHERE txn_id IN ({calendar_placeholders})",
                     tuple(calendar_ids),
                 )
+            ]
+            transaction_dates = {
+                datetime.fromisoformat(row["event_at"].replace("Z", "+00:00"))
+                .astimezone(timezone)
+                .date()
+                .isoformat()
+                for row in calendar_truth_rows
             }
             try:
                 calendar_effect = json.loads(calendar_row["expected_effect_json"])
@@ -662,8 +682,15 @@ def _validate_incident_truth(
                 calendar_aggregation = calendar_effect["txn_count"]["aggregation"]
             except (KeyError, TypeError, json.JSONDecodeError) as exc:
                 _fail(f"calendar row for {episode_id} is malformed: {exc}")
-            expected_change = episode_config.templates.seasonal.expected_relative_change.value
-            expected_scope = {"channel": [simulator_config.transactions.channel.value]}
+            event_channel = simulator_config.transactions.channel.value
+            # The published expectation must equal the injected in-scope change over the
+            # channel's reference median, recomputed here from the truth's effect rows.
+            expected_change = calendar_relative_change(
+                calendar_truth_rows,
+                channel=event_channel,
+                scope_baseline=volume.channel(event_channel),
+            )
+            expected_scope = {"channel": [event_channel]}
             if (
                 len(transaction_dates) != 1
                 or calendar_row["business_date"] not in transaction_dates
@@ -677,8 +704,8 @@ def _validate_incident_truth(
                 or calendar_scope != expected_scope
             ):
                 _fail(
-                    f"{template} calendar for {episode_id} must match the seasonal config "
-                    "without adding a seasonal truth component"
+                    f"{template} calendar for {episode_id} must publish the injected in-scope "
+                    "change over the scoped reference median, without a seasonal truth component"
                 )
 
         if template == "two_cause_fraud_seasonal":
@@ -699,6 +726,17 @@ def _validate_incident_truth(
                     f"incident effect reference episode does not match incident truth for {episode_id}"
                 )
             affected_ids = effect_manifest["affected_transaction_ids"]
+            # Count-scaled templates inject exactly the amplitude-derived count (SIM-SCALE).
+            if truth["cause"] == "seasonal" and len(affected_ids) != seasonal_count:
+                _fail(
+                    f"seasonal truth {truth['incident_truth_id']} injected {len(affected_ids)} "
+                    f"transactions, expected {seasonal_count} from the reference median"
+                )
+            if truth["cause"] == "fraud_surge" and len(affected_ids) != fraud_count:
+                _fail(
+                    f"fraud_surge truth {truth['incident_truth_id']} injected {len(affected_ids)} "
+                    f"transactions, expected {fraud_count} from the reference median"
+                )
             pre_injection_amounts = effect_manifest.get(
                 "pre_injection_amount_by_txn_id"
             )

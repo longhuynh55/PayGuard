@@ -669,12 +669,19 @@ class DataPipelineTemplateConfig(StrictModel):
 class SeasonalTemplateConfig(StrictModel):
     date_offset_days: ConfigValue[PositiveInt]
     event_name: ConfigValue[str]
+    # Smoke floor; the injected count is max(floor, round(relative_amplitude * scoped baseline)).
     additional_transaction_count: ConfigValue[PositiveInt]
-    expected_relative_change: ConfigValue[PositiveFloat]
+    relative_amplitude: ConfigValue[PositiveFloat]
 
 
 class DateOffsetTemplateConfig(StrictModel):
     date_offset_days: ConfigValue[PositiveInt]
+
+
+class FraudSurgeTemplateConfig(StrictModel):
+    date_offset_days: ConfigValue[PositiveInt]
+    # Injected count is max(card-testing burst size, round(relative_amplitude * total baseline)).
+    relative_amplitude: ConfigValue[PositiveFloat]
 
 
 class SparseMerchantTemplateConfig(StrictModel):
@@ -742,7 +749,7 @@ class LegitimateNewAccountControlsConfig(StrictModel):
 class EpisodeTemplateConfig(StrictModel):
     data_pipeline: DataPipelineTemplateConfig
     seasonal: SeasonalTemplateConfig
-    fraud_surge: DateOffsetTemplateConfig
+    fraud_surge: FraudSurgeTemplateConfig
     fraud_calendar: DateOffsetTemplateConfig
     new_merchant_sparse_history: SparseMerchantTemplateConfig
     silent_concept_drift: SilentConceptDriftTemplateConfig

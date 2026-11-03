@@ -27,9 +27,10 @@ from simulator.reproducibility import (
 )
 from simulator.storage import create_export_stores, insert_private_record, utc_timestamp
 from simulator.validate import RUN_METADATA_KEY, validate_run
+from simulator.volume import MONITORING_CONFIG_PATH, load_reference_window
 
 
-CODE_VERSION = "p1.8-smoke-pilot-round2-v1"
+CODE_VERSION = "p1.8-smoke-pilot-round2-sim-scale-v1"
 SCHEMA_VERSION = 1
 
 
@@ -72,10 +73,12 @@ def _generate(args: argparse.Namespace) -> int:
         args.model_config,
         args.model_doc,
     )
+    volume_window = load_reference_window(args.monitoring_config)
     resolved_config = {
         "simulator": simulator_config.model_dump(mode="json"),
         "episodes": episode_config.model_dump(mode="json"),
         "model_support": support_config,
+        "volume_reference": volume_window.as_json(),
     }
     config_fingerprint = canonical_sha256(resolved_config)
     started_at = datetime.now(UTC)
@@ -87,6 +90,7 @@ def _generate(args: argparse.Namespace) -> int:
             simulator_config,
             episode_config,
             profile=args.profile,
+            volume_window=volume_window,
         )
         record_canonical_fingerprint(stores.operational, stores.private)
         fingerprint = canonical_run_fingerprint(stores.operational)
@@ -190,6 +194,11 @@ def _parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--episodes-config", default="configs/episodes.yaml")
     generate_parser.add_argument("--model-config", default="configs/model.yaml")
     generate_parser.add_argument("--model-doc", default="docs/model.md")
+    generate_parser.add_argument(
+        "--monitoring-config",
+        default=MONITORING_CONFIG_PATH,
+        help="monitoring config whose reference window sets the count-scaled baselines",
+    )
     generate_parser.set_defaults(handler=_generate)
 
     validate_parser = subparsers.add_parser("validate", help="validate a generated run")

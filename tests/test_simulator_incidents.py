@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -11,6 +11,7 @@ import pytest
 from evaluation.matcher import match_incidents
 from simulator.config import load_episode_config, load_simulator_config
 from simulator.incidents import (
+    card_testing_burst_size,
     inject_data_pipeline,
     inject_fraud_surge_on_calendar_date,
     inject_sparse_new_merchant,
@@ -20,6 +21,7 @@ from simulator.incidents import (
     inject_two_cause_fraud_seasonal,
 )
 from simulator.labels import generate_label_events, label_truth_metadata_key
+from simulator.volume import load_reference_window
 from simulator.storage import (
     create_export_stores,
     insert_operational_record,
@@ -113,6 +115,30 @@ def _add_transaction(
             "channel": channel,
         },
     )
+
+
+def _seed_reference_base_volume(pair) -> None:
+    """Base history over the monitoring reference: one qr, two wallet, one card per day.
+
+    Its medians are qr 1, wallet 2, card 1, and total 4, so count-scaled templates stay at
+    their smoke floors (docs/data.md section 4).
+    """
+    local = ZoneInfo("Asia/Ho_Chi_Minh")
+    day = date(2025, 11, 1)
+    index = 0
+    while day < date(2026, 2, 1):
+        moment = datetime.combine(day, time(12, 0), tzinfo=local).astimezone(UTC)
+        for channel, count in (("qr", 1), ("wallet", 2), ("card", 1)):
+            for _ in range(count):
+                index += 1
+                _add_transaction(
+                    pair,
+                    txn_id=f"txn-reference-{index:05d}",
+                    episode_id="base",
+                    event_at=utc_timestamp(moment),
+                    channel=channel,
+                )
+        day += timedelta(days=1)
 
 
 def _truth_row(pair, incident_truth_id: str) -> dict:
@@ -317,7 +343,8 @@ def test_seasonal_is_one_day_and_calendar_publishes_expectation_without_truth(
             "business_date": date(2026, 2, 6),
             "event_name": "salary-day",
             "additional_transaction_count": 2,
-            "expected_relative_change": 0.5,
+            # 2 injected qr rows over a 4-transaction qr reference median = 0.5 expected.
+            "calendar_scope_baseline": 4.0,
             "seed": 731,
         }
         result = inject_seasonal(
@@ -462,7 +489,6 @@ def test_unlisted_seasonal_uses_same_seed_effect_without_calendar_or_rule_covera
             "business_date": date(2026, 2, 6),
             "event_name": "unlisted-market-trend",
             "additional_transaction_count": 2,
-            "expected_relative_change": 0.5,
             "seed": 731,
         }
         result = inject_seasonal_unlisted(
@@ -521,6 +547,8 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
     treated = _make_episode_store(tmp_path / "two-cause-treated", "ep-0003")
     repeat = _make_episode_store(tmp_path / "two-cause-repeat", "ep-0003")
     try:
+        for pair in (control, treated, repeat):
+            _seed_reference_base_volume(pair)
         _seed_empty_card_testing_truth(treated, "ep-0003")
         _seed_empty_card_testing_truth(repeat, "ep-0003")
         transaction_random_keys: dict[str, str] = {}
@@ -538,9 +566,9 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
             "seasonal_additional_transaction_count": (
                 seasonal_config.additional_transaction_count.value
             ),
-            "seasonal_expected_relative_change": (
-                seasonal_config.expected_relative_change.value
-            ),
+            # Smoke qr reference median is 1.0 (docs/data.md section 4 count rule).
+            "seasonal_calendar_scope_baseline": 1.0,
+            "fraud_injected_transaction_count": card_testing_burst_size(config),
             "seed": 731,
             "transaction_random_keys": transaction_random_keys,
         }
@@ -650,6 +678,9 @@ def test_two_cause_fraud_seasonal_shares_parent_and_matcher_returns_both_truths(
             "resolved_config": {
                 "simulator": config.model_dump(mode="json"),
                 "episodes": episode_config.model_dump(mode="json"),
+                "volume_reference": load_reference_window(
+                    ROOT / "configs" / "monitoring.yaml"
+                ).as_json(),
             }
         }
         assert _validate_incident_truth(
@@ -726,7 +757,7 @@ def test_single_fraud_surge_can_land_on_a_public_calendar_date(
             "business_date": date(2026, 2, 8),
             "event_name": seasonal_template.event_name.value,
             "channel": config.transactions.channel.value,
-            "expected_relative_change": seasonal_template.expected_relative_change.value,
+            "calendar_scope_baseline": 1.0,
             "seed": 902,
         }
         result = inject_fraud_surge_on_calendar_date(
@@ -746,7 +777,7 @@ def test_single_fraud_surge_can_land_on_a_public_calendar_date(
             business_date=call_args["business_date"],
             event_name=seasonal_template.event_name.value,
             additional_transaction_count=seasonal_template.additional_transaction_count.value,
-            expected_relative_change=seasonal_template.expected_relative_change.value,
+            calendar_scope_baseline=call_args["calendar_scope_baseline"],
             seed=903,
         )
         truth_rows = treated.private.execute(
@@ -763,11 +794,18 @@ def test_single_fraud_surge_can_land_on_a_public_calendar_date(
             "FROM business_calendar WHERE episode_id = 'ep-incidents'"
         ).fetchone()
         assert calendar[0] == result.calendar_event_id
-        assert tuple(calendar[1:]) == tuple(seasonal_calendar)
+        # Same date, name, lag, and scope as the seasonal row; the expectation differs by design.
+        assert tuple(calendar[1:4]) == tuple(seasonal_calendar[:3])
+        assert calendar[5] == seasonal_calendar[4]
+        # The surge rows are card traffic, so nothing lands in the qr scope: a neutral row.
         assert json.loads(calendar[4]) == {
+            "txn_count": {"aggregation": "sum", "relative_change": 0.0}
+        }
+        assert json.loads(seasonal_calendar[3]) == {
             "txn_count": {
                 "aggregation": "sum",
-                "relative_change": seasonal_template.expected_relative_change.value,
+                "relative_change": seasonal_template.additional_transaction_count.value
+                / call_args["calendar_scope_baseline"],
             }
         }
         assert json.loads(calendar[5]) == {

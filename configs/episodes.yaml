@@ -57,18 +57,18 @@ templates:
         reference: P1.7 smoke calendar description.
     additional_transaction_count:
       value: 20
-      unit: valid transactions
-      rationale: Add observable one-day traffic at smoke scale.
+      unit: valid transactions (smoke floor)
+      rationale: Smoke floor for the one-day seasonal traffic. The injected count is max(this floor, round(relative_amplitude x scoped reference median daily count)); at smoke scale the floor decides.
       provenance:
         kind: assumption
-        reference: P1.7 smoke seasonal template; not a prevalence estimate.
-    expected_relative_change:
-      value: 5.0
-      unit: relative change
-      rationale: Declare an assumed large one-day count increase for the smoke fixture.
+        reference: P1.7 smoke seasonal template floor, kept unchanged by SIM-SCALE; not a prevalence estimate.
+    relative_amplitude:
+      value: 1.0
+      unit: fraction of the scoped reference median daily count (channel of transactions.channel)
+      rationale: Add one-day traffic equal to one median day of the event channel. The published business_calendar expectation is the injected change on that channel, never this constant.
       provenance:
         kind: assumption
-        reference: P1.7 smoke seasonal template; not estimated from episode truth.
+        reference: SIM-SCALE initial assumption approved 03/11/2026; not estimated from episode truth or monitoring output.
   fraud_surge:
     date_offset_days:
       value: 4
@@ -77,14 +77,21 @@ templates:
       provenance:
         kind: assumption
         reference: P1.7 round-two template schedule.
+    relative_amplitude:
+      value: 0.5
+      unit: fraction of the total reference median daily count
+      rationale: Card-testing burst size relative to a median day of all channels. The floor is the card-testing burst size (attempts per card plus follow-up); the burst window keeps its configured duration.
+      provenance:
+        kind: assumption
+        reference: SIM-SCALE initial assumption approved 03/11/2026; not estimated from episode truth or monitoring output.
   fraud_calendar:
     date_offset_days:
       value: 4
       unit: local calendar days after T0
-      rationale: Align the fraud-only calendar context with the seasonal template date.
+      rationale: Align the fraud-only calendar context with the seasonal template date. The calendar name and channel come from seasonal; the surge amplitude comes from fraud_surge; the published expectation is the injected change on the calendar channel, which is neutral because the surge adds no seasonal traffic.
       provenance:
         kind: assumption
-        reference: P1.7 round-two template schedule; calendar parameters come from seasonal.
+        reference: P1.7 round-two template schedule; SIM-SCALE 03/11/2026 amplitude and expectation rule.
   new_merchant_sparse_history:
     date_offset_days:
       value: 12
