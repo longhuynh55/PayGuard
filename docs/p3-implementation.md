@@ -112,6 +112,37 @@ tests/        test_monitoring_metrics.py, test_monitoring_incidents.py, test_eva
 - **Việc:** ngưỡng `volume_relative_change_threshold` và `psi_threshold` theo **profile** (smoke giữ 4,25/0,25; pilot hiệu chỉnh trên 4 episode clean development của pilot sau SIM-SCALE), khóa trước calibration/test; ghi giá trị, thống kê và provenance trong `configs/monitoring.yaml` và monitoring.md. Không đổi số bin, cửa sổ, `minimum_sample_count`.
 - **Nghiệm thu:** bảng development (chỉ development): phát hiện theo truth, alert trên clean = 0 theo cấu trúc (ghi rõ in-sample), alert benign; chạy lại harness pilot + P5.0b.
 - **Quyết định đi kèm (03/11):** velocity/cửa sổ dưới ngày cho `fraud_surge` và feature phía người nhận cho `new_fraud` để P3 vòng 2, ghi kết quả âm tính (mục 3 monitoring.md cho phép). Luật gộp incident §2 giữ (22 incident con ở `ep-0009` đúng hợp đồng; báo như workload). Matcher ghép theo feature + thời gian, không theo nguyên nhân: nêu rõ trong báo cáo recall.
+- **Bàn giao MON-RECAL (vòng 1, 04/11/2026):** nhánh `slice/mon-recal` sau SIM-SCALE. Pilot sinh từ worktree tại `/var/tmp/payguard-mr/pilot` (fingerprint `24e6c2f7…`, validation 22/22). Dữ liệu, script và báo cáo JSON nằm ngoài repo; không có gì private trong repo.
+  - **Cơ chế profile:** `signals.profiles.smoke` giữ nguyên 0,25 và 4,25 (giá trị và text); `signals.profiles.pilot` có ngưỡng riêng. `compute_alerts(..., profile=...)` và `python -m monitoring signals --profile {smoke,pilot}` bắt buộc; harness truyền profile của manifest vào `_prepare_model_monitoring`. Profile thiếu ngưỡng, ngưỡng khai báo ở cấp trên, hoặc profile lạ đều bị từ chối, không mượn profile khác. `configs/monitoring.yaml` nằm trong `CONFIG_FILES` của định danh run, nên ngưỡng pilot nằm trong hash định danh (đối chiếu bằng đọc mã, không có test riêng).
+  - **Backlog (không chặn):** CLI `python -m monitoring signals` không đối chiếu `--profile` với run; người gọi phải truyền đúng profile của run.
+  - **Hiệu chỉnh (4 episode clean development `ep-0001`–`ep-0004`):** chọn từ manifest khóa (`configs/episodes.yaml`, `profiles.pilot.assignments`, role = development và template = clean), đối chiếu `episodes.role` trong DB, rồi mới đọc dòng metric; không đọc calibration/test. Kết quả: volume cực đại chính xác 0,20114942528735624 (ep-0002, 13/02), n = 120 → **0,21**; PSI 2 bin cực đại chính xác 0,009764810255898246 (`psi.amount_avg_7d`, ep-0002, 26/02), n = 192 (96 mỗi feature; loại 48 snapshot chưa đủ cửa sổ) → **0,01**; `psi.txn_count_24h` cực đại 0,0042357447696240065. Quy tắc: giá trị nhỏ nhất trên lưới 0,01 không nhỏ hơn cực đại; áp đúng quy tắc này lên cực đại smoke cho 4,25. Cách đọc "lớn hơn nghiêm ngặt" cho cùng hai số. Alert clean trong mẫu: 0 (in-sample theo cấu trúc, không phải kết quả ngoài mẫu). Calibration JSON: `/var/tmp/payguard-mr/calibration/pilot_calibration.json`.
+  - **Smoke giữ nguyên (so với `main` 9aac9f0):** fingerprint `75df93e5…`; `reports/smoke.json` SHA `3d1703e1…`; `private/reports/smoke_truth.json` SHA `113f15e9…`; CLI `metrics`, `signals` (CSV và JSON báo cáo), `incidents` giống hệt từng byte; harness smoke `rule_human` và `rule_agent_fake`: `base_fingerprint` `d1c623…` giống nhau, 0 decisions cả hai (development của smoke là `ep-0001`, clean, không có incident). `run_fingerprint` đổi vì định danh có hash `configs/monitoring.yaml`; đây là hành vi định danh đã thiết kế.
+  - **Bảng hiệu ứng development** (12 episode development, ngưỡng pilot đã khóa, không tune thêm; chỉ đọc development):
+
+| Episode | Khuôn (manifest) | Alert (PSI amount / volume / PSI txn) | Incident (khớp / mơ hồ / không khớp) | Truth khớp | Alert trên clean | Alert trên truth benign |
+|---|---|---|---|---|---|---|
+| ep-0001 | clean | 0 (0 / 0 / 0) | 0 / 0 / 0 | — | 0 | — |
+| ep-0002 | clean | 0 (0 / 0 / 0) | 0 / 0 / 0 | — | 0 | — |
+| ep-0003 | clean | 0 (0 / 0 / 0) | 0 / 0 / 0 | — | 0 | — |
+| ep-0004 | clean | 0 (0 / 0 / 0) | 0 / 0 / 0 | — | 0 | — |
+| ep-0005 | two_cause_fraud_seasonal | 5 (4 / 1 / 0) | 2 / 0 / 0 | fraud_surge; seasonal (benign, cùng incident với fraud) | — | 1 (volume 05/02) |
+| ep-0006 | two_cause_fraud_seasonal | 8 (7 / 1 / 0) | 2 / 0 / 0 | fraud_surge; seasonal (benign, cùng incident với fraud) | — | 1 (volume 05/02) |
+| ep-0007 | fraud_calendar | 4 (3 / 1 / 0) | 2 / 0 / 0 | fraud_surge (fraud_calendar) | — | 0 |
+| ep-0008 | seasonal (benign) | 0 (0 / 0 / 0) | 0 / 0 / 0 | — (truth benign không có alert) | — | 0 |
+| ep-0009 | data_pipeline | 24 (24 / 0 / 0) | 1 / 0 / 0 | data_pipeline | — | 0 |
+| ep-0010 | fraud_surge | 3 (2 / 1 / 0) | 2 / 0 / 0 | fraud_surge | — | 0 |
+| ep-0011 | new_fraud | 1 (1 / 0 / 0) | 0 / 0 / 1 | — (new_fraud không khớp) | — | 0 |
+| ep-0012 | legit_business_spike (benign) | 0 (0 / 0 / 0) | 0 / 0 / 0 | — | — | 0 |
+
+  Tổng: **45 alert** (41 PSI `amount_avg_7d`, 4 volume, 0 `psi.txn_count_24h`); **10 incident**: 9 khớp, 0 mơ hồ, 1 không khớp; recall sự cố cần can thiệp **5/6 = 0,833** (bỏ sót `truth-ep-0011-new-fraud`); theo kịch bản: data_pipeline 1/1, fraud_surge (`fraud_surge`) 1/1, fraud_surge (`fraud_calendar`) 1/1, fraud_surge (`two_cause`) 2/2, new_fraud 0/1; incident chỉ khớp truth benign: **0**; alert trên clean: **0** (in-sample). Báo cáo evaluator: `/var/tmp/payguard-mr/effect/private/reports/p3_4_detection_recall.json`; bảng JSON: `/var/tmp/payguard-mr/effect/dev_effect_table.json`.
+  - **Ghi chú cho orchestrator (cần xác nhận):**
+    1. **Nguồn "manifest công khai có template":** repo không có manifest công khai chứa template; data.md ghi template là private, còn `episodes` chỉ có id và role. Tôi dùng `configs/episodes.yaml` (assignment khóa, cùng nguồn sinh `episode_manifest` private) để chọn episode, và đối chiếu role với DB. Cần xác nhận đây là nguồn đúng cho bước chọn.
+    2. **Biên PSI mỏng:** ngưỡng 0,01 chỉ cao hơn cực đại clean 2,4%. Đây là kết quả của quy tắc, không tune. PSI `psi.txn_count_24h` không vượt 0,01 ở episode development nào; mọi PSI alert đến từ `amount_avg_7d`.
+    3. **Alert volume 05/02 của ep-0005 và ep-0006:** hai alert nằm trong incident khớp đồng thời truth fraud và truth seasonal (benign) cùng `parent_scenario` `two_cause_fraud_seasonal`. Theo matcher, đó không phải incident chỉ-benign (`benign_matched` = 0), nhưng vẫn chạm cửa sổ truth benign; báo riêng để quyết định. Seasonal đơn lẻ (ep-0008) không có alert: lịch công khai khớp hiệu ứng sau SIM-SCALE.
+    4. **new_fraud (ep-0011):** 1 PSI `amount_avg_7d` ngày 08/02 không ghép truth. Đây là kết quả âm tính đã ghi trong plan (feature phía người nhận → monitoring vòng 2).
+    5. **ep-0009:** 24 alert gộp thành 1 incident vì chưa có quyết định. Không so trực tiếp với 22 incident của MON-TUNE-A (có quyết định `rule_human`).
+    6. **Chưa chạy harness pilot và P5.0b** (nằm trong "Nghiệm thu" ở trên nhưng không thuộc task được giao): harness pilot sinh lại base trong ~33 phút và chấm vận hành trên mọi episode, gồm calibration và test. Chạy khi orchestrator yêu cầu.
+  - **Kiểm tra đã chạy:** test đích (13 test `tests/test_monitoring_signals.py` và 6 test chạm đường gọi đã đổi, tất cả xanh); `simulator generate --profile smoke` và `validate` (21/21); `review/check_links.py`; `review/verify_plan_claims.py`; full suite một lần trên cây cuối: **476 passed, 1 xfailed**, exit 0 (xfail là test strict-xfail seasonal `test_monitoring_metrics.py` đã có sẵn, không đổi).
 
 ## Nghiệm thu P3
 - [x] Metric/alert/incident đúng as-of và tái lập được.

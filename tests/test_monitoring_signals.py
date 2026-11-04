@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import copy
 import json
+from pathlib import Path
+import re
+import subprocess
+import sys
 
 import pytest
+import yaml
 
 from monitoring.metrics import DAILY_METRIC_COLUMNS
 from monitoring.signals import MonitoringSignalsError, compute_alerts
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _metric_row(
@@ -49,7 +57,7 @@ def test_psi_threshold_is_strictly_greater_than_point_25() -> None:
     ]
     result = compute_alerts(
         rows,
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time="2026-02-11T16:59:59.999999Z",
     )
 
@@ -72,7 +80,7 @@ def test_censored_and_small_sample_metrics_are_suppressed_with_reasons() -> None
     ]
     result = compute_alerts(
         rows,
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time="2026-02-11T16:59:59.999999Z",
     )
 
@@ -89,7 +97,7 @@ def test_rows_after_requested_snapshot_are_ignored() -> None:
     ]
     result = compute_alerts(
         rows,
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time="2026-02-10T16:59:59.999999Z",
     )
 
@@ -110,7 +118,7 @@ def test_review_rate_without_reference_is_reported_but_never_signaled() -> None:
     )
     result = compute_alerts(
         [row],
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time="2026-02-10T16:59:59.999999Z",
     )
 
@@ -121,8 +129,8 @@ def test_review_rate_without_reference_is_reported_but_never_signaled() -> None:
 
 def test_same_input_reproduces_alert_rows_and_neutral_ids() -> None:
     rows = [_metric_row()]
-    first = compute_alerts(rows, episode_id="ep-a", as_of_time=rows[0]["as_of_time"])
-    second = compute_alerts(rows, episode_id="ep-a", as_of_time=rows[0]["as_of_time"])
+    first = compute_alerts(rows, episode_id="ep-a", profile="smoke", as_of_time=rows[0]["as_of_time"])
+    second = compute_alerts(rows, episode_id="ep-a", profile="smoke", as_of_time=rows[0]["as_of_time"])
 
     assert first == second
     assert first.alerts[0]["alert_id"].startswith("alert-")
@@ -134,7 +142,7 @@ def test_metric_that_becomes_available_after_its_snapshot_is_refused_not_alerted
     """A3: a daily metric is readable only at its own snapshot; a late row raises, never alerts."""
     on_time = _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.9)
     result = compute_alerts(
-        [on_time], episode_id="ep-a", as_of_time="2026-02-10T16:59:59.999999Z"
+        [on_time], episode_id="ep-a", profile="smoke", as_of_time="2026-02-10T16:59:59.999999Z"
     )
     assert len(result.alerts) == 1
     alert = result.alerts[0]
@@ -144,14 +152,14 @@ def test_metric_that_becomes_available_after_its_snapshot_is_refused_not_alerted
     late["available_at"] = "2026-02-11T16:59:59.999999Z"
     for cutoff in ("2026-02-10T16:59:59.999999Z", "2026-02-11T17:00:00.000000Z"):
         with pytest.raises(MonitoringSignalsError, match="available_at"):
-            compute_alerts([late], episode_id="ep-a", as_of_time=cutoff)
+            compute_alerts([late], episode_id="ep-a", profile="smoke", as_of_time=cutoff)
 
 
 def test_mixed_episode_rows_are_rejected() -> None:
     with pytest.raises(MonitoringSignalsError, match="expected 'ep-a'"):
         compute_alerts(
             [_metric_row(episode_id="ep-b")],
-            episode_id="ep-a",
+            episode_id="ep-a", profile="smoke",
             as_of_time="2026-02-10T16:59:59.999999Z",
         )
 
@@ -175,7 +183,7 @@ def test_volume_alert_uses_one_threshold_for_departure_from_calendar_expectation
 
     result = compute_alerts(
         [row],
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time=row["as_of_time"],
     )
 
@@ -215,7 +223,7 @@ def test_unannounced_daily_volume_uses_its_clean_development_threshold() -> None
 
     result = compute_alerts(
         rows,
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time="2026-02-11T16:59:59.999999Z",
     )
 
@@ -234,9 +242,125 @@ def test_volume_alert_suppresses_missing_calendar_expectation() -> None:
 
     result = compute_alerts(
         [row],
-        episode_id="ep-a",
+        episode_id="ep-a", profile="smoke",
         as_of_time=row["as_of_time"],
     )
 
     assert result.alerts == ()
     assert result.report["suppressed"][0]["reasons"] == ["reference_not_available"]
+
+
+def _declared_thresholds(profile: str) -> tuple[float, float]:
+    raw = yaml.safe_load((ROOT / "configs" / "monitoring.yaml").read_text(encoding="utf-8"))
+    block = raw["signals"]["profiles"][profile]
+    return (
+        float(block["psi_threshold"]["value"]),
+        float(block["volume_relative_change_threshold"]["value"]),
+    )
+
+
+def test_pilot_profile_applies_its_own_thresholds_with_strict_comparison() -> None:
+    # Pinned like the smoke thresholds: the declared pilot values and the alerts they produce.
+    assert _declared_thresholds("pilot") == (0.01, 0.21)
+    volume_reference = json.dumps(
+        {
+            "baseline_window": "2025-11-01/2026-01-31",
+            "business_calendar_expected_relative_change": 0.0,
+            "method": "reference_median_1d_count",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    rows = [
+        _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.01),
+        _metric_row(as_of_time="2026-02-11T16:59:59.999999Z", value=0.010001),
+        _metric_row(
+            metric_id="volume.txn_count",
+            feature="txn_count",
+            as_of_time="2026-02-10T16:59:59.999999Z",
+            value=0.21,
+            reference_window=volume_reference,
+        ),
+        _metric_row(
+            metric_id="volume.txn_count",
+            feature="txn_count",
+            as_of_time="2026-02-11T16:59:59.999999Z",
+            value=0.210001,
+            reference_window=volume_reference,
+        ),
+    ]
+
+    result = compute_alerts(
+        rows,
+        episode_id="ep-a",
+        as_of_time="2026-02-11T16:59:59.999999Z",
+        profile="pilot",
+    )
+
+    assert sorted((alert["metric"], alert["threshold"]) for alert in result.alerts) == [
+        ("psi.amount_avg_7d", 0.01),
+        ("volume.txn_count", 0.21),
+    ]
+    assert all(alert["as_of_time"] == "2026-02-11T16:59:59.999999Z" for alert in result.alerts)
+
+
+def test_missing_partial_or_unknown_profile_thresholds_are_refused_not_borrowed(
+    tmp_path: Path,
+) -> None:
+    raw = yaml.safe_load((ROOT / "configs" / "monitoring.yaml").read_text(encoding="utf-8"))
+    no_pilot = copy.deepcopy(raw)
+    del no_pilot["signals"]["profiles"]["pilot"]
+    partial_pilot = copy.deepcopy(raw)
+    del partial_pilot["signals"]["profiles"]["pilot"]["volume_relative_change_threshold"]
+    top_level = copy.deepcopy(raw)
+    top_level["signals"]["psi_threshold"] = raw["signals"]["profiles"]["smoke"]["psi_threshold"]
+    cases = {
+        "no_pilot": (no_pilot, "signals.profiles.pilot must declare its thresholds"),
+        "partial_pilot": (
+            partial_pilot,
+            "signals.profiles.pilot.volume_relative_change_threshold must be an object",
+        ),
+        "top_level": (top_level, "must be declared under signals.profiles"),
+    }
+    for name, (document, message) in cases.items():
+        path = tmp_path / f"{name}.yaml"
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        with pytest.raises(MonitoringSignalsError, match=re.escape(message)):
+            compute_alerts(
+                [_metric_row()],
+                episode_id="ep-a",
+                as_of_time="2026-02-10T16:59:59.999999Z",
+                profile="pilot",
+                monitoring_config_path=path,
+            )
+    with pytest.raises(MonitoringSignalsError, match="signal profile must be one of"):
+        compute_alerts(
+            [_metric_row()],
+            episode_id="ep-a",
+            as_of_time="2026-02-10T16:59:59.999999Z",
+            profile="prod",
+        )
+
+
+def test_signals_cli_requires_an_explicit_profile() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "monitoring",
+            "signals",
+            "--operational-db",
+            "unused.sqlite",
+            "--episode-id",
+            "ep-0001",
+            "--as-of-time",
+            "2026-02-10T16:59:59.999999Z",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "--profile" in completed.stderr

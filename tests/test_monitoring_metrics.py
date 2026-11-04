@@ -388,6 +388,7 @@ def test_daily_metric_does_not_change_for_rows_available_after_as_of(
         before,
         episode_id="ep-a",
         as_of_time=cutoff,
+        profile="smoke",
     )
     selected_before = [
         row for row in before if row["episode_id"] == "ep-a" and row["business_date"] == "2026-02-10"
@@ -428,6 +429,7 @@ def test_daily_metric_does_not_change_for_rows_available_after_as_of(
         after,
         episode_id="ep-a",
         as_of_time=cutoff,
+        profile="smoke",
     )
     selected_after = [
         row for row in after if row["episode_id"] == "ep-a" and row["business_date"] == "2026-02-10"
@@ -615,6 +617,7 @@ def p37_smoke_match_context(
             episode_rows,
             episode_id=episode.episode_id,
             as_of_time=as_of_time,
+            profile="smoke",
         )
     alert_counts = {
         episode_id: len(result.alerts)
@@ -787,6 +790,8 @@ def p37_smoke_match_context(
             str(operational_path),
             "--episode-id",
             pipeline_episode.episode_id,
+            "--profile",
+            "smoke",
             "--as-of-time",
             as_of_time,
             "--output",

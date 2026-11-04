@@ -324,6 +324,7 @@ def test_smoke_p32_alert_counts_group_to_incidents_per_episode() -> None:
             metrics,
             episode_id=episode_id,
             as_of_time=cutoff,
+            profile="smoke",
         )
         alerts_by_episode[episode_id] = signals.alerts
         result = compute_incidents(signals.alerts, episode_id=episode_id)

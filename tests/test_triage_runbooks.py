@@ -820,6 +820,7 @@ def _smoke_runbook_context(tmp_path_factory):
                 episode_metrics,
                 episode_id=episode_id,
                 as_of_time=final_as_of,
+                profile="smoke",
             ).alerts
             persist_monitoring_rows(store.operational, "alerts", alerts)
             incidents = compute_incidents(alerts, episode_id=episode_id).incidents

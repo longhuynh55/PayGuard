@@ -93,17 +93,34 @@ model_review_rate:
   feature: decision_region
 
 signals:
-  psi_threshold:
-    value: 0.25
-    unit: PSI
-    rationale: Retain the round-one PSI operating point after correcting sparse-window binning; clean development stays below the existing smoke background-alert budget.
-    provenance:
-      kind: source
-      reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
-  volume_relative_change_threshold:
-    value: 4.25
-    unit: absolute relative change
-    rationale: Strictly exceed the maximum absolute one-day deviation from the public calendar expectation across the 30 clean development snapshots after the phase-independent median reference baseline.
-    provenance:
-      kind: source
-      reference: docs/monitoring.md, section 1; maximum absolute delivered one-day residual over clean development episode ep-0001 (30 dates) after reference_median_1d_count; 4.25.
+  profiles:
+    smoke:
+      psi_threshold:
+        value: 0.25
+        unit: PSI
+        rationale: Retain the round-one PSI operating point after correcting sparse-window binning; clean development stays below the existing smoke background-alert budget.
+        provenance:
+          kind: source
+          reference: docs/monitoring.md, section 1; P3.7 clean-development calibration.
+      volume_relative_change_threshold:
+        value: 4.25
+        unit: absolute relative change
+        rationale: Strictly exceed the maximum absolute one-day deviation from the public calendar expectation across the 30 clean development snapshots after the phase-independent median reference baseline.
+        provenance:
+          kind: source
+          reference: docs/monitoring.md, section 1; maximum absolute delivered one-day residual over clean development episode ep-0001 (30 dates) after reference_median_1d_count; 4.25.
+    pilot:
+      psi_threshold:
+        value: 0.01
+        unit: PSI
+        rationale: Smallest value on the 0.01 grid at or above the exact maximum 2-bin PSI over 192 complete-window clean development snapshots (96 per feature for psi.txn_count_24h and psi.amount_avg_7d, episodes ep-0001 to ep-0004), exact max 0.009764810255898246 (psi.amount_avg_7d, ep-0002, 2026-02-26); alerts use strict comparison, so no in-sample clean snapshot alerts.
+        provenance:
+          kind: source
+          reference: docs/monitoring.md, section 1; docs/p3-implementation.md, MON-RECAL handoff (pilot clean development calibration on ep-0001 to ep-0004).
+      volume_relative_change_threshold:
+        value: 0.21
+        unit: absolute relative change
+        rationale: Smallest value on the 0.01 grid at or above the exact maximum absolute one-day deviation from the public calendar expectation over 120 clean development snapshots (ep-0001 to ep-0004, 30 dates each) after the reference_median_1d_count baseline, exact max 0.20114942528735624 (ep-0002, 2026-02-13); alerts use strict comparison, so no in-sample clean snapshot alerts.
+        provenance:
+          kind: source
+          reference: docs/monitoring.md, section 1; docs/p3-implementation.md, MON-RECAL handoff (pilot clean development calibration on ep-0001 to ep-0004).

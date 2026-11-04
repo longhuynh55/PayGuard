@@ -478,6 +478,8 @@ def p3_monitoring_smoke_run(
         str(operational_db),
         "--episode-id",
         episode_id,
+        "--profile",
+        "smoke",
         "--as-of-time",
         as_of_time,
         "--output",
@@ -796,6 +798,7 @@ def test_triage_cli_smoke_routes_pipeline_and_is_repeatable(
                 episode_metrics,
                 episode_id=episode_id,
                 as_of_time=cutoff,
+                profile="smoke",
             )
             persist_monitoring_rows(connection, "alerts", alerts.alerts)
             from monitoring.incidents import compute_incidents
@@ -902,6 +905,7 @@ def test_fake_agent_smoke_routes_remaining_incidents_and_evaluates(
                 episode_metrics,
                 episode_id=episode_id,
                 as_of_time=cutoff,
+                profile="smoke",
             )
             persist_monitoring_rows(connection, "alerts", alerts.alerts)
 
