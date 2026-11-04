@@ -280,7 +280,7 @@ def _episode_roles(database_path: Path) -> dict[str, tuple[str, ...]]:
     return {role: tuple(episode_ids) for role, episode_ids in sorted(roles.items())}
 
 
-def _prepare_model_monitoring(base_dir: Path) -> dict[str, Any]:
+def _prepare_model_monitoring(base_dir: Path, profile: str) -> dict[str, Any]:
     operational_path = base_dir / "operational" / "observations.sqlite"
     artifact_root = base_dir.parent / "artifacts"
     artifact_dir = artifact_directory_for_run(MODEL_RUN_ID, data_root=artifact_root)
@@ -320,6 +320,7 @@ def _prepare_model_monitoring(base_dir: Path) -> dict[str, Any]:
                 rows,
                 episode_id=episode_id,
                 as_of_time=last_snapshot,
+                profile=profile,
                 monitoring_config_path=MONITORING_CONFIG,
             )
             alert_count += persist_monitoring_rows(
@@ -355,7 +356,7 @@ def _freeze_base(
     profile: str,
 ) -> tuple[str, dict[str, Any]]:
     operational_path = base_dir / "operational" / "observations.sqlite"
-    pipeline_result = _prepare_model_monitoring(base_dir)
+    pipeline_result = _prepare_model_monitoring(base_dir, profile)
     artifact_dir = artifact_directory_for_run(
         MODEL_RUN_ID,
         data_root=base_dir.parent / "artifacts",

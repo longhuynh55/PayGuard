@@ -35,6 +35,8 @@ ALERT_COLUMNS = (
 
 _CENSOR_FLAG = re.compile(r"^(window|reference)_censored_samples=(\d+)$")
 _REFERENCE_NOT_APPLICABLE = "not_applicable"
+# Profiles that declare their own signal thresholds in configs/monitoring.yaml.
+SIGNAL_PROFILES = ("smoke", "pilot")
 
 
 class MonitoringSignalsError(ValueError):
@@ -71,7 +73,40 @@ def _parse_as_of(value: Any, *, field: str) -> str:
     return utc_timestamp(parsed)
 
 
-def _load_signal_config(path: str | Path) -> _SignalConfig:
+def _check_profile(profile: Any) -> str:
+    if not isinstance(profile, str) or profile not in SIGNAL_PROFILES:
+        raise MonitoringSignalsError(
+            f"signal profile must be one of {', '.join(SIGNAL_PROFILES)}, got {profile!r}"
+        )
+    return profile
+
+
+def _read_threshold(block: Any, *, path: str, unit: str) -> tuple[float, str]:
+    """Return a locked threshold value and its source reference; both are required."""
+    if not isinstance(block, dict):
+        raise MonitoringSignalsError(f"monitoring {path} must be an object")
+    value = block.get("value")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MonitoringSignalsError(f"monitoring {path} value must be numeric")
+    if not math.isfinite(float(value)) or float(value) < 0:
+        raise MonitoringSignalsError(f"monitoring {path} value must be finite and non-negative")
+    if block.get("unit") != unit:
+        raise MonitoringSignalsError(f"monitoring {path} unit must be {unit!r}")
+    rationale = block.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise MonitoringSignalsError(f"monitoring {path} must state its rationale")
+    provenance = block.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("kind") != "source":
+        raise MonitoringSignalsError(f"monitoring {path} must declare source provenance")
+    reference = provenance.get("reference")
+    if not isinstance(reference, str) or not reference.strip():
+        raise MonitoringSignalsError(f"monitoring {path} must declare its provenance source")
+    return float(value), reference
+
+
+def _load_signal_config(path: str | Path, *, profile: str) -> _SignalConfig:
+    """Read the thresholds declared for one profile; no profile falls back to another."""
+    profile = _check_profile(profile)
     config_path = Path(path)
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -85,57 +120,30 @@ def _load_signal_config(path: str | Path) -> _SignalConfig:
     signals = raw.get("signals")
     if not isinstance(signals, dict):
         raise MonitoringSignalsError("monitoring config signals must be an object")
-    threshold_config = signals.get("psi_threshold")
-    if not isinstance(threshold_config, dict):
-        raise MonitoringSignalsError("monitoring signals.psi_threshold must be an object")
-    threshold = threshold_config.get("value")
-    provenance = threshold_config.get("provenance")
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-        raise MonitoringSignalsError("PSI signal threshold must be numeric")
-    if not math.isfinite(float(threshold)) or float(threshold) < 0:
-        raise MonitoringSignalsError("PSI signal threshold must be finite and non-negative")
-    if threshold_config.get("unit") != "PSI":
-        raise MonitoringSignalsError("PSI signal threshold unit must be PSI")
-    if not isinstance(threshold_config.get("rationale"), str) or not threshold_config[
-        "rationale"
-    ].strip():
-        raise MonitoringSignalsError("PSI signal threshold must state its rationale")
-    if not isinstance(provenance, dict) or provenance.get("kind") != "source":
-        raise MonitoringSignalsError("PSI signal threshold must declare source provenance")
-    provenance_reference = provenance.get("reference")
-    if not isinstance(provenance_reference, str) or not provenance_reference.strip():
-        raise MonitoringSignalsError("PSI signal threshold must declare its provenance source")
-
-    volume_threshold_config = signals.get("volume_relative_change_threshold")
-    if not isinstance(volume_threshold_config, dict):
+    if any(key in signals for key in ("psi_threshold", "volume_relative_change_threshold")):
         raise MonitoringSignalsError(
-            "monitoring signals.volume_relative_change_threshold must be an object"
+            "monitoring signals thresholds must be declared under signals.profiles; "
+            "top-level thresholds would apply to every profile"
         )
-    volume_threshold = volume_threshold_config.get("value")
-    volume_provenance = volume_threshold_config.get("provenance")
-    if isinstance(volume_threshold, bool) or not isinstance(volume_threshold, (int, float)):
-        raise MonitoringSignalsError("volume relative-change threshold must be numeric")
-    if not math.isfinite(float(volume_threshold)) or float(volume_threshold) < 0:
+    profiles = signals.get("profiles")
+    if not isinstance(profiles, dict):
+        raise MonitoringSignalsError("monitoring signals.profiles must be an object")
+    active = profiles.get(profile)
+    if not isinstance(active, dict):
         raise MonitoringSignalsError(
-            "volume relative-change threshold must be finite and non-negative"
+            f"monitoring signals.profiles.{profile} must declare its thresholds; "
+            "a missing profile value is an error, not a fallback"
         )
-    if volume_threshold_config.get("unit") != "absolute relative change":
-        raise MonitoringSignalsError(
-            "volume relative-change threshold unit must be 'absolute relative change'"
-        )
-    if not isinstance(volume_threshold_config.get("rationale"), str) or not volume_threshold_config[
-        "rationale"
-    ].strip():
-        raise MonitoringSignalsError("volume relative-change threshold must state its rationale")
-    if not isinstance(volume_provenance, dict) or volume_provenance.get("kind") != "source":
-        raise MonitoringSignalsError(
-            "volume relative-change threshold must declare source provenance"
-        )
-    volume_provenance_reference = volume_provenance.get("reference")
-    if not isinstance(volume_provenance_reference, str) or not volume_provenance_reference.strip():
-        raise MonitoringSignalsError(
-            "volume relative-change threshold must declare its provenance source"
-        )
+    threshold, provenance_reference = _read_threshold(
+        active.get("psi_threshold"),
+        path=f"signals.profiles.{profile}.psi_threshold",
+        unit="PSI",
+    )
+    volume_threshold, volume_provenance_reference = _read_threshold(
+        active.get("volume_relative_change_threshold"),
+        path=f"signals.profiles.{profile}.volume_relative_change_threshold",
+        unit="absolute relative change",
+    )
 
     daily_volume = raw.get("daily_volume")
     volume_metric_id = daily_volume.get("metric_id") if isinstance(daily_volume, dict) else None
@@ -262,9 +270,15 @@ def compute_alerts(
     *,
     episode_id: str,
     as_of_time: str,
+    profile: str,
     monitoring_config_path: str | Path = "configs/monitoring.yaml",
 ) -> SignalResult:
     """Create PSI alerts from one episode's P3.1 rows through a requested cutoff.
+
+    ``profile`` selects the thresholds declared under ``signals.profiles`` in the
+    monitoring config. The caller must pass the run's own profile (from its manifest);
+    it is never inferred from data size, and a profile without declared thresholds is
+    refused rather than borrowed from another profile.
 
     Future snapshots are ignored. A row whose available_at differs from its
     as_of_time is refused: a snapshot is readable only at its own cutoff, so a
@@ -276,7 +290,7 @@ def compute_alerts(
     if not isinstance(daily_metrics, (list, tuple)):
         raise MonitoringSignalsError("daily_metrics must be P3.1 rows in a list or tuple")
     cutoff = _parse_as_of(as_of_time, field="as_of_time")
-    config = _load_signal_config(monitoring_config_path)
+    config = _load_signal_config(monitoring_config_path, profile=profile)
 
     current_rows: list[dict[str, Any]] = []
     future_count = 0

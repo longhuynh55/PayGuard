@@ -17,7 +17,12 @@ from monitoring.incidents import (
     write_incidents_csv,
 )
 from monitoring.metrics import compute_daily_metrics, write_metrics_csv
-from monitoring.signals import ALERT_COLUMNS, compute_alerts, write_alerts_csv
+from monitoring.signals import (
+    ALERT_COLUMNS,
+    SIGNAL_PROFILES,
+    compute_alerts,
+    write_alerts_csv,
+)
 from monitoring.store import persist_monitoring_rows
 
 
@@ -38,6 +43,12 @@ def _parser() -> argparse.ArgumentParser:
     signals_parser.add_argument("--simulator-config", default="configs/simulator.yaml")
     signals_parser.add_argument("--monitoring-config", default="configs/monitoring.yaml")
     signals_parser.add_argument("--episode-id", required=True)
+    signals_parser.add_argument(
+        "--profile",
+        required=True,
+        choices=SIGNAL_PROFILES,
+        help="the run's profile; selects its declared signal thresholds, never inferred",
+    )
     signals_parser.add_argument(
         "--as-of-time",
         required=True,
@@ -146,6 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rows,
             episode_id=args.episode_id,
             as_of_time=args.as_of_time,
+            profile=args.profile,
             monitoring_config_path=args.monitoring_config,
         )
         with _operational_connection(args.operational_db) as operational:
