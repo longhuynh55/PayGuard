@@ -260,7 +260,8 @@ def _declared_thresholds(profile: str) -> tuple[float, float]:
 
 
 def test_pilot_profile_applies_its_own_thresholds_with_strict_comparison() -> None:
-    psi_threshold, volume_threshold = _declared_thresholds("pilot")
+    # Pinned like the smoke thresholds: the declared pilot values and the alerts they produce.
+    assert _declared_thresholds("pilot") == (0.01, 0.21)
     volume_reference = json.dumps(
         {
             "baseline_window": "2025-11-01/2026-01-31",
@@ -271,20 +272,20 @@ def test_pilot_profile_applies_its_own_thresholds_with_strict_comparison() -> No
         separators=(",", ":"),
     )
     rows = [
-        _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=psi_threshold),
-        _metric_row(as_of_time="2026-02-11T16:59:59.999999Z", value=psi_threshold + 1e-6),
+        _metric_row(as_of_time="2026-02-10T16:59:59.999999Z", value=0.01),
+        _metric_row(as_of_time="2026-02-11T16:59:59.999999Z", value=0.010001),
         _metric_row(
             metric_id="volume.txn_count",
             feature="txn_count",
             as_of_time="2026-02-10T16:59:59.999999Z",
-            value=volume_threshold,
+            value=0.21,
             reference_window=volume_reference,
         ),
         _metric_row(
             metric_id="volume.txn_count",
             feature="txn_count",
             as_of_time="2026-02-11T16:59:59.999999Z",
-            value=volume_threshold + 1e-6,
+            value=0.210001,
             reference_window=volume_reference,
         ),
     ]
@@ -296,9 +297,10 @@ def test_pilot_profile_applies_its_own_thresholds_with_strict_comparison() -> No
         profile="pilot",
     )
 
-    assert sorted((alert["metric"], alert["threshold"]) for alert in result.alerts) == sorted(
-        [("psi.amount_avg_7d", psi_threshold), ("volume.txn_count", volume_threshold)]
-    )
+    assert sorted((alert["metric"], alert["threshold"]) for alert in result.alerts) == [
+        ("psi.amount_avg_7d", 0.01),
+        ("volume.txn_count", 0.21),
+    ]
     assert all(alert["as_of_time"] == "2026-02-11T16:59:59.999999Z" for alert in result.alerts)
 
 
