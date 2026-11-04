@@ -38,8 +38,9 @@ PayGuard is a **test bench** for this problem. It answers one question with numb
 
 > [!NOTE]
 > **Status (November 2026): work in progress, no benchmark results yet.** The full pipeline runs
-> end to end on 60 test worlds. The first development run showed that monitoring is not yet
-> sensitive enough; a fix is approved and in progress. See [Status](#status-and-honest-findings).
+> end to end on 60 test worlds. After a scale fix, monitoring now catches 7 of 10 hidden causes on
+> development episodes (was 1 of 10). The agent itself has not been run with a real LLM at scale yet.
+> See [Status](#status-and-honest-findings).
 
 ## How it works
 
@@ -138,24 +139,33 @@ Outside the harness, commands that read the hidden truth only accept development
 **What works.** `payguard run --profile pilot` finishes on all 60 episodes with the rule-only and
 fake-agent policies. Calibration and test episodes have **not** been looked at yet.
 
-**What the first development run showed** (12 development episodes with 10 hidden incidents;
-[notes](docs/p5-implementation.md), Vietnamese):
+**Development results so far** (12 development episodes with 10 hidden causes;
+[notes](docs/p5-implementation.md), Vietnamese). These are in-sample numbers on the episodes used
+for tuning, not benchmark results:
 
-- Monitoring caught **1 of the 10** hidden causes. All 22 alerts came from the one data-pipeline
-  episode. They became 22 incidents because each closed incident plus a new alert the next day
-  opens a follow-up ("child") incident. That is the documented rule, so it is a workload issue,
-  not a bug. Fraud surge, seasonal, new fraud and legitimate business spike raised no alerts.
-- The cause is a **scale mismatch**. Incident sizes and alert thresholds were tuned on the small
-  smoke world (about 4 payments a day), but the pilot has about 174 a day. A fraud surge of
-  9 payments is about 5% of a pilot day; the volume threshold is about 21 times the normal noise;
-  and the public calendar promised a much bigger seasonal effect than the one injected.
+| Run | Hidden causes caught | Needing action caught | Alerts / incidents | Incidents reaching the agent |
+|---|---|---|---|---|
+| First run (03/11) | 1 of 10 | 1 of 6 | 22 / 22, all in one episode | 22 |
+| After scale fix (04/11) | 7 of 10 | 5 of 6 | 45 / 45, in 6 episodes | 43 |
+
+- **Why the first run failed: scale mismatch.** Incident sizes and alert thresholds were tuned on
+  the small smoke world (about 4 payments a day), but the pilot has about 174 a day. A fraud surge
+  of 9 payments was about 5% of a pilot day, and the public calendar promised a much bigger
+  seasonal effect than the one injected.
+- **The fix.** Injected volume effects are now relative to each world's normal volume (seasonal
+  +100% on its channel, fraud surge +50% of a day), the calendar states the real effect, and
+  thresholds are set per profile on clean development episodes only (pilot: volume 0.21, PSI 0.01).
+  The locked episode list did not change. The 4 clean development episodes raised no alerts.
+- **Still missed:** `new_fraud` (needs receiver-side signals), one single-cause seasonal episode,
+  and the legitimate business spike (its injection was left unscaled on purpose). Short fraud
+  bursts and receiver signals are left for monitoring round 2 and reported as negative results.
+- **Known risk:** the pilot PSI threshold sits only about 2% above the largest clean value seen,
+  so held-out clean episodes may raise some false alarms. This will be measured, not tuned away.
 - The only checklist allowed to close harmless incidents (`seasonal_calendar`) is not built yet.
 
-**Next steps (approved):** make injected volume effects relative to each world's normal volume,
-make the calendar match the real effect, regenerate the data with the same locked episode list,
-then re-tune thresholds per profile on clean development episodes only. Short fraud bursts and
-receiver-side signals for new fraud are left for monitoring round 2 and will be reported as
-negative results. Decisions are logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
+**Next steps:** a tiny real-LLM cost check on 1–2 incidents (needs approval), agent round 2
+(SQL fixes, `seasonal_calendar` checklist), a report shell, then lock prompts and rules before
+calibration and test. Decisions are logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
 
 ## A worked example
 
