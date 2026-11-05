@@ -6,6 +6,7 @@ import argparse
 import sys
 from typing import Sequence
 
+from payguard.forecast import forecast_pilot_cost
 from payguard.harness import BENCHMARK_COST_CAP_USD, HARNESS_PROFILES, HarnessError, run_benchmark
 from payguard.identity import (
     LOCK_PROFILE_CHOICES,
@@ -42,6 +43,14 @@ def _parser() -> argparse.ArgumentParser:
     policy_lock.add_argument("--out", required=True, help="benchmark root")
     policy_lock.add_argument("--policy", choices=tuple(POLICY_PROVIDERS), required=True)
     policy_lock.add_argument("--profile", choices=tuple(sorted(LOCK_PROFILE_CHOICES)), default="smoke")
+
+    forecast_parser = subparsers.add_parser(
+        "forecast-cost",
+        help="project pilot-60 agent cost from development-only reports (no LLM call)",
+    )
+    forecast_parser.add_argument("--support", required=True, help="P5.0b development_support.json")
+    forecast_parser.add_argument("--measure", required=True, help="development triage measure.json")
+    forecast_parser.add_argument("--out", required=True, help="output forecast JSON")
     return parser
 
 
@@ -60,6 +69,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             if getattr(args, "policy", None):
                 print(f"policy={args.policy}")
             print(f"lock={lock_path}")
+            return 0
+
+        if args.command == "forecast-cost":
+            forecast = forecast_pilot_cost(
+                support_path=args.support,
+                measure_path=args.measure,
+                out_path=args.out,
+            )
+            print(f"forecast={args.out}")
+            print(f"label={forecast['label']}")
+            print(f"cap_usd={forecast['cap_usd']:.2f}")
+            print(f"pilot_episode_count={forecast['pilot_episode_count']}")
+            print(f"projected_agent_incidents_pilot={forecast['projected_agent_incidents_pilot']}")
+            for name, branch in forecast["branches"].items():
+                print(
+                    f"branch={name} usd_optimistic={branch['usd']['optimistic']} "
+                    f"usd_pessimistic={branch['usd']['pessimistic']} "
+                    f"within_cap_optimistic={branch['within_cap']['optimistic']} "
+                    f"within_cap_pessimistic={branch['within_cap']['pessimistic']}"
+                )
+            print(f"pending_decisions={','.join(forecast['pending_decisions']) or 'none'}")
             return 0
 
         report = run_benchmark(

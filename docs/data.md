@@ -484,3 +484,24 @@ Mỗi phần tử `truth_counts.by_episode` gồm `episode_id`, `unique_truths`,
 `interpretation.seasonal_calendar_checklist_available` là FALSE ở runtime vòng 1; `seasonal_calendar_checklist_availability_reason` ghi lý do: runtime chỉ có checklist `unit_or_null_change`. Vì vậy các số 0 về eligibility/conditions ở các run không có checklist mùa vụ là số đếm trên quyết định đã lưu, không phải bằng chứng rằng development không có ca hỗ trợ checklist.
 
 `background_workload` gồm `unmatched_incidents`, `unmatched_incident_ids`, `unmatched_alerts`, `unmatched_alert_ids`, `alerts_in_unmatched_incidents`, `unassigned_alerts`, `all_development_alerts`. Các danh sách ID được sắp xếp; số alert unmatched là hợp của alert ID trong snapshot cuối của incident unmatched và alert không xuất hiện trong snapshot incident nào.
+
+## 11. Báo cáo dự báo chi phí P5.0d (DEV-FORECAST)
+
+Lệnh `python -m payguard forecast-cost --support <development_support.json> --measure <measure.json> --out <json>` ghi báo cáo từ hai file development; cách chạy, kiểm tra đầu vào và trạng thái nằm ở [p5-implementation.md](p5-implementation.md), P5.0d. Lệnh không gọi LLM, chỉ đọc hai file đầu vào, `configs/benchmark.yaml` và `configs/episodes.yaml`.
+
+JSON dùng `schema_version = 1`, `report_type = "p5_0d_pilot_cost_forecast"`, `purpose = "pilot_60_cost_feasibility"`, `episode_role = "development"` và `label = "feasibility estimate, not a benchmark result"`. Khóa JSON được sắp xếp, số USD làm tròn 12 chữ số thập phân; cùng input cho cùng bytes.
+
+| Trường top-level | Kiểu / ý nghĩa |
+|---|---|
+| `cap_usd` | `REAL`, trần benchmark từ `benchmark.cost_cap_usd`. |
+| `pilot_episode_count` | Tổng số episode của profile `pilot` trong `configs/episodes.yaml`. |
+| `development_episode_count`, `agent_incidents_development` | Số episode development trong support (phải bằng phân bổ development của `pilot`) và `agent_support.incidents_reaching_agent`. |
+| `agent_incidents_per_development_episode`, `projected_agent_incidents_pilot` | Tỉ lệ incident tới agent trên mỗi episode development và số incident dự báo cho pilot. |
+| `clean_episode_share` | Tỉ lệ episode clean ở development và ở pilot, đọc từ config. |
+| `measured` | Provider, model, episode đo, số incident và lời gọi, cùng USD tổng, trung bình và max mỗi incident và mỗi lời gọi. |
+| `branches` | `rule`, `agent_k<K>` và `full_design`; mỗi nhánh có `usd.optimistic`, `usd.pessimistic`, `within_cap.optimistic`, `within_cap.pessimistic`. Nhánh `agent_k<K>` có thêm `k`; nhánh `full_design` có thêm `calls_per_agent_incident`. Tỉ số incident theo episode (`agent_incidents_per_development_episode`, `projected_agent_incidents_pilot`) được làm tròn 6 chữ số thập phân. Giá trị `null` nghĩa là còn chờ quyết định. Vượt trần chỉ bị gắn `within_cap = false`; số không bị đổi. |
+| `pending_decisions` | Quyết định còn chờ: `pessimistic_safety_factor` (chỉ khi config còn `null`). Hiện rỗng. `full_design` không có khoảng (bi quan = lạc quan, quyết định người dùng 05/11/2026). |
+| `assumptions` | Giả định tường minh, gồm việc episode held-out có thể có số incident khác development. |
+| `inputs` | SHA-256 của file support và measure. |
+
+Tham số trong `configs/benchmark.yaml`, khóa `benchmark.forecast`: `design_calls_per_agent_incident` = 60 (provenance MASTER mục 5); `agent_k_values` = [1, 3]; `pessimistic_safety_factor` = 3 với provenance `assumption` (quyết định người dùng 05/11/2026). Khi có giá trị, hệ số phải là số hữu hạn ≥ 1 và provenance không được là `pending_decision`; sai một trong hai điều kiện thì loader từ chối. Nếu config đặt `null`, provenance phải là `pending_decision`.

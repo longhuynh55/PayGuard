@@ -117,7 +117,7 @@ uv run python -m model      {train,score,evaluate}
 uv run python -m monitoring {metrics,signals,incidents}
 uv run python -m triage     {run,measure}
 uv run python -m evaluation {decisions,support}
-uv run python -m payguard   {run,lock}        # lock {prompt-rule,policy}
+uv run python -m payguard   {run,lock,forecast-cost}  # lock {prompt-rule,policy}; forecast-cost: docs/p5-implementation.md, P5.0d
 ```
 
 Outside the harness, commands that read the hidden truth only accept development episodes.
