@@ -11,36 +11,65 @@
 
 </div>
 
-## The problem
+## Why this matters
 
-A payment company runs a fraud model. A monitoring system watches it and raises an **alert**
-when the data starts to look different. Most of these alerts are harmless: a holiday, a
-promotion, a big new merchant. A few are real: a fraud wave, or a broken data pipeline.
+Fraud labels (chargebacks, reports) arrive **30–90 days late**, so a fraud model is watched by
+drift monitoring instead. Most drift alerts are harmless (a holiday, a promotion), a few are real
+(a fraud wave, a broken pipeline), and each one costs an analyst hours. Teams get *alert fatigue*
+and miss the real ones. **PayGuard measures whether an LLM agent can triage these alerts safely,
+and at what cost, compared with plain rules.**
 
-To tell them apart, an analyst spends hours on each alert. They cannot simply check the fraud
-labels, because those arrive **30–90 days later** (chargebacks and reports take time). So teams
-get tired of alerts, start to ignore them, and miss the real ones. This is called *alert fatigue*.
+## Highlights
 
-## What PayGuard does
-
-PayGuard is a **test bench** for this problem. It answers one question with numbers:
-
-> Does "rules + an AI investigation agent" handle drift alerts better than rules alone? For which
-> kinds of incidents, and at what cost?
-
-1. It **builds a fake payment world** where we secretly know the true cause of every problem.
-2. It **runs a real pipeline** on that world: fraud model → monitoring → alerts.
-3. It **sorts each alert** with code-based checklists first, then an AI agent for the rest. Each
-   alert ends in one action: close it, check again later, open a data ticket, send it to the
-   fraud team, or send it to a human.
-4. A separate **referee** (the evaluator), the only part that can see the secret answers, counts
-   right and wrong decisions, including real problems that were wrongly closed or never raised.
+- **Built an end-to-end benchmark** in one command: a synthetic payment simulator with hidden
+  truth (60 "parallel world" episodes) → LightGBM fraud model → drift monitoring → rules + an LLM
+  agent with a read-only SQL tool → an isolated evaluator.
+- **Designed leakage-proof evaluation:** every read is "as of" decision time, the truth lives in a
+  separate database only the evaluator opens, episodes are locked 12 / 24 / 24
+  (development / calibration / test) before tuning, and `evidence_status` is computed by code,
+  never by the LLM.
+- **Diagnosed and fixed a scale mismatch:** on development episodes, monitoring went from catching
+  **1 of 10** hidden causes to **7 of 10**, with **0 alerts** on the clean episodes.
+- **Built a durable cost ledger** with a hard **10 USD** cap for the whole benchmark. First real
+  LLM run: **0.000688 USD for 2 incidents** (about 0.0003 USD each; one-step agent, tiny sample).
+- **Ran a multi-agent development workflow:** Claude Opus as orchestrator and reviewer,
+  Codex and Claude Haiku as implementers in separate git worktrees; **477 tests**.
 
 > [!NOTE]
-> **Status (November 2026): work in progress, no benchmark results yet.** The full pipeline runs
-> end to end on 60 test worlds. After a scale fix, monitoring now catches 7 of 10 hidden causes on
-> development episodes (was 1 of 10). The agent itself has not been run with a real LLM at scale yet.
-> See [Status](#status-and-honest-findings).
+> **Status (November 2026): research work in progress, no benchmark results yet.** All numbers
+> below are **in-sample, on development episodes** used for tuning. Calibration and test episodes
+> have not been looked at.
+
+## Results so far
+
+Development only: 12 episodes with 10 hidden causes, 6 of which need action
+([notes](docs/p5-implementation.md), Vietnamese).
+
+| Run | Hidden causes caught | Needing action caught | Alerts / incidents | Incidents reaching the agent |
+|---|---|---|---|---|
+| First run (03/11) | 1 of 10 | 1 of 6 | 22 / 22, all in one episode | 22 |
+| After scale fix (04/11) | 7 of 10 | 5 of 6 | 45 / 45, in 6 episodes | 43 |
+
+**Real LLM cost check (04/11):** current one-step agent on 2 development incidents, 4 calls to
+`qwen/qwen3.7-flash` via OpenRouter, **0.000688 USD in total**. Both generated SQL queries failed
+(`sql_execution_error`), so these tokens do not yet reflect a successful investigation; the fix is
+planned for agent round 2.
+
+- **Why the first run failed: scale mismatch.** Incident sizes and thresholds were tuned on the
+  small smoke world (about 4 payments a day), but the pilot has about 174 a day. A fraud surge of
+  9 payments was about 5% of a pilot day.
+- **The fix.** Injected volume effects are now relative to each world's normal volume (seasonal
+  +100% on its channel, fraud surge +50% of a day), the public calendar states the real effect,
+  and thresholds are set per profile on clean development episodes only (pilot: volume 0.21,
+  PSI 0.01). The locked episode list did not change. The 4 clean development episodes raised no
+  alerts.
+- **Still missed:** `new_fraud` (needs receiver-side signals), one single-cause seasonal episode,
+  and the legitimate business spike (its injection was left unscaled on purpose). These stay as
+  negative results for monitoring round 2.
+- **Known risk:** the pilot PSI threshold is only about 2% above the largest clean value seen, so
+  held-out clean episodes may raise false alarms. This will be measured, not tuned away.
+- The only checklist allowed to close harmless incidents (`seasonal_calendar`) is not built yet,
+  so today nothing can be auto-closed.
 
 ## How it works
 
@@ -58,43 +87,40 @@ flowchart LR
 
 | Step | Folder | In plain words |
 |---|---|---|
-| 1. Simulator | `simulator/` | Makes payments (QR, e-wallet, card, bank transfer), fraud patterns, late labels, and a public holiday/promotion calendar. Creates many "parallel worlds" (episodes; 60 in the pilot); each hides 0–2 incidents. |
-| 2. Fraud model | `model/` | A standard fraud classifier (LightGBM). Payments it is unsure about go to review. |
-| 3. Monitoring | `monitoring/` | Checks daily statistics. When something changes too much, it raises an alert and groups related alerts into one **incident**. |
-| 4. Triage | `triage/` | Code checklists ("runbooks") handle known cases. The AI agent investigates the rest with one read-only SQL tool. A code **gate** decides if the proposed action is allowed. |
+| 1. Simulator | `simulator/` | Payments (QR, e-wallet, card, bank transfer), fraud patterns, late labels and a public holiday/promotion calendar. Each episode hides 0–2 incidents. |
+| 2. Fraud model | `model/` | A LightGBM fraud classifier. Payments it is unsure about go to review. |
+| 3. Monitoring | `monitoring/` | Checks daily statistics, raises **alerts**, and groups related alerts into one **incident**. |
+| 4. Triage | `triage/` | Code checklists ("runbooks") handle known cases; the AI agent investigates the rest with one read-only SQL tool. A code **gate** decides if the proposed action is allowed. |
 | 5. Evaluator | `evaluation/` | Matches each incident to the hidden truth and scores every decision. |
 | Harness | `payguard/` | Runs steps 1–5 with one command, on a fresh copy of the data. |
 
-**The key safety idea:** the agent may never see the future or the answers. Every tool reads
-only data that was available at decision time, and the secret answers live in a separate
-database that only the evaluator opens. More in [How the test is kept fair](#how-the-test-is-kept-fair).
+Each incident ends in one action: close it, check again later, open a data ticket, send it to the
+fraud team, or send it to a human. The evaluator also counts real problems that were wrongly
+closed or never raised.
 
 ## Quickstart
 
-You need Python 3.12 and [uv](https://docs.astral.sh/uv/). No API key is needed.
+You need Python 3.12 and [uv](https://docs.astral.sh/uv/). **No API key, no network calls.**
 
 ```bash
 uv sync
 
-# 1. Generate and check the small "smoke" world (5 episodes)
+# 1. Generate and validate the small "smoke" world (5 episodes, a few seconds)
 uv run python -m simulator generate --profile smoke --out data/p1-smoke
 uv run python -m simulator validate --run data/p1-smoke
 
-# 2. Run the whole pipeline with a fake, offline agent (no network calls).
-#    The state folder (cost ledger, locks) must be outside --out;
-#    by default it is ~/.payguard-benchmark.
+# 2. Run the whole pipeline with a fake, offline agent (about 15 seconds).
+#    The state folder (cost ledger, locks) must be outside --out.
 export PAYGUARD_BENCHMARK_STATE_DIR="$(mktemp -d)"
 uv run python -m payguard run --profile smoke --policy rule_agent_fake --out data/bench-smoke
-
-# 3. Tests (the full suite takes several minutes)
-uv run pytest -q
 ```
 
-Step 2 builds its own data under `--out`, trains the model, runs monitoring and triage, and
-writes the evaluator report to `<out>/base/private/reports/p5_1/<policy>/decisions.json`.
-It only scores **development** episodes by default. In the smoke world the only development
-episode is a clean one with no alerts, so expect `decisions=0` and empty metrics (shown as
-`null`). For a real workload use `--profile pilot` (60 episodes, about an hour).
+Step 1 ends with `Validation summary: 21 passed, 0 failed`. Step 2 prints the run fingerprints,
+`decisions=0` and the path of the evaluator report
+(`<out>/base/private/reports/p5_1/<policy>/decisions.json`). Zero is expected: only development
+episodes are scored, and smoke's only development episode is clean with no alerts, so every rate
+is `null` (no denominator), never `0%`. For a real workload use `--profile pilot` (60 episodes,
+about an hour). Tests: `uv run pytest -q` (several minutes).
 
 <details>
 <summary>Policies, single-step commands and the optional real LLM</summary>
@@ -106,8 +132,9 @@ episode is a clean one with no alerts, so expect `decisions=0` and empty metrics
 | `rule_agent_openrouter_k1` | checklists + a real LLM agent, one attempt; **optional**, needs an API key |
 
 The real-LLM policy reads `OPENROUTER_API_KEY` from the environment or from a `.env` file at the
-repository root (git-ignored; never commit it). Every call is booked in a cost ledger before it
-is sent, and the run stops at the configured spending cap.
+repository root (git-ignored; never commit it). Every call is booked in the cost ledger before it
+is sent, and the run stops at the spending cap. The state folder defaults to
+`~/.payguard-benchmark`.
 
 Each step can also run on its own (`--help` lists the options):
 
@@ -124,62 +151,24 @@ Outside the harness, commands that read the hidden truth only accept development
 
 </details>
 
-## Status and honest findings
+## How the test is kept fair
 
-| Stage | Scope | Status |
+| Rule | How it is enforced | Why it matters |
 |---|---|---|
-| P0 | Research and test design | done |
-| P1 | Simulator, incidents, 60-episode pilot | done (round 2) |
-| P2 | Fraud model | round 1 done |
-| P3 | Monitoring | round 1 done |
-| P4 | Checklists, gate, SQL tool, agent | round 1 done; round 2 (all checklists, full agent) pending |
-| P5 | Harness, evaluator, cost ledger | runs on the pilot; result tables pending |
-| P6 | API, dashboard, Docker, CI, demo | not started |
-
-**What works.** `payguard run --profile pilot` finishes on all 60 episodes with the rule-only and
-fake-agent policies. Calibration and test episodes have **not** been looked at yet.
-
-**Development results so far** (12 development episodes with 10 hidden causes;
-[notes](docs/p5-implementation.md), Vietnamese). These are in-sample numbers on the episodes used
-for tuning, not benchmark results:
-
-| Run | Hidden causes caught | Needing action caught | Alerts / incidents | Incidents reaching the agent |
-|---|---|---|---|---|
-| First run (03/11) | 1 of 10 | 1 of 6 | 22 / 22, all in one episode | 22 |
-| After scale fix (04/11) | 7 of 10 | 5 of 6 | 45 / 45, in 6 episodes | 43 |
-
-- **Why the first run failed: scale mismatch.** Incident sizes and alert thresholds were tuned on
-  the small smoke world (about 4 payments a day), but the pilot has about 174 a day. A fraud surge
-  of 9 payments was about 5% of a pilot day, and the public calendar promised a much bigger
-  seasonal effect than the one injected.
-- **The fix.** Injected volume effects are now relative to each world's normal volume (seasonal
-  +100% on its channel, fraud surge +50% of a day), the calendar states the real effect, and
-  thresholds are set per profile on clean development episodes only (pilot: volume 0.21, PSI 0.01).
-  The locked episode list did not change. The 4 clean development episodes raised no alerts.
-- **Still missed:** `new_fraud` (needs receiver-side signals), one single-cause seasonal episode,
-  and the legitimate business spike (its injection was left unscaled on purpose). Short fraud
-  bursts and receiver signals are left for monitoring round 2 and reported as negative results.
-- **Known risk:** the pilot PSI threshold sits only about 2% above the largest clean value seen,
-  so held-out clean episodes may raise some false alarms. This will be measured, not tuned away.
-- The only checklist allowed to close harmless incidents (`seasonal_calendar`) is not built yet.
-
-**Next steps:** a tiny real-LLM cost check on 1–2 incidents (needs approval), agent round 2
-(SQL fixes, `seasonal_calendar` checklist), a report shell, then lock prompts and rules before
-calibration and test. Decisions are logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
+| **No peeking at the future** | Every read is "as of" a time: only rows with `available_at <= as_of_time` in the same episode. Tests check that adding later data never changes an earlier answer. | A decision cannot use information it would not have had. |
+| **Answers are hidden** | Truth lives in a separate private database; only the evaluator opens it. | The agent cannot look up the answer. |
+| **Unknown is not "legit"** | Labels have four states; `pending` is never counted as a legitimate payment. | Late fraud is not silently counted as clean. |
+| **Locked split** | Episodes are split 12 development / 24 calibration / 24 test before any tuning. | The split cannot be reshuffled to look better. |
+| **No tuning on test** | Rules and prompts are tuned on development, close permissions on calibration; test runs once. | Reported numbers are out-of-sample. |
+| **Tamper checks** | Runs are keyed by content hashes of code, configs, prompts and model files; held-out runs need a matching lock. | A change after the lock is detected and refused. |
+| **Evidence by code** | `evidence_status` comes from checklist code, not from the LLM. | The model cannot talk its way into closing an alert. |
 
 ## A worked example
 
-This follows one incident from alert to score.
-
-**What the smoke run gives.** We ran the Quickstart commands. The smoke world has one
-development episode, `ep-0001`, and it is *clean* (no hidden incident). Monitoring raised
-**0 alerts** there, so there were **0 incidents** and **0 decisions**. The evaluator report has
-`truth_counts.total = 0` and every rate is `null` (no denominator), never `0%`. That is the
-correct result for a clean world, but it gives nothing to trace. Smoke alerts exist only in
-calibration and test episodes, which are off limits for tuning and examples.
-
-So the trace below uses the **real field names and rules** from the code and
-[docs/data.md](docs/data.md), with **illustrative values** (not measured).
+This follows one incident from alert to score. The smoke run above gives 0 incidents on its only
+development episode, and alerts in other episodes are off limits for examples, so the trace uses
+the **real field names and rules** from the code and [docs/data.md](docs/data.md) with
+**illustrative values** (not measured).
 
 ```mermaid
 sequenceDiagram
@@ -208,49 +197,35 @@ sequenceDiagram
    `accepted_actions = ["data_ticket", "human_review"]`, and a `deadline_at` 7 days after the
    effect is first visible.
 2. **Alert.** The daily job compares this week's `amount_avg_7d` distribution with the
-   reference period. PSI goes above 0.25, so it writes an `alerts` row: `metric`, `feature`,
-   `segment`, `value`, `reference`, `threshold`, `as_of_time`.
+   reference period. PSI goes above the threshold, so it writes an `alerts` row: `metric`,
+   `feature`, `segment`, `value`, `reference`, `threshold`, `as_of_time`.
 3. **Incident.** No incident on that feature and segment is open, so a new `incidents` row is
    created with `alert_ids_json = [<alert_id>]`. Later alerts within 2 days join it.
 4. **Checklist.** `unit_or_null_change` compares the median amount before and after the change.
-   A ratio within ×/÷2 of 100 (also of 1/100 or 1000) counts as a unit change. Both days need at least
-   `n_min = 2` payments. A separate `fraud_signal` check looks for fraud-side signals in the same
-   segment. Each result has `status`, `reason`, `scope_match`, `window_complete`,
-   `requires_human_review` and `details`.
+   A ratio within ×/÷2 of 100 (also of 1/100 or 1000) counts as a unit change. Both days need at
+   least `n_min = 2` payments. A separate `fraud_signal` check looks for fraud-side signals in the
+   same segment.
 5. **Proposal.** The checklist passed, so the rule proposes
-   `{cause: data_pipeline, runbook: unit_or_null_change, action: data_ticket}`. If it had not
-   passed, the agent would run one `run_sql` query on a past-only snapshot and return a JSON
-   proposal with `cause`, `action`, `reason` (and maybe `runbook`). The fake agent always returns
+   `{cause: data_pipeline, runbook: unit_or_null_change, action: data_ticket}`. Otherwise the
+   agent would run one `run_sql` query on a past-only snapshot and return a JSON proposal with
+   `cause`, `action`, `reason`. The fake agent always returns
    `{cause: other, runbook: null, action: human_review}`.
 6. **Gate.** Code, not the LLM, sets `evidence_status = sufficient`. The `data_ticket` branch
-   needs a passed unit check and no fraud conflict; it does not need a benign verdict or a
-   confidence score. A `decisions` row is written with `decision_at = as_of_time`, the
-   checklist results, `tool_trace_ids_json`, `policy_version` and token cost.
+   needs a passed unit check and no fraud conflict. A `decisions` row is written with
+   `decision_at = as_of_time`, the checklist results, `tool_trace_ids_json`, `policy_version` and
+   token cost.
 7. **Score.** The evaluator matches the incident to the truth by time, segment and feature
    (`matched`). The action is in `accepted_actions` and
    `intervention_start_at <= decision_at <= deadline_at`, so it counts for **timely routing
-   recall**. Had the incident been closed, it would count as an **unsafe closure** of that
-   truth.
+   recall**. Had the incident been closed, it would count as an **unsafe closure** of that truth.
 
 </details>
-
-## How the test is kept fair
-
-| Rule | How it is enforced | Why it matters |
-|---|---|---|
-| **No peeking at the future** | Every read is "as of" a time: only rows with `available_at <= as_of_time` in the same episode. Tests check that adding later data never changes an earlier answer. | A decision cannot use information it would not have had. |
-| **Answers are hidden** | Truth lives in a separate private database; only the evaluator opens it. | The agent cannot look up the answer. |
-| **Unknown is not "legit"** | Labels have four states; `pending` is never counted as a legitimate payment. | Late fraud is not silently counted as clean. |
-| **Locked split** | Episodes are split 12 development / 24 calibration / 24 test before any tuning. | The split cannot be reshuffled to look better. |
-| **No tuning on test** | Rules and prompts are tuned on development, close permissions on calibration; test runs once. | Reported numbers are out-of-sample. |
-| **Tamper checks** | Runs are keyed by content hashes of code, configs, prompts and model files; held-out runs need a matching lock. | A change after the lock is detected and refused. |
-| **Evidence by code** | `evidence_status` comes from checklist code, not from the LLM. | The model cannot talk its way into closing an alert. |
 
 ## Design decisions
 
 | Decision | Rejected alternative | Why |
 |---|---|---|
-| Rules first, agent second; "rules + human" is the main baseline | Agent-first triage | The goal is to measure honestly where an agent adds value over rules, not to assume it does. |
+| Rules first, agent second; "rules + human" is the main baseline | Agent-first triage | Measure honestly where an agent adds value over rules, instead of assuming it does. |
 | Synthetic world with injected incidents | Public fraud datasets only | Only a simulator gives the exact cause, start time and deadline of every incident. |
 | Unlabeled (`pending`) payments are not negatives | Treat "no report yet" as legit | Labels arrive late; counting them as legit hides recent fraud. |
 | Score each decision with the truth known at its `decision_at` | Score with the final labels | A correct early close would be punished for fraud that only started later. |
@@ -302,7 +277,7 @@ per group. Source: [data.md §4](docs/data.md#4-episode--thế-giới-song-song)
 | Stage | Implemented now |
 |---|---|
 | Metrics | PSI with 2 quantile bins on `txn_count_24h` and `amount_avg_7d` (7-day window); daily volume against a reference median; model review rate (computed, no signal yet) |
-| Signals | PSI > 0.25; volume residual against the calendar's expected change > 4.25 |
+| Signals | Thresholds per profile: smoke PSI > 0.25 and volume residual > 4.25; pilot PSI 0.01 and volume 0.21, set on clean development episodes |
 | Incidents | Alerts on the same feature/segment within 2 days of an open incident are merged; after a final decision they open a child incident |
 
 KS tests, Benjamini–Hochberg and CBPE are designed but not built yet. Values:
@@ -336,7 +311,8 @@ runbook; anything uncertain goes to a human.
 
 </details>
 
-## Glossary
+<details>
+<summary><b>Glossary</b></summary>
 
 | Term | Meaning |
 |---|---|
@@ -353,15 +329,36 @@ runbook; anything uncertain goes to a human.
 | **Self-consistency K/N** | Run the agent's investigation K times and each SQL query N times; agreement between runs is the confidence score. |
 | **PSI** | Population Stability Index: a number for how much a distribution changed compared with a reference period. |
 
+</details>
+
+## Status and roadmap
+
+| Stage | Scope | Status |
+|---|---|---|
+| P0 | Research and test design | done |
+| P1 | Simulator, incidents, 60-episode pilot | done (round 2) |
+| P2 | Fraud model | round 1 done |
+| P3 | Monitoring | round 1 done, thresholds recalibrated per profile |
+| P4 | Checklists, gate, SQL tool, agent | round 1 done; round 2 (SQL fixes, all checklists, full agent) next |
+| P5 | Harness, evaluator, cost ledger | runs on the pilot; first real LLM cost check done; result tables pending |
+| P6 | API, dashboard, Docker, CI, demo | not started |
+
+**Next steps:** a cost forecast for the full pilot from the development numbers, agent round 2
+(SQL fixes, `seasonal_calendar` checklist), a report shell, then lock prompts and rules before
+calibration and test. Decisions are logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
+
 ## Limitations
 
 - **Synthetic data.** It gives exact answers, but conclusions apply to the simulated world, not
   to a real payment network.
 - **Small pilot.** With 60 episodes (about 16 with incidents in test), intervals will be wide and
   per-type comparisons weak. A pilot is never presented as a near-zero-risk guarantee.
+- **In-sample so far.** Every number above comes from development episodes that were also used
+  for tuning.
 - **Narrow close permission.** The agent may close only inside existing benign runbooks. A correct
   "harmless" diagnosis without a runbook still goes to a human.
-- **Monitoring sensitivity.** Not yet good enough at pilot scale (see [Status](#status-and-honest-findings)).
+- **Tiny cost sample.** The real LLM cost comes from 2 incidents with a one-step agent whose SQL
+  failed; the full design makes many more calls per incident.
 - **Not built yet.** Triage round 2, result tables, API, dashboard, Docker demo, CI.
 
 ## Repository layout and docs
@@ -384,8 +381,8 @@ what each file covers. Start with [MASTER_PLAN.md](MASTER_PLAN.md) (status, road
 
 ## Related work
 
-PayGuard combines existing methods; it does not claim a new one. Its aim is to measure honestly
-where an agent helps compared with rules. Annotated list: [docs/rationale.md](docs/rationale.md).
+PayGuard combines existing methods; it does not claim a new one. Annotated list:
+[docs/rationale.md](docs/rationale.md).
 
 | Topic | References | Used for |
 |---|---|---|
