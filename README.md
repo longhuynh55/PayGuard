@@ -33,7 +33,7 @@ and at what cost, compared with plain rules.**
 - **Built a durable cost ledger** with a hard **10 USD** cap for the whole benchmark. First real
   LLM run: **0.000688 USD for 2 incidents** (about 0.0003 USD each; one-step agent, tiny sample).
 - **Ran a multi-agent development workflow:** Claude Opus as orchestrator and reviewer,
-  Codex and Claude Haiku as implementers in separate git worktrees; **477 tests**.
+  Codex and Claude Haiku as implementers in separate git worktrees; **488 tests**.
 
 > [!NOTE]
 > **Status (November 2026): research work in progress, no benchmark results yet.** All numbers
@@ -343,7 +343,11 @@ runbook; anything uncertain goes to a human.
 | P5 | Harness, evaluator, cost ledger | runs on the pilot; first real LLM cost check done; result tables pending |
 | P6 | API, dashboard, Docker, CI, demo | not started |
 
-**Next steps:** a cost forecast for the full pilot from the development numbers, agent round 2
+**Cost forecast (development numbers, `payguard forecast-cost`):** about 215 agent incidents on the
+full pilot; one-step agent 0.07–0.34 USD (K = 1) or 0.22–1.03 USD (K = 3); full ~60-call design
+about 2.2 USD. All within the 10 USD cap; the sample behind it is tiny (2 incidents).
+
+**Next steps:** agent round 2
 (SQL fixes, `seasonal_calendar` checklist), a report shell, then lock prompts and rules before
 calibration and test. Decisions are logged in [MASTER_PLAN.md](MASTER_PLAN.md) (Vietnamese).
 
