@@ -7,3 +7,25 @@ benchmark:
     provenance:
       kind: locked_contract
       reference: MASTER_PLAN.md, section 5.
+  forecast:
+    design_calls_per_agent_incident:
+      value: 60
+      unit: LLM calls per agent incident
+      rationale: Full-design estimate used by forecast-cost; multiplied by the measured mean USD per call.
+      provenance:
+        kind: locked_contract
+        reference: MASTER_PLAN.md, section 5 (about 60 calls per agent incident); docs/p5-implementation.md, P5.0d.
+    agent_k_values:
+      value: [1, 3]
+      unit: agent branches K; K multiplies the per-incident agent cost
+      rationale: K=1 is the measured one-step agent cost; K=3 is an extrapolation (real K=N=3 is deferred to P4c).
+      provenance:
+        kind: assumption
+        reference: docs/p5-implementation.md, P5.0d, DEV-FORECAST bullet.
+    pessimistic_safety_factor:
+      value: 3
+      unit: multiplier applied to the maximum measured USD per agent incident (K=1 pessimistic bound)
+      rationale: Set by user decision 05/11/2026 (orchestrator answers to DEV-FORECAST).
+      provenance:
+        kind: assumption
+        reference: "S=3 = at most 3 triage passes per incident under the locked recheck cap (MASTER §7, 30/10/2026); applied to the max USD/incident from n=2 development incidents (P5.0d). Does not separately model token growth after the SQL fix, price changes or held-out incident counts; on the 05/11/2026 development inputs, K=3 would exceed the 10 USD cap only at S≈29. User decision 05/11/2026."
